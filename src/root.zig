@@ -23,7 +23,13 @@ pub const coretext = @import("text/coretext.zig");
 pub const glyph_atlas = @import("text/atlas.zig");
 pub const text_layout = @import("text/layout.zig");
 
+// 控件
+pub const label = @import("widget/label.zig");
+pub const button = @import("widget/button.zig");
+pub const container = @import("widget/container.zig");
+
 test {
     _ = math;
     _ = pal;
+    _ = layout;
 }

@@ -21,7 +21,11 @@ pub fn build(b: *std.Build) void {
     });
     zigui_mod.addOptions("build_options", options);
 
-    // 平台链接
+    // C include 路径 (ObjC header)
+    zigui_mod.addIncludePath(b.path("src/pal/cocoa"));
+    zigui_mod.addIncludePath(b.path("src/gpu"));
+
+    // 平台链接 + ObjC 源文件
     const os_tag = target.result.os.tag;
     switch (os_tag) {
         .windows => {
@@ -57,6 +61,14 @@ pub fn build(b: *std.Build) void {
             zigui_mod.linkFramework("CoreText", .{});
             zigui_mod.linkFramework("CoreGraphics", .{});
             zigui_mod.linkFramework("CoreFoundation", .{});
+            // ObjC 源文件
+            zigui_mod.addCSourceFiles(.{
+                .files = &.{
+                    "src/pal/cocoa/cocoa_backend.m",
+                    "src/gpu/metal_backend.m",
+                },
+                .flags = &.{ "-fobjc-arc" },
+            });
         },
         else => {},
     }
@@ -75,39 +87,6 @@ pub fn build(b: *std.Build) void {
             }),
         });
         exe.root_module.addImport("zigui", zigui_mod);
-
-        // 示例也需要平台链接
-        switch (os_tag) {
-            .windows => {
-                exe.root_module.linkSystemLibrary("d3d11", .{});
-                exe.root_module.linkSystemLibrary("dxgi", .{});
-                exe.root_module.linkSystemLibrary("user32", .{});
-                exe.root_module.linkSystemLibrary("gdi32", .{});
-                exe.root_module.linkSystemLibrary("ole32", .{});
-            },
-            .linux => {
-                if (enable_x11) {
-                    exe.root_module.linkSystemLibrary("xcb", .{});
-                    exe.root_module.linkSystemLibrary("xcb-xkb", .{});
-                }
-                if (enable_wayland) {
-                    exe.root_module.linkSystemLibrary("wayland-client", .{});
-                }
-                exe.root_module.linkSystemLibrary("vulkan", .{});
-                exe.root_module.linkSystemLibrary("xkbcommon", .{});
-                exe.root_module.linkSystemLibrary("freetype2", .{});
-                exe.root_module.linkSystemLibrary("harfbuzz", .{});
-            },
-            .macos => {
-                exe.root_module.linkFramework("Cocoa", .{});
-                exe.root_module.linkFramework("Metal", .{});
-                exe.root_module.linkFramework("QuartzCore", .{});
-                exe.root_module.linkFramework("CoreText", .{});
-                exe.root_module.linkFramework("CoreGraphics", .{});
-                exe.root_module.linkFramework("CoreFoundation", .{});
-            },
-            else => {},
-        }
 
         b.installArtifact(exe);
 

@@ -61,6 +61,7 @@ pub const KeyCode = enum(u16) {
     @"0", @"1", @"2", @"3", @"4", @"5", @"6", @"7", @"8", @"9",
     // 功能键
     f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12,
+    f13, f14, f15,
     // 控制键
     escape,
     tab,
@@ -108,5 +109,6 @@ pub const KeyCode = enum(u16) {
     kp_divide,
     kp_enter,
     kp_decimal,
+    kp_equal,
     _,
 };

@@ -13,6 +13,11 @@ pub const input = @import("input/event_queue.zig");
 pub const math = @import("math.zig");
 pub const app = @import("app.zig");
 
+// macOS 平台特定导出
+pub const cocoa = @import("pal/cocoa.zig");
+pub const metal = @import("gpu/metal.zig");
+pub const renderer = @import("render2d/renderer.zig");
+
 test {
     _ = math;
     _ = pal;

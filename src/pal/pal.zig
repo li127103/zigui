@@ -93,7 +93,7 @@ pub const Pal = struct {
 };
 
 pub const EventQueue = struct {
-    events: std.ArrayListUnmanaged(Event) = .{},
+    events: std.ArrayListUnmanaged(Event) = .{ .items = &.{}, .capacity = 0 },
     count: usize = 0,
 
     pub fn push(self: *EventQueue, allocator: std.mem.Allocator, ev: Event) !void {

@@ -18,6 +18,11 @@ pub const cocoa = @import("pal/cocoa.zig");
 pub const metal = @import("gpu/metal.zig");
 pub const renderer = @import("render2d/renderer.zig");
 
+// 文本引擎 (macOS CoreText)
+pub const coretext = @import("text/coretext.zig");
+pub const glyph_atlas = @import("text/atlas.zig");
+pub const text_layout = @import("text/layout.zig");
+
 test {
     _ = math;
     _ = pal;

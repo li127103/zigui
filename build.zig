@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) void {
     // C include 路径 (ObjC header)
     zigui_mod.addIncludePath(b.path("src/pal/cocoa"));
     zigui_mod.addIncludePath(b.path("src/gpu"));
+    zigui_mod.addIncludePath(b.path("src/text"));
 
     // 平台链接 + ObjC 源文件
     const os_tag = target.result.os.tag;
@@ -66,6 +67,7 @@ pub fn build(b: *std.Build) void {
                 .files = &.{
                     "src/pal/cocoa/cocoa_backend.m",
                     "src/gpu/metal_backend.m",
+                    "src/text/coretext_backend.m",
                 },
                 .flags = &.{ "-fobjc-arc" },
             });

@@ -6,6 +6,8 @@ const pal = @import("pal/pal.zig");
 const cocoa = @import("pal/cocoa.zig");
 const metal = @import("gpu/metal.zig");
 const renderer2d = @import("render2d/renderer.zig");
+const atlas_mod = @import("text/atlas.zig");
+const coretext = @import("text/coretext.zig");
 
 pub const AppConfig = struct {
     title: []const u8 = "zigui app",
@@ -19,6 +21,7 @@ pub const App = struct {
     cocoa_backend: cocoa.CocoaBackend,
     metal_device: metal.MetalDevice,
     renderer: renderer2d.Renderer2D,
+    glyph_atlas: atlas_mod.GlyphAtlas,
     event_queue: pal.EventQueue = .{},
     running: bool = false,
     fb_width: u32,
@@ -42,10 +45,15 @@ pub const App = struct {
             allocator.destroy(self);
             return error.NoMetalLayer;
         };
-        const metal_device = try metal.MetalDevice.init(layer, 65536);
+        var metal_device = try metal.MetalDevice.init(layer, 65536);
 
-        // 4. 初始化 2D 渲染器
-        const renderer = renderer2d.Renderer2D.init(allocator, undefined);
+        // 4. 初始化 Glyph Atlas
+        var glyph_atlas = try atlas_mod.GlyphAtlas.init(allocator, 2048, 2048);
+        try glyph_atlas.createTexture(&metal_device);
+
+        // 5. 初始化 2D 渲染器
+        var renderer = renderer2d.Renderer2D.init(allocator, undefined);
+        renderer.glyph_atlas = &glyph_atlas;
 
         self.* = .{
             .allocator = allocator,
@@ -53,11 +61,13 @@ pub const App = struct {
             .cocoa_backend = cocoa_backend,
             .metal_device = metal_device,
             .renderer = renderer,
+            .glyph_atlas = glyph_atlas,
             .running = false,
             .fb_width = config.width,
             .fb_height = config.height,
         };
         self.renderer.device = &self.metal_device;
+        self.renderer.glyph_atlas = &self.glyph_atlas;
 
         return self;
     }
@@ -65,6 +75,7 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         self.event_queue.deinit(self.allocator);
         self.renderer.deinit();
+        self.glyph_atlas.deinit();
         self.metal_device.deinit();
         self.allocator.destroy(self);
     }
@@ -125,5 +136,15 @@ pub const App = struct {
     /// 获取 framebuffer 尺寸
     pub fn getFramebufferSize(self: *App) math.Size(u32) {
         return .{ .width = self.fb_width, .height = self.fb_height };
+    }
+
+    /// 获取 glyph atlas
+    pub fn getGlyphAtlas(self: *App) *atlas_mod.GlyphAtlas {
+        return &self.glyph_atlas;
+    }
+
+    /// 获取 Metal device
+    pub fn getMetalDevice(self: *App) *metal.MetalDevice {
+        return &self.metal_device;
     }
 };

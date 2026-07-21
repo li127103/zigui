@@ -107,6 +107,17 @@ void zigui_ct_get_metrics(ZiguiCtFont *font, ZiguiFontMetrics *out) {
     out->x_height = (float)CTFontGetXHeight(f);
 }
 
+void *zigui_ct_native(ZiguiCtFont *font) {
+    return font ? (void *)font->ct_font : NULL;
+}
+
+uint64_t zigui_ct_font_id(ZiguiCtFont *font) {
+    if (!font || !font->ct_font) return 0;
+    /* CTFont 的 CFHash 基于字体描述符 (名称+大小+矩阵), 与实例地址无关,
+       同一字体的不同实例 hash 相同, 适合作稳定缓存键。 */
+    return (uint64_t)CFHash((CFTypeRef)font->ct_font);
+}
+
 /* ── Shaping ──────────────────────────────────────────────────────────────── */
 
 int zigui_ct_shape_text(ZiguiCtFont *font, const char *text, int text_len,
@@ -143,6 +154,13 @@ int zigui_ct_shape_text(ZiguiCtFont *font, const char *text, int text_len,
             /* Get run attributes to find string range for cluster mapping */
             CFRange run_range = CTRunGetStringRange(run);
 
+            /* 取本 run 实际使用的字体: CoreText 对中文/emoji 等会自动回退到
+               其它字体, glyph_id 是相对该字体的。每个 glyph 各持一份 CFRetain
+               引用 (调用方按 glyph 逐个 release), 供光栅化使用。 */
+            CFDictionaryRef run_attrs = CTRunGetAttributes(run);
+            CTFontRef run_font = (CTFontRef)CFDictionaryGetValue(run_attrs, kCTFontAttributeName);
+            uint64_t run_font_id = run_font ? (uint64_t)CFHash((CFTypeRef)run_font) : 0;
+
             /* Get glyphs and positions */
             CGGlyph *glyphs = (CGGlyph *)malloc(sizeof(CGGlyph) * glyph_count);
             CGPoint *positions = (CGPoint *)malloc(sizeof(CGPoint) * glyph_count);
@@ -162,6 +180,9 @@ int zigui_ct_shape_text(ZiguiCtFont *font, const char *text, int text_len,
                 sg->y_advance = (float)advances[gi].height;
                 sg->x_offset = (float)positions[gi].x;
                 sg->y_offset = (float)positions[gi].y;
+                sg->run_font = (void *)run_font;
+                sg->font_id = run_font_id;
+                if (run_font) CFRetain(run_font); /* 每个 glyph 一份引用 */
                 total_glyphs++;
             }
 
@@ -206,13 +227,12 @@ float zigui_ct_measure_text(ZiguiCtFont *font, const char *text, int text_len) {
 
 /* ── Glyph Rasterization ──────────────────────────────────────────────────── */
 
-bool zigui_ct_rasterize_glyph(ZiguiCtFont *font, uint32_t glyph_id,
-                               uint8_t *buf, int buf_size,
-                               ZiguiGlyphBitmapMetrics *out_metrics) {
-    if (!font || !out_metrics) return false;
+static bool rasterizeWithCTFont(CTFontRef f, uint32_t glyph_id,
+                                uint8_t *buf, int buf_size,
+                                ZiguiGlyphBitmapMetrics *out_metrics) {
+    if (!f || !out_metrics) return false;
 
     @autoreleasepool {
-        CTFontRef f = font->ct_font;
         CGGlyph glyph = (CGGlyph)glyph_id;
 
         /* Get glyph bounding box */
@@ -254,11 +274,9 @@ bool zigui_ct_rasterize_glyph(ZiguiCtFont *font, uint32_t glyph_id,
         CGColorSpaceRelease(cs);
         if (!ctx) return false;
 
-        /* CoreGraphics has origin at bottom-left, flip Y */
-        CGContextTranslateCTM(ctx, 0, h);
-        CGContextScaleCTM(ctx, 1.0, -1.0);
-
-        /* Position glyph: translate so that glyph origin maps correctly */
+        /* Glyph path 坐标系为 Y 向上、baseline 在 y=0，与 CGBitmapContext 设备坐标系
+           (左下原点、Y 向上) 方向一致，只需平移定位。位图 row 0 (顶部) 即字形顶部，
+           无需翻转 —— 此前多余的 translate+scale 翻转导致字形上下颠倒 (乱码)。 */
         CGContextTranslateCTM(ctx, -bounds.origin.x + pad, -bounds.origin.y + pad);
 
         /* Draw glyph path */
@@ -273,4 +291,21 @@ bool zigui_ct_rasterize_glyph(ZiguiCtFont *font, uint32_t glyph_id,
         CGContextRelease(ctx);
         return true;
     }
+}
+
+bool zigui_ct_rasterize_glyph(ZiguiCtFont *font, uint32_t glyph_id,
+                               uint8_t *buf, int buf_size,
+                               ZiguiGlyphBitmapMetrics *out_metrics) {
+    if (!font) return false;
+    return rasterizeWithCTFont(font->ct_font, glyph_id, buf, buf_size, out_metrics);
+}
+
+bool zigui_ct_rasterize_glyph_with_font(void *ct_font, uint32_t glyph_id,
+                                        uint8_t *buf, int buf_size,
+                                        ZiguiGlyphBitmapMetrics *out_metrics) {
+    return rasterizeWithCTFont((CTFontRef)ct_font, glyph_id, buf, buf_size, out_metrics);
+}
+
+void zigui_ct_release_font(void *ct_font) {
+    if (ct_font) CFRelease((CFTypeRef)ct_font);
 }

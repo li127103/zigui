@@ -14,6 +14,12 @@ typedef struct {
     float y_advance;
     float x_offset;
     float y_offset;
+    /* CoreText 对本 run 实际使用的字体 (CFRetained)。中文/emoji 等会回退到
+       其它字体, 此时 glyph_id 是相对该回退字体的, 光栅化必须用它而非主字体,
+       否则 glyph_id 错位导致乱码。Latin run 即主字体本身。用后须 release。 */
+    void *run_font;
+    /* run_font 的稳定标识 (CFHash), 与实例地址无关, 用作 atlas 缓存键 */
+    uint64_t font_id;
 } ZiguiShapedGlyph;
 
 /* Font metrics */
@@ -46,6 +52,10 @@ void zigui_ct_destroy_font(ZiguiCtFont *font);
 /* Get font metrics */
 void zigui_ct_get_metrics(ZiguiCtFont *font, ZiguiFontMetrics *out);
 
+/* Get the underlying CTFontRef (borrowed) and a stable id (CFHash) for it. */
+void *zigui_ct_native(ZiguiCtFont *font);
+uint64_t zigui_ct_font_id(ZiguiCtFont *font);
+
 /* ── Shaping ──────────────────────────────────────────────────────────────── */
 
 /* Shape UTF-8 text into positioned glyphs. Returns number of glyphs written. */
@@ -63,5 +73,14 @@ float zigui_ct_measure_text(ZiguiCtFont *font, const char *text, int text_len);
 bool zigui_ct_rasterize_glyph(ZiguiCtFont *font, uint32_t glyph_id,
                                uint8_t *buf, int buf_size,
                                ZiguiGlyphBitmapMetrics *out_metrics);
+
+/* Same, but rasterize with an explicit native CTFontRef (e.g. the per-run
+ * fallback font carried by ZiguiShapedGlyph.run_font). */
+bool zigui_ct_rasterize_glyph_with_font(void *ct_font, uint32_t glyph_id,
+                                        uint8_t *buf, int buf_size,
+                                        ZiguiGlyphBitmapMetrics *out_metrics);
+
+/* Release a native CTFontRef previously retained (e.g. ZiguiShapedGlyph.run_font). */
+void zigui_ct_release_font(void *ct_font);
 
 #endif

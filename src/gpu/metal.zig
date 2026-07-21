@@ -37,6 +37,17 @@ pub const MetalDevice = struct {
         return null;
     }
 
+    /// 脏矩形帧: 渲染到持久离屏画布, scissor 限定重绘像素, 返回 framebuffer 尺寸。
+    /// 画布内容跨帧保留, 仅脏区被重写 (应用需先绘制背景覆盖脏区)。
+    pub fn beginFrameDirty(self: *MetalDevice, dirty_x: i32, dirty_y: i32, dirty_w: i32, dirty_h: i32) ?[2]u32 {
+        var w: u32 = 0;
+        var h: u32 = 0;
+        if (c.zigui_metal_begin_frame_dirty(self.handle, dirty_x, dirty_y, dirty_w, dirty_h, &w, &h)) {
+            return .{ w, h };
+        }
+        return null;
+    }
+
     /// 更新顶点数据
     pub fn updateVertices(self: *MetalDevice, vertices: []const Vertex2D) void {
         if (vertices.len == 0) return;
@@ -95,5 +106,18 @@ pub const MetalDevice = struct {
     pub fn drawTextured(self: *MetalDevice, vertex_count: u32, texture: *anyopaque) void {
         if (vertex_count == 0) return;
         c.zigui_metal_draw_textured(self.handle, vertex_count, texture);
+    }
+
+    // ── Image pipeline (RGBA textures) ──────────────────────────────────────
+
+    /// 创建 RGBA8Unorm 纹理 (图片)，返回不透明纹理句柄
+    pub fn createTextureRGBA(self: *MetalDevice, width: u32, height: u32) ?*anyopaque {
+        return c.zigui_metal_create_texture_rgba(self.handle, width, height);
+    }
+
+    /// 绘制图片四边形 (内部经 setVertexBytes 上传顶点，独立于文本顶点缓冲)
+    pub fn drawImage(self: *MetalDevice, vertices: []const TextVertex, texture: *anyopaque) void {
+        if (vertices.len == 0) return;
+        c.zigui_metal_draw_image(self.handle, @ptrCast(vertices.ptr), @intCast(vertices.len), texture);
     }
 };

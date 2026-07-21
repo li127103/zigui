@@ -24,13 +24,15 @@ pub const GlyphAtlas = struct {
     };
 
     pub const GlyphKey = struct {
+        font_id: u64, // 字体稳定标识 (CFHash): 区分主字体与 CJK 回退字体, 避免同 glyph_id 冲突
         font_size_bits: u32, // size 编码为定点数
+        font_weight: u16,
         glyph_id: u32,
 
-        pub fn encode(size: f32, glyph_id: u32) GlyphKey {
+        pub fn encode(font_id: u64, size: f32, weight: u16, glyph_id: u32) GlyphKey {
             // 将 size 编码为 16.16 定点数
             const size_bits: u32 = @intFromFloat(@round(size * 64.0));
-            return .{ .font_size_bits = size_bits, .glyph_id = glyph_id };
+            return .{ .font_id = font_id, .font_size_bits = size_bits, .font_weight = weight, .glyph_id = glyph_id };
         }
     };
 
@@ -38,14 +40,16 @@ pub const GlyphAtlas = struct {
         pub fn hash(ctx: @This(), key: GlyphKey) u64 {
             _ = ctx;
             var hasher = std.hash.Wyhash.init(0);
+            std.hash.autoHash(&hasher, key.font_id);
             std.hash.autoHash(&hasher, key.font_size_bits);
+            std.hash.autoHash(&hasher, key.font_weight);
             std.hash.autoHash(&hasher, key.glyph_id);
             return hasher.final();
         }
 
         pub fn eql(ctx: @This(), a: GlyphKey, b: GlyphKey) bool {
             _ = ctx;
-            return a.font_size_bits == b.font_size_bits and a.glyph_id == b.glyph_id;
+            return a.font_id == b.font_id and a.font_size_bits == b.font_size_bits and a.font_weight == b.font_weight and a.glyph_id == b.glyph_id;
         }
     };
 
@@ -95,9 +99,11 @@ pub const GlyphAtlas = struct {
     }
 
     /// 获取或光栅化 glyph，返回 atlas entry
-    pub fn getOrRasterize(self: *GlyphAtlas, device: *metal.MetalDevice, font: *const coretext.CtFont, glyph_id: u32, size: f32) !AtlasEntry {
+    /// native_font: 用于光栅化的原生 CTFontRef (run 实际字体, 可能是 CJK 回退字体)
+    /// font_id: 该字体的稳定标识, 作缓存键区分不同字体
+    pub fn getOrRasterize(self: *GlyphAtlas, device: *metal.MetalDevice, native_font: *anyopaque, font_id: u64, weight: u16, glyph_id: u32, size: f32) !AtlasEntry {
         _ = device; // 纹理上传在 flush() 中执行
-        const key = GlyphKey.encode(size, glyph_id);
+        const key = GlyphKey.encode(font_id, size, weight, glyph_id);
 
         // 缓存命中
         if (self.cache.get(key)) |entry| {
@@ -111,7 +117,7 @@ pub const GlyphAtlas = struct {
         const tmp_buf = try self.allocator.alloc(u8, buf_size);
         defer self.allocator.free(tmp_buf);
 
-        const metrics = font.rasterizeGlyph(glyph_id, tmp_buf) orelse {
+        const metrics = coretext.rasterizeGlyphNative(native_font, glyph_id, tmp_buf) orelse {
             // 光栅化失败，返回空 entry
             const empty = AtlasEntry{
                 .uv_rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },

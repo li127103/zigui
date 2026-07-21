@@ -59,6 +59,15 @@ pub const CocoaBackend = struct {
         return null;
     }
 
+    /// 查询当前 IME 组字中的 marked text (如拼音), 写入 buf (UTF-8), 返回字节数
+    pub fn getMarkedText(self: *CocoaBackend, buf: []u8) usize {
+        _ = self;
+        var sel_start: u32 = 0;
+        var sel_end: u32 = 0;
+        const n = c.zigui_cocoa_get_marked_text(buf.ptr, @intCast(buf.len), &sel_start, &sel_end);
+        return @intCast(@max(n, 0));
+    }
+
     fn translateEvent(ev: c.ZiguiEvent) ?event_mod.Event {
         const u = ev.unnamed_0;
         return switch (ev.type) {
@@ -94,6 +103,35 @@ pub const CocoaBackend = struct {
             } },
             c.ZIGUI_EVENT_TEXT_INPUT => .{ .text_input = .{
                 .codepoint = @intCast(u.text_input.codepoint),
+            } },
+            c.ZIGUI_EVENT_IME_COMPOSITION => .{ .ime_composition = .{
+                .cursor_start = u.ime_composition.cursor_start,
+                .cursor_end = u.ime_composition.cursor_end,
+            } },
+            c.ZIGUI_EVENT_IME_COMMIT => .{ .ime_commit = {} },
+            c.ZIGUI_EVENT_IME_CANCEL => .{ .ime_cancel = {} },
+            c.ZIGUI_EVENT_FILE_DROP => blk: {
+                var fd: event_mod.FileDrop = .{
+                    .x = @intFromFloat(u.file_drop.x),
+                    .y = @intFromFloat(u.file_drop.y),
+                    .path = undefined,
+                    .path_len = 0,
+                };
+                const n = @min(@as(usize, u.file_drop.path_len), fd.path.len);
+                @memcpy(fd.path[0..n], u.file_drop.path[0..n]);
+                fd.path_len = @intCast(n);
+                break :blk .{ .file_drop = fd };
+            },
+            c.ZIGUI_EVENT_TOUCH => .{ .touch = .{
+                .id = u.touch.id,
+                .phase = switch (u.touch.phase) {
+                    0 => .began,
+                    1 => .moved,
+                    2 => .ended,
+                    else => .cancelled,
+                },
+                .x = u.touch.x,
+                .y = u.touch.y,
             } },
             else => null,
         };

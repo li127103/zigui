@@ -77,8 +77,11 @@ pub fn build(b: *std.Build) void {
 
     // 示例
     const examples = [_]struct { name: []const u8, path: []const u8 }{
+        .{ .name = "simple", .path = "examples/simple.zig" },
         .{ .name = "hello", .path = "examples/hello.zig" },
         .{ .name = "widgets", .path = "examples/widgets.zig" },
+        .{ .name = "m3-demo", .path = "examples/m3_demo.zig" },
+        .{ .name = "m4-demo", .path = "examples/m4_demo.zig" },
     };
     for (examples) |ex| {
         const exe = b.addExecutable(.{

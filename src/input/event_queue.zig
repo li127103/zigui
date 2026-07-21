@@ -12,7 +12,7 @@ pub const ShortcutBinding = struct {
 };
 
 pub const ShortcutMap = struct {
-    bindings: std.ArrayListUnmanaged(ShortcutBinding) = .{},
+    bindings: std.ArrayListUnmanaged(ShortcutBinding) = .{ .items = &.{}, .capacity = 0 },
 
     pub fn match(self: *ShortcutMap, key: pal.KeyCode, mods: pal.Modifiers) ?[]const u8 {
         for (self.bindings.items) |b| {
@@ -27,3 +27,30 @@ pub const ShortcutMap = struct {
 };
 
 const std = @import("std");
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+test "ShortcutMap matches key and modifiers exactly" {
+    var map: ShortcutMap = .{};
+    defer map.deinit(std.testing.allocator);
+
+    try map.bindings.append(std.testing.allocator, .{
+        .key = .s,
+        .modifiers = .{ .super_key = true },
+        .action = "save",
+    });
+    try map.bindings.append(std.testing.allocator, .{
+        .key = .c,
+        .modifiers = .{ .ctrl = true, .shift = true },
+        .action = "copy_special",
+    });
+
+    try std.testing.expectEqualStrings("save", map.match(.s, .{ .super_key = true }).?);
+    try std.testing.expectEqualStrings("copy_special", map.match(.c, .{ .ctrl = true, .shift = true }).?);
+
+    // 修饰键不同 → 不匹配
+    try std.testing.expect(map.match(.s, .{}) == null);
+    try std.testing.expect(map.match(.s, .{ .super_key = true, .shift = true }) == null);
+    // 键不同 → 不匹配
+    try std.testing.expect(map.match(.a, .{ .super_key = true }) == null);
+}

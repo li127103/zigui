@@ -28,10 +28,33 @@ pub const Event = union(enum) {
     ime_cancel: void,
 
     // 触摸事件
-    touch: struct { id: u32, phase: TouchPhase, x: f32, y: f32 },
+    touch: Touch,
 
     // 文件拖放
-    file_drop: struct { x: i32, y: i32 },
+    file_drop: FileDrop,
+};
+
+/// 触摸点事件载荷
+pub const Touch = struct {
+    id: u32,
+    phase: TouchPhase,
+    x: f32,
+    y: f32,
+};
+
+/// 文件拖放事件 (路径内联存储, 避免事件队列中的堆分配)
+pub const FileDrop = struct {
+    x: i32,
+    y: i32,
+    path: [max_path]u8,
+    path_len: u32,
+
+    pub const max_path = 1024;
+
+    /// 文件路径 (UTF-8)
+    pub fn pathSlice(self: *const FileDrop) []const u8 {
+        return self.path[0..self.path_len];
+    }
 };
 
 pub const MouseButton = enum { left, right, middle, extra1, extra2 };
@@ -112,3 +135,29 @@ pub const KeyCode = enum(u16) {
     kp_equal,
     _,
 };
+
+const std = @import("std");
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+test "FileDrop pathSlice returns valid path bytes" {
+    var fd: FileDrop = .{ .x = 10, .y = 20, .path = undefined, .path_len = 0 };
+    const p = "/tmp/你好.png";
+    @memcpy(fd.path[0..p.len], p);
+    fd.path_len = @intCast(p.len);
+
+    try std.testing.expectEqualStrings(p, fd.pathSlice());
+    try std.testing.expectEqual(@as(i32, 10), fd.x);
+}
+
+test "Modifiers eql compares all flags" {
+    const a: Modifiers = .{ .shift = true, .ctrl = true };
+    const b: Modifiers = .{ .shift = true, .ctrl = true };
+    const c: Modifiers = .{ .shift = true };
+    const d: Modifiers = .{ .shift = true, .ctrl = true, .super_key = true };
+
+    try std.testing.expect(a.eql(b));
+    try std.testing.expect(!a.eql(c));
+    try std.testing.expect(!a.eql(d));
+    try std.testing.expect((Modifiers{}).eql(.{}));
+}

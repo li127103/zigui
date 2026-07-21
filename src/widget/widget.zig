@@ -4,6 +4,7 @@ const std = @import("std");
 const math = @import("../math.zig");
 const pal = @import("../pal/pal.zig");
 const renderer2d = @import("../render2d/renderer.zig");
+const dirty_mod = @import("../render2d/dirty.zig");
 const theme_mod = @import("../theme/theme.zig");
 const layout_mod = @import("../layout/engine.zig");
 
@@ -38,6 +39,8 @@ pub const PaintContext = struct {
     // 当前绘制的绝对偏移 (由控件树递归传递)
     offset_x: f32 = 0,
     offset_y: f32 = 0,
+    // 脏矩形裁剪 (非空时跳过与脏区不相交的子树)
+    dirty: ?*const dirty_mod.DirtyRegion = null,
 };
 
 /// 事件上下文
@@ -56,6 +59,8 @@ pub const Widget = struct {
     state: WidgetState = .{},
     // 布局样式
     layout_style: layout_mod.LayoutStyle = .{},
+    // 脏矩形跟踪器 (仅根控件设置, markDirty 时记录绝对脏区)
+    dirty_tracker: ?*dirty_mod.DirtyRegion = null,
 
     pub const VTable = struct {
         type_name: []const u8,
@@ -94,6 +99,13 @@ pub const Widget = struct {
     // ── 脏标记 ──────────────────────────────────────────────────────────────
 
     pub fn markDirty(self: *Widget) void {
+        // 记录脏矩形到根控件的跟踪器 (若有)
+        var root: *Widget = self;
+        while (root.parent) |p| root = p;
+        if (root.dirty_tracker) |tracker| {
+            tracker.add(self.absoluteRect()) catch {};
+        }
+
         var current: ?*Widget = self;
         while (current) |w| {
             if (w.state.dirty) break;
@@ -109,6 +121,18 @@ pub const Widget = struct {
             w.state.layout_dirty = true;
             current = w.parent;
         }
+    }
+
+    /// 绝对矩形 (沿父链累加相对坐标 → 窗口坐标)
+    pub fn absoluteRect(self: *const Widget) math.Rect(f32) {
+        var r = self.rect;
+        var current = self.parent;
+        while (current) |w| {
+            r.x += w.rect.x;
+            r.y += w.rect.y;
+            current = w.parent;
+        }
+        return r;
     }
 
     // ── 布局 ──────────────────────────────────────────────────────────────
@@ -221,6 +245,23 @@ pub const Widget = struct {
     pub fn paintTree(self: *Widget, ctx: *PaintContext) void {
         if (!self.state.visible) return;
 
+        // 脏矩形裁剪: 与脏区不相交的子树整体跳过
+        // (阴影等超出自身范围的绘制, 由调用方外扩脏区 margin 保证)
+        if (ctx.dirty) |d| {
+            if (!d.isEmpty()) {
+                const abs = math.Rect(f32){
+                    .x = ctx.offset_x + self.rect.x,
+                    .y = ctx.offset_y + self.rect.y,
+                    .width = self.rect.width,
+                    .height = self.rect.height,
+                };
+                if (!d.intersects(abs)) {
+                    self.state.dirty = false;
+                    return;
+                }
+            }
+        }
+
         // 绘制自身
         self.vtable.paint(self, ctx);
 
@@ -238,27 +279,23 @@ pub const Widget = struct {
     // ── 事件分发 ──────────────────────────────────────────────────────────
 
     /// Hit-test: 找到坐标处的最深层控件
+    /// x/y 为父级坐标空间 (根控件调用时即窗口坐标)
     pub fn hitTest(self: *Widget, x: f32, y: f32) ?*Widget {
         if (!self.state.visible) return null;
 
-        // 逆序遍历子项 (最顶层优先)
+        // 转换到自身局部坐标并检查自身范围
+        const lx = x - self.rect.x;
+        const ly = y - self.rect.y;
+        if (!self.containsPoint(lx, ly)) return null;
+
+        // 逆序遍历子项 (最顶层优先); 子项 rect 正在自身局部坐标系中
         var i: usize = self.children.items.len;
         while (i > 0) {
             i -= 1;
-            const child = self.children.items[i];
-            // 坐标转换为子项局部坐标
-            const lx = x - self.rect.x;
-            const ly = y - self.rect.y;
-            if (child.containsPoint(lx, ly)) {
-                if (child.hitTest(lx, ly)) |hit| {
-                    return hit;
-                }
-            }
+            if (self.children.items[i].hitTest(lx, ly)) |hit| return hit;
         }
 
-        // 自身命中
-        if (self.containsPoint(x, y)) return self;
-        return null;
+        return self;
     }
 
     pub fn containsPoint(self: *const Widget, x: f32, y: f32) bool {
@@ -304,3 +341,171 @@ pub const Widget = struct {
         return null;
     }
 };
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+test "widget absoluteRect accumulates parent chain" {
+    var parent: Widget = .{ .vtable = undefined, .id = 1 };
+    parent.rect = .{ .x = 100, .y = 50, .width = 400, .height = 300 };
+    var child: Widget = .{ .vtable = undefined, .id = 2 };
+    child.rect = .{ .x = 20, .y = 30, .width = 100, .height = 60 };
+    child.parent = &parent;
+
+    const abs = child.absoluteRect();
+    try std.testing.expectEqual(@as(f32, 120), abs.x);
+    try std.testing.expectEqual(@as(f32, 80), abs.y);
+    try std.testing.expectEqual(@as(f32, 100), abs.width);
+    try std.testing.expectEqual(@as(f32, 60), abs.height);
+}
+
+test "widget markDirty records to root tracker" {
+    var tracker = dirty_mod.DirtyRegion.init(std.testing.allocator);
+    defer tracker.deinit();
+
+    var root: Widget = .{ .vtable = undefined, .id = 1 };
+    root.rect = .{ .x = 0, .y = 0, .width = 800, .height = 600 };
+    root.dirty_tracker = &tracker;
+
+    var child: Widget = .{ .vtable = undefined, .id = 2 };
+    child.rect = .{ .x = 100, .y = 100, .width = 50, .height = 50 };
+    child.parent = &root;
+
+    child.markDirty();
+
+    try std.testing.expectEqual(@as(usize, 1), tracker.count());
+    const b = tracker.bounds().?;
+    try std.testing.expectEqual(@as(f32, 100), b.x);
+    try std.testing.expectEqual(@as(f32, 100), b.y);
+    try std.testing.expectEqual(@as(f32, 50), b.width);
+    try std.testing.expect(child.state.dirty);
+    try std.testing.expect(root.state.dirty);
+}
+
+// 测试用最小 vtable (hitTest 不解引用 vtable; dispatchEvent 仅用 on_event)
+var test_event_log: [8]u64 = undefined;
+var test_event_count: usize = 0;
+
+fn testOnEvent(self: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {
+    _ = event;
+    _ = ectx;
+    if (test_event_count < test_event_log.len) {
+        test_event_log[test_event_count] = self.id;
+        test_event_count += 1;
+    }
+    // id==3 (button) 处理事件, 其余忽略继续冒泡
+    return if (self.id == 3) .handled else .ignored;
+}
+
+fn testMeasure(self: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
+    _ = self;
+    _ = ctx;
+    _ = constraints;
+    return .{ .width = 0, .height = 0 };
+}
+
+fn testPaint(self: *Widget, ctx: *PaintContext) void {
+    _ = self;
+    _ = ctx;
+}
+
+fn testDestroy(self: *Widget, allocator: std.mem.Allocator) void {
+    _ = self;
+    _ = allocator;
+}
+
+const test_vtable = Widget.VTable{
+    .type_name = "test",
+    .measure = testMeasure,
+    .paint = testPaint,
+    .on_event = testOnEvent,
+    .destroy = testDestroy,
+};
+
+test "widget hitTest finds deepest child with offsets" {
+    var root: Widget = .{ .vtable = &test_vtable, .id = 1 };
+    root.rect = .{ .x = 0, .y = 0, .width = 800, .height = 600 };
+
+    var panel: Widget = .{ .vtable = &test_vtable, .id = 2 };
+    panel.rect = .{ .x = 100, .y = 100, .width = 300, .height = 200 };
+
+    var button: Widget = .{ .vtable = &test_vtable, .id = 3 };
+    button.rect = .{ .x = 20, .y = 30, .width = 80, .height = 24 };
+
+    try root.addChild(std.testing.allocator, &panel);
+    try panel.addChild(std.testing.allocator, &button);
+    defer root.children.deinit(std.testing.allocator);
+    defer panel.children.deinit(std.testing.allocator);
+
+    // button 绝对范围: x 120..200, y 130..154
+    try std.testing.expect(root.hitTest(125, 135).? == &button);
+    // panel 内 button 外
+    try std.testing.expect(root.hitTest(110, 110).? == &panel);
+    // panel 右缘附近 (偏移子控件回归: 旧实现 x=350 误判出界)
+    try std.testing.expect(root.hitTest(350, 150).? == &panel);
+    // 仅命中 root
+    try std.testing.expect(root.hitTest(10, 10).? == &root);
+    // 范围外
+    try std.testing.expect(root.hitTest(900, 900) == null);
+
+    // 不可见子控件不参与命中
+    button.state.visible = false;
+    try std.testing.expect(root.hitTest(125, 135).? == &panel);
+    button.state.visible = true;
+
+    // 顶层优先: 重叠时后加入的子控件命中
+    var overlay: Widget = .{ .vtable = &test_vtable, .id = 4 };
+    overlay.rect = .{ .x = 10, .y = 20, .width = 100, .height = 50 }; // 绝对 110..210, 120..170 与 button 重叠
+    try panel.addChild(std.testing.allocator, &overlay);
+    try std.testing.expect(root.hitTest(125, 135).? == &overlay);
+}
+
+test "widget dispatchEvent hits target and bubbles" {
+    var root: Widget = .{ .vtable = &test_vtable, .id = 1 };
+    root.rect = .{ .x = 0, .y = 0, .width = 800, .height = 600 };
+    var panel: Widget = .{ .vtable = &test_vtable, .id = 2 };
+    panel.rect = .{ .x = 100, .y = 100, .width = 300, .height = 200 };
+    var button: Widget = .{ .vtable = &test_vtable, .id = 3 };
+    button.rect = .{ .x = 20, .y = 30, .width = 80, .height = 24 };
+    try root.addChild(std.testing.allocator, &panel);
+    try panel.addChild(std.testing.allocator, &button);
+    defer root.children.deinit(std.testing.allocator);
+    defer panel.children.deinit(std.testing.allocator);
+
+    var ectx: EventContext = .{};
+    const ev: pal.Event = .{ .mouse_button = .{
+        .button = .left,
+        .state = .pressed,
+        .x = 125,
+        .y = 135,
+    } };
+
+    // 命中 button (id=3) → handled, 不冒泡
+    test_event_count = 0;
+    try std.testing.expectEqual(EventResult.handled, root.dispatchEvent(&ev, &ectx));
+    try std.testing.expectEqual(@as(usize, 1), test_event_count);
+    try std.testing.expectEqual(@as(u64, 3), test_event_log[0]);
+
+    // 命中 panel (id=2) → ignored → 冒泡 root (id=1) → ignored
+    const ev2: pal.Event = .{ .mouse_button = .{
+        .button = .left,
+        .state = .pressed,
+        .x = 110,
+        .y = 110,
+    } };
+    test_event_count = 0;
+    try std.testing.expectEqual(EventResult.ignored, root.dispatchEvent(&ev2, &ectx));
+    try std.testing.expectEqual(@as(usize, 2), test_event_count);
+    try std.testing.expectEqual(@as(u64, 2), test_event_log[0]);
+    try std.testing.expectEqual(@as(u64, 1), test_event_log[1]);
+
+    // 范围外 → ignored 且无分发
+    const ev3: pal.Event = .{ .mouse_button = .{
+        .button = .left,
+        .state = .pressed,
+        .x = 900,
+        .y = 900,
+    } };
+    test_event_count = 0;
+    try std.testing.expectEqual(EventResult.ignored, root.dispatchEvent(&ev3, &ectx));
+    try std.testing.expectEqual(@as(usize, 0), test_event_count);
+}

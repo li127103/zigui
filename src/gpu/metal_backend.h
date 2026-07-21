@@ -27,6 +27,11 @@ void zigui_metal_destroy(ZiguiMetalDevice *dev);
 /* ── Frame lifecycle ──────────────────────────────────────────────────────── */
 
 bool zigui_metal_begin_frame(ZiguiMetalDevice *dev, uint32_t *out_width, uint32_t *out_height);
+/* Dirty-rect frame: render into persistent offscreen canvas with scissor */
+bool zigui_metal_begin_frame_dirty(ZiguiMetalDevice *dev,
+                                   int32_t dirty_x, int32_t dirty_y,
+                                   int32_t dirty_w, int32_t dirty_h,
+                                   uint32_t *out_width, uint32_t *out_height);
 void zigui_metal_end_frame(ZiguiMetalDevice *dev);
 void zigui_metal_set_drawable_size(ZiguiMetalDevice *dev, uint32_t width, uint32_t height);
 
@@ -51,5 +56,14 @@ void zigui_metal_update_texture_region(ZiguiMetalDevice *dev, void *texture,
 
 void zigui_metal_update_text_vertices(ZiguiMetalDevice *dev, const ZiguiTextVertex *vertices, uint32_t count);
 void zigui_metal_draw_textured(ZiguiMetalDevice *dev, uint32_t vertex_count, void *texture);
+
+/* ── Image pipeline (RGBA textures) ───────────────────────────────────────── */
+
+/* Create an RGBA8Unorm texture (images), returns texture pointer or NULL */
+void *zigui_metal_create_texture_rgba(ZiguiMetalDevice *dev, uint32_t width, uint32_t height);
+
+/* Draw image quads; vertices uploaded via setVertexBytes (no shared buffer) */
+void zigui_metal_draw_image(ZiguiMetalDevice *dev, const ZiguiTextVertex *vertices,
+                            uint32_t count, void *texture);
 
 #endif

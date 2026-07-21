@@ -77,6 +77,12 @@ pub const TextLayout = struct {
 
         const shaped = shaped_buf[0..glyph_count];
 
+        // run_font 为 CFRetained 引用, 光栅化在本函数循环内完成,
+        // 函数退出时 (成功或出错) 统一释放
+        defer {
+            for (shaped) |*sg| coretext.releaseNativeFont(sg.run_font);
+        }
+
         // 断行 + 定位
         var current_line = TextLine{
             .glyphs = .{ .items = &.{}, .capacity = 0 },
@@ -93,10 +99,15 @@ pub const TextLayout = struct {
         while (i < glyph_count) {
             const sg = shaped[i];
 
-            // 获取 atlas entry (光栅化 glyph)
+            // 获取 atlas entry (用本 run 实际字体光栅化 glyph;
+            //          中文/emoji 会回退到其它字体, 必须用回退字体而非主字体)
+            const run_native = sg.run_font orelse opts.font.native();
+            const run_font_id = if (sg.run_font != null) sg.font_id else opts.font.fontId();
             const entry = try glyph_atlas.getOrRasterize(
                 @ptrCast(@alignCast(device)),
-                opts.font,
+                run_native,
+                run_font_id,
+                opts.font.weight,
                 sg.glyph_id,
                 opts.font_size,
             );
@@ -154,9 +165,12 @@ pub const TextLayout = struct {
             }
 
             // 放置 glyph
+            // 注意: sg.x_offset 来自 CTRunGetPositions, 是相对行原点的累计位置,
+            // 若再叠加已累加的 pen_x 会使字间距翻倍。此处直接用 pen_x 定位,
+            // x_offset 保留供后续 kerning 使用。
             const placed = PlacedGlyph{
                 .glyph_id = sg.glyph_id,
-                .x = pen_x + sg.x_offset,
+                .x = pen_x,
                 .y = 0, // 后续由 baseline_y 确定
                 .advance = advance,
                 .cluster = sg.cluster,

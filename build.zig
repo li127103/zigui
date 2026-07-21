@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
     });
     zigui_mod.addOptions("build_options", options);
 
-    // C include 路径 (ObjC header)
+    // C include 路径
     zigui_mod.addIncludePath(b.path("src/pal/cocoa"));
     zigui_mod.addIncludePath(b.path("src/gpu"));
     zigui_mod.addIncludePath(b.path("src/text"));
@@ -48,12 +48,38 @@ pub fn build(b: *std.Build) void {
             }
             if (enable_wayland) {
                 zigui_mod.linkSystemLibrary("wayland-client", .{});
+                // Wayland 协议头文件 (xdg-shell 等)
+                zigui_mod.addIncludePath(b.path("src/pal/wayland"));
+                // Wayland 协议 C 实现 (xdg-shell, xdg-decoration)
+                zigui_mod.addCSourceFile(.{ .file = b.path("src/pal/wayland/xdg-shell-protocol.c"), .flags = &.{} });
+                zigui_mod.addCSourceFile(.{ .file = b.path("src/pal/wayland/xdg-decoration-protocol.c"), .flags = &.{} });
+            }
+            // 当没有 C 源文件时 (wayland 禁用)，显式链接 libc
+            if (!enable_wayland) {
+                zigui_mod.link_libc = true;
             }
             zigui_mod.linkSystemLibrary("vulkan", .{});
             zigui_mod.linkSystemLibrary("xkbcommon", .{});
+            zigui_mod.linkSystemLibrary("xkbcommon-x11", .{});
             zigui_mod.linkSystemLibrary("freetype2", .{});
             zigui_mod.linkSystemLibrary("harfbuzz", .{});
             zigui_mod.linkSystemLibrary("fontconfig", .{});
+
+            // Shader 编译步骤 (需要 glslangValidator)
+            const compile_shaders = b.step("compile-shaders", "Compile GLSL shaders to SPIR-V");
+            const shader_names = [_]struct { in: []const u8, out: []const u8 }{
+                .{ .in = "shaders/src/solid.vert.glsl", .out = "shaders/spirv/solid_vert.spv" },
+                .{ .in = "shaders/src/solid.frag.glsl", .out = "shaders/spirv/solid_frag.spv" },
+                .{ .in = "shaders/src/textured.vert.glsl", .out = "shaders/spirv/textured_vert.spv" },
+                .{ .in = "shaders/src/textured.frag.glsl", .out = "shaders/spirv/textured_frag.spv" },
+            };
+            for (shader_names) |shader| {
+                const cmd = b.addSystemCommand(&.{ "glslangValidator", "-V" });
+                cmd.addFileArg(b.path(shader.in));
+                cmd.addArg("-o");
+                cmd.addFileArg(b.path(shader.out));
+                compile_shaders.dependOn(&cmd.step);
+            }
         },
         .macos => {
             zigui_mod.linkFramework("Cocoa", .{});
@@ -75,13 +101,15 @@ pub fn build(b: *std.Build) void {
         else => {},
     }
 
-    // 示例
+    // 示例 (根据平台选择源文件)
+    const m3_path = if (os_tag == .linux) "examples/m3_demo_linux.zig" else "examples/m3_demo.zig";
+    const m4_path = if (os_tag == .linux) "examples/m4_demo_linux.zig" else "examples/m4_demo.zig";
     const examples = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "simple", .path = "examples/simple.zig" },
         .{ .name = "hello", .path = "examples/hello.zig" },
         .{ .name = "widgets", .path = "examples/widgets.zig" },
-        .{ .name = "m3-demo", .path = "examples/m3_demo.zig" },
-        .{ .name = "m4-demo", .path = "examples/m4_demo.zig" },
+        .{ .name = "m3-demo", .path = m3_path },
+        .{ .name = "m4-demo", .path = m4_path },
     };
     for (examples) |ex| {
         const exe = b.addExecutable(.{

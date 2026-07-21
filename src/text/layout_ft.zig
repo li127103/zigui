@@ -1,16 +1,22 @@
-//! 文本布局 - 断行、对齐、测量
+//! 多行文本布局 (Linux) - FreeType + Vulkan glyph atlas
+//!
+//! 镜像 macOS `layout.zig` (CoreText) 的设计: shape 整段 → 断行 → 定位 → 对齐。
+//! 对齐枚举与算法复用平台无关的 `align.zig`。
+//!
+//! 与 macOS 的差异: FreeType 无字体回退 (run_font), 所有 glyph 使用同一字体。
 
 const std = @import("std");
 const math = @import("../math.zig");
-const coretext = @import("coretext.zig");
-const atlas_mod = @import("atlas.zig");
+const vulkan = @import("../gpu/vulkan.zig");
+const freetype = @import("freetype.zig");
+const atlas_mod = @import("atlas_vulkan.zig");
 const align_mod = @import("align.zig");
 
 pub const TextAlign = align_mod.TextAlign;
 pub const TextWrap = align_mod.TextWrap;
 
 pub const LayoutOptions = struct {
-    font: *const coretext.CtFont,
+    font: *const freetype.FtFont,
     font_size: f32,
     max_width: ?f32 = null,
     max_lines: ?u32 = null,
@@ -55,11 +61,11 @@ pub const TextLayout = struct {
         self.lines.deinit(self.allocator);
     }
 
-    /// 执行布局: shape + 断行 + 定位
+    /// 执行布局: shape + 断行 + 定位 + 对齐
     pub fn layout(
         allocator: std.mem.Allocator,
         glyph_atlas: *atlas_mod.GlyphAtlas,
-        device: *anyopaque, // *metal.MetalDevice
+        device: *vulkan.VulkanDevice,
         text: []const u8,
         opts: LayoutOptions,
     ) !TextLayout {
@@ -72,17 +78,11 @@ pub const TextLayout = struct {
         const line_height = metrics.line_height * opts.line_height_scale;
 
         // Shape 整段文本
-        var shaped_buf: [4096]coretext.ShapedGlyph = undefined;
+        var shaped_buf: [4096]freetype.ShapedGlyph = undefined;
         const glyph_count = opts.font.shapeText(text, &shaped_buf);
         if (glyph_count == 0) return result;
 
         const shaped = shaped_buf[0..glyph_count];
-
-        // run_font 为 CFRetained 引用, 光栅化在本函数循环内完成,
-        // 函数退出时 (成功或出错) 统一释放
-        defer {
-            for (shaped) |*sg| coretext.releaseNativeFont(sg.run_font);
-        }
 
         // 断行 + 定位
         var current_line = TextLine{
@@ -93,25 +93,15 @@ pub const TextLayout = struct {
         };
         var pen_x: f32 = 0;
         var line_idx: u32 = 0;
-        var last_break_idx: ?usize = null; // 上一个可断行位置
+        var last_break_idx: ?usize = null; // 上一个可断行位置 (shaped 索引)
         var last_break_pen_x: f32 = 0;
 
         var i: usize = 0;
         while (i < glyph_count) {
             const sg = shaped[i];
 
-            // 获取 atlas entry (用本 run 实际字体光栅化 glyph;
-            //          中文/emoji 会回退到其它字体, 必须用回退字体而非主字体)
-            const run_native = sg.run_font orelse opts.font.native();
-            const run_font_id = if (sg.run_font != null) sg.font_id else opts.font.fontId();
-            const entry = try glyph_atlas.getOrRasterize(
-                @ptrCast(@alignCast(device)),
-                run_native,
-                run_font_id,
-                opts.font.weight,
-                sg.glyph_id,
-                opts.font_size,
-            );
+            // 获取 atlas entry (FreeType 单字体, 无回退)
+            const entry = try glyph_atlas.getOrRasterize(device, opts.font, sg.glyph_id, opts.font_size);
 
             const advance = sg.x_advance;
 
@@ -121,10 +111,9 @@ pub const TextLayout = struct {
                     if (opts.wrap == .word and last_break_idx != null) {
                         // 回退到上一个断行点
                         const break_idx = last_break_idx.?;
-                        // 截断当前行到断行点
                         const break_pen = last_break_pen_x;
 
-                        // 移除断行点之后的 glyphs
+                        // 移除断行点之后的 glyphs (含断行空格本身)
                         const keep_count = break_idx - (i - current_line.glyphs.items.len);
                         if (keep_count < current_line.glyphs.items.len) {
                             current_line.glyphs.shrinkRetainingCapacity(keep_count);
@@ -165,10 +154,7 @@ pub const TextLayout = struct {
                 last_break_pen_x = pen_x;
             }
 
-            // 放置 glyph
-            // 注意: sg.x_offset 来自 CTRunGetPositions, 是相对行原点的累计位置,
-            // 若再叠加已累加的 pen_x 会使字间距翻倍。此处直接用 pen_x 定位,
-            // x_offset 保留供后续 kerning 使用。
+            // 放置 glyph (x 为相对行原点的累计位置)
             const placed = PlacedGlyph{
                 .glyph_id = sg.glyph_id,
                 .x = pen_x,
@@ -217,8 +203,8 @@ pub const TextLayout = struct {
         return result;
     }
 
-    /// 简单测量 (不生成 glyph 位置，仅计算尺寸)
-    pub fn measure(font: *const coretext.CtFont, text: []const u8) f32 {
+    /// 简单测量 (不生成 glyph 位置, 仅计算单行宽度)
+    pub fn measure(font: *const freetype.FtFont, text: []const u8) f32 {
         return font.measureText(text);
     }
 };

@@ -39,6 +39,10 @@ pub const vulkan = if (is_linux) @import("gpu/vulkan.zig") else void;
 pub const freetype = if (is_linux) @import("text/freetype.zig") else void;
 pub const atlas_vulkan = if (is_linux) @import("text/atlas_vulkan.zig") else void;
 pub const vulkan_renderer = if (is_linux) @import("render2d/vulkan_renderer.zig") else void;
+pub const text_layout_ft = if (is_linux) @import("text/layout_ft.zig") else void;
+
+// 文本对齐 (平台无关, 供 macOS/Linux 布局模块共享)
+pub const text_align = @import("text/align.zig");
 
 // 图片
 pub const image = @import("image/png.zig");
@@ -73,4 +77,5 @@ test {
     _ = image;
     _ = gesture;
     _ = input;
+    _ = text_align;
 }

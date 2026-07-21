@@ -113,25 +113,27 @@ pub const FtFont = struct {
     }
 
     pub fn getMetrics(self: *const FtFont) FontMetrics {
-        const metrics = self.face.*.metrics;
+        // 缩放后的度量在 face->size->metrics (FT_Size_Metrics)
+        const metrics = self.face.*.size.*.metrics;
+        // FT_Size_Metrics 的 ascender/descender/height 是 26.6 定点数 (已按当前字号缩放), /64 得像素
+        const ascent: f32 = @as(f32, @floatFromInt(metrics.ascender)) / 64.0;
+        const descent: f32 = @as(f32, @floatFromInt(-metrics.descender)) / 64.0;
+        const height: f32 = @as(f32, @floatFromInt(metrics.height)) / 64.0;
+        // underline 度量来自 face (字体设计单位, 未缩放), 需按 size/units_per_em 缩放
         const units_per_em: f32 = @floatFromInt(self.face.*.units_per_EM);
-        const actual_scale = self.size / units_per_em;
-
-        const ascent: f32 = @floatFromInt(metrics.ascender);
-        const descent: f32 = @floatFromInt(-metrics.descender);
-        const height: f32 = @floatFromInt(metrics.height);
-        const underline_pos: f32 = @floatFromInt(self.face.*.underline_position);
-        const underline_thick: f32 = @floatFromInt(self.face.*.underline_thickness);
+        const scale = self.size / units_per_em;
+        const underline_pos: f32 = @as(f32, @floatFromInt(self.face.*.underline_position)) * scale;
+        const underline_thick: f32 = @as(f32, @floatFromInt(self.face.*.underline_thickness)) * scale;
 
         return .{
-            .ascent = ascent * actual_scale,
-            .descent = descent * actual_scale,
-            .leading = height * actual_scale - (ascent * actual_scale - descent * actual_scale),
-            .line_height = height * actual_scale,
-            .underline_position = underline_pos * actual_scale,
-            .underline_thickness = underline_thick * actual_scale,
-            .cap_height = ascent * actual_scale * 0.7, // 近似
-            .x_height = ascent * actual_scale * 0.5, // 近似
+            .ascent = ascent,
+            .descent = descent,
+            .leading = height - (ascent + descent),
+            .line_height = height,
+            .underline_position = underline_pos,
+            .underline_thickness = underline_thick,
+            .cap_height = ascent * 0.7, // 近似
+            .x_height = ascent * 0.5, // 近似
         };
     }
 
@@ -283,6 +285,25 @@ pub fn findSystemFont(allocator: std.mem.Allocator, family: ?[]const u8) ![:0]u8
 
     for (default_fonts) |path| {
         // 检查文件是否存在
+        if (std.c.access(path, 0) != 0) continue;
+        return allocator.dupeZ(u8, path) catch continue;
+    }
+
+    return error.NoFontFound;
+}
+
+/// 查找支持 CJK (中日韩) 字形的系统字体
+/// .otf 为 CFF 单字体, .ttc 为集合, 均取 face_index 0
+pub fn findCjkFont(allocator: std.mem.Allocator) ![:0]u8 {
+    const cjk_fonts = [_][:0]const u8{
+        "/usr/share/fonts/adobe-source-han-sans/SourceHanSansCN-Regular.otf",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    };
+
+    for (cjk_fonts) |path| {
         if (std.c.access(path, 0) != 0) continue;
         return allocator.dupeZ(u8, path) catch continue;
     }

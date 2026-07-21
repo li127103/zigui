@@ -53,6 +53,7 @@ pub fn build(b: *std.Build) void {
                 // Wayland 协议 C 实现 (xdg-shell, xdg-decoration)
                 zigui_mod.addCSourceFile(.{ .file = b.path("src/pal/wayland/xdg-shell-protocol.c"), .flags = &.{} });
                 zigui_mod.addCSourceFile(.{ .file = b.path("src/pal/wayland/xdg-decoration-protocol.c"), .flags = &.{} });
+                zigui_mod.addCSourceFile(.{ .file = b.path("src/pal/wayland/text-input-unstable-v3-protocol.c"), .flags = &.{} });
             }
             // 当没有 C 源文件时 (wayland 禁用)，显式链接 libc
             if (!enable_wayland) {
@@ -107,6 +108,8 @@ pub fn build(b: *std.Build) void {
     const examples = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "simple", .path = "examples/simple.zig" },
         .{ .name = "hello", .path = "examples/hello.zig" },
+        .{ .name = "input", .path = "examples/input.zig" },
+        .{ .name = "text-align", .path = "examples/text_align.zig" },
         .{ .name = "widgets", .path = "examples/widgets.zig" },
         .{ .name = "m3-demo", .path = m3_path },
         .{ .name = "m4-demo", .path = m4_path },

@@ -35,6 +35,9 @@ pub const AppConfig = struct {
 
 pub const BackendKind = enum { wayland, x11 };
 
+/// IME 删除光标周围文本的请求 (字节数)
+pub const ImeDelete = struct { before: u32, after: u32 };
+
 /// 运行时后端抽象 (仅包含编译期启用的后端)
 const PlatformBackend = union(BackendKind) {
     wayland: if (enable_wayland) wayland.WaylandBackend else noreturn,
@@ -83,6 +86,17 @@ const PlatformBackend = union(BackendKind) {
             },
         }
     }
+
+    fn imeSetCursorRect(self: *PlatformBackend, x: i32, y: i32, w: i32, h: i32) void {
+        switch (self.*) {
+            .wayland => |*b| {
+                if (comptime enable_wayland) b.imeSetCursorRect(x, y, w, h);
+            },
+            .x11 => {
+                // X11 后端暂未实现 IME, 空操作
+            },
+        }
+    }
 };
 
 pub const App = struct {
@@ -115,8 +129,44 @@ pub const App = struct {
     typed_cp_count: usize = 0,
     key_hit: ?pal.KeyCode = null,
 
+    // IME 状态 (text-input)
+    ime_commit_buf: [pal.event.max_ime_text]u8 = undefined, // 本帧提交的文本 (帧末重置)
+    ime_commit_len: usize = 0,
+    preedit_buf: [pal.event.max_ime_text]u8 = undefined, // 组合中文本 (持久)
+    preedit_len: usize = 0,
+    preedit_cursor_begin: i32 = 0,
+    preedit_cursor_end: i32 = 0,
+    pending_ime_delete: ?struct { before_length: u32, after_length: u32 } = null,
+
     pub fn typedCodepoints(self: *App) []const u21 {
         return self.typed_cps[0..self.typed_cp_count];
+    }
+
+    /// 本帧 IME 提交的文本 (UTF-8, 帧末重置)
+    pub fn imeCommitText(self: *App) []const u8 {
+        return self.ime_commit_buf[0..self.ime_commit_len];
+    }
+
+    /// 当前组合中 (preedit) 文本 (UTF-8, 持久至组合结束)
+    pub fn preeditText(self: *App) []const u8 {
+        return self.preedit_buf[0..self.preedit_len];
+    }
+
+    /// preedit 光标范围 (字节偏移)
+    pub fn preeditCursor(self: *App) struct { i32, i32 } {
+        return .{ self.preedit_cursor_begin, self.preedit_cursor_end };
+    }
+
+    /// 取出并清除待处理的 IME 删除请求
+    pub fn takeImeDelete(self: *App) ?ImeDelete {
+        const d = self.pending_ime_delete orelse return null;
+        self.pending_ime_delete = null;
+        return .{ .before = d.before_length, .after = d.after_length };
+    }
+
+    /// 设置 IME 光标矩形 (供输入法候选窗定位)
+    pub fn setImeCursorRect(self: *App, x: i32, y: i32, w: i32, h: i32) void {
+        self.backend.imeSetCursorRect(x, y, w, h);
     }
 
     pub fn init(allocator: std.mem.Allocator, config: AppConfig) !*App {
@@ -339,6 +389,28 @@ pub const App = struct {
                         }
                         self.invalidate();
                     },
+                    .ime_commit => |c| {
+                        // 追加本帧提交文本 (可能一帧内多次提交)
+                        const n = @min(c.len, self.ime_commit_buf.len - self.ime_commit_len);
+                        @memcpy(self.ime_commit_buf[self.ime_commit_len .. self.ime_commit_len + n], c.text[0..n]);
+                        self.ime_commit_len += n;
+                        // 提交后组合结束
+                        self.preedit_len = 0;
+                        self.invalidate();
+                    },
+                    .ime_preedit => |p| {
+                        // 整体替换组合中文本及光标位置 (len==0 表示组合结束)
+                        const n = @min(p.len, self.preedit_buf.len);
+                        @memcpy(self.preedit_buf[0..n], p.text[0..n]);
+                        self.preedit_len = n;
+                        self.preedit_cursor_begin = p.cursor_begin;
+                        self.preedit_cursor_end = p.cursor_end;
+                        self.invalidate();
+                    },
+                    .ime_delete => |d| {
+                        self.pending_ime_delete = .{ .before_length = d.before_length, .after_length = d.after_length };
+                        self.invalidate();
+                    },
                     .mouse_move => |m| {
                         if (!self.mouse_clicked) {
                             self.mouse_x = @floatFromInt(m.x);
@@ -384,6 +456,7 @@ pub const App = struct {
             self.mouse_clicked = false;
             self.scroll_delta = 0;
             self.typed_cp_count = 0;
+            self.ime_commit_len = 0;
             self.key_hit = null;
             self.dirty.clear();
             self.needs_redraw = false;

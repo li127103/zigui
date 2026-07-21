@@ -127,7 +127,9 @@ pub const Renderer2D = struct {
     }
 
     /// 绘制文本 (使用 glyph atlas + 纹理管线)
-    pub fn drawText(self: *Renderer2D, glyphs: []const PlacedGlyph, origin_x: f32, origin_y: f32, color: math.Color) !void {
+    /// glyphs: 任意具有 .x/.y/.atlas_entry 字段的 glyph 切片 (duck typing),
+    ///         兼容本模块 PlacedGlyph 与 text/layout_ft.zig 的 PlacedGlyph
+    pub fn drawText(self: *Renderer2D, glyphs: anytype, origin_x: f32, origin_y: f32, color: math.Color) !void {
         const c = colorToFloat(color);
 
         for (glyphs) |glyph| {

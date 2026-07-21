@@ -1,5 +1,8 @@
 //! 统一事件类型定义
 
+/// IME 文本事件的内联缓冲大小 (避免事件队列堆分配)
+pub const max_ime_text = 256;
+
 /// 平台无关的统一事件
 pub const Event = union(enum) {
     // 窗口事件
@@ -22,10 +25,10 @@ pub const Event = union(enum) {
     key: struct { state: ButtonState, key: KeyCode, modifiers: Modifiers },
     text_input: struct { codepoint: u21 },
 
-    // IME 事件
-    ime_composition: struct { cursor_start: u32, cursor_end: u32 },
-    ime_commit: void,
-    ime_cancel: void,
+    // IME 事件 (text-input)
+    ime_commit: struct { text: [max_ime_text]u8, len: u32 }, // 已提交文本 (UTF-8)
+    ime_preedit: struct { text: [max_ime_text]u8, len: u32, cursor_begin: i32, cursor_end: i32 }, // 组合中文本; len==0 表示组合结束
+    ime_delete: struct { before_length: u32, after_length: u32 }, // 删除光标周围文本 (字节数)
 
     // 触摸事件
     touch: Touch,

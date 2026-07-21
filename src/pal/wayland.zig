@@ -9,6 +9,7 @@ const wl = @cImport({
     @cInclude("wayland-client.h");
     @cInclude("xdg-shell-client-protocol.h");
     @cInclude("xdg-decoration-client-protocol.h");
+    @cInclude("text-input-unstable-v3-client-protocol.h");
 });
 
 const xkb = @cImport({
@@ -37,6 +38,10 @@ pub const WaylandBackend = struct {
     xkb_ctx: ?*xkb.xkb_context = null,
     xkb_keymap: ?*xkb.xkb_keymap = null,
     xkb_state: ?*xkb.xkb_state = null,
+    // IME (text-input-v3)
+    text_input_manager: ?*wl.struct_zwp_text_input_manager_v3 = null,
+    text_input: ?*wl.struct_zwp_text_input_v3 = null,
+    ime_cursor_rect: [4]i32 = .{ 0, 0, 0, 0 }, // x, y, w, h 缓存
     // 鼠标状态
     pointer_x: f64 = 0,
     pointer_y: f64 = 0,
@@ -81,6 +86,8 @@ pub const WaylandBackend = struct {
         if (self.xkb_keymap) |km| xkb.xkb_keymap_unref(km);
         if (self.xkb_ctx) |ctx| xkb.xkb_context_unref(ctx);
 
+        if (self.text_input) |ti| _ = wl.zwp_text_input_v3_destroy(ti);
+        if (self.text_input_manager) |tim| _ = wl.zwp_text_input_manager_v3_destroy(tim);
         if (self.keyboard) |kb| _ = wl.wl_keyboard_destroy(kb);
         if (self.pointer) |p| _ = wl.wl_pointer_destroy(p);
         if (self.toplevel) |t| _ = wl.xdg_toplevel_destroy(t);
@@ -148,6 +155,13 @@ pub const WaylandBackend = struct {
                 _ = wl.wl_pointer_add_listener(p, &pointer_listener, self);
                 self.pointer = p;
             }
+            // IME: 创建 text_input 对象 (需 text_input_manager)
+            if (self.text_input_manager) |tim| {
+                if (wl.zwp_text_input_manager_v3_get_text_input(tim, seat)) |ti| {
+                    _ = wl.zwp_text_input_v3_add_listener(ti, &text_input_listener, self);
+                    self.text_input = ti;
+                }
+            }
         }
     }
 
@@ -208,6 +222,15 @@ pub const WaylandBackend = struct {
         }
     }
 
+    /// 设置 IME 光标矩形 (供输入法候选窗定位)
+    pub fn imeSetCursorRect(self: *WaylandBackend, x: i32, y: i32, w: i32, h: i32) void {
+        self.ime_cursor_rect = .{ x, y, w, h };
+        if (self.text_input) |ti| {
+            wl.zwp_text_input_v3_set_cursor_rectangle(ti, x, y, w, h);
+            wl.zwp_text_input_v3_commit(ti);
+        }
+    }
+
     // ── 内部: 事件推送辅助 ──────────────────────────────────────────────────
 
     fn pushEvent(self: *WaylandBackend, ev: event_mod.Event) void {
@@ -254,6 +277,8 @@ fn registryGlobal(
         self.decoration_manager = @ptrCast(wl.wl_registry_bind(registry.?, name, &wl.zxdg_decoration_manager_v1_interface, @min(version, 1)));
     } else if (std.mem.eql(u8, iface, "wl_seat")) {
         self.seat = @ptrCast(wl.wl_registry_bind(registry.?, name, &wl.wl_seat_interface, @min(version, 5)));
+    } else if (std.mem.eql(u8, iface, "zwp_text_input_manager_v3")) {
+        self.text_input_manager = @ptrCast(wl.wl_registry_bind(registry.?, name, &wl.zwp_text_input_manager_v3_interface, @min(version, 2)));
     }
 }
 
@@ -366,14 +391,54 @@ const xdg_toplevel_listener = wl.xdg_toplevel_listener{
 // ── Keyboard Listener ─────────────────────────────────────────────────────
 
 fn keyboardKeymap(
-    _: ?*anyopaque,
+    data: ?*anyopaque,
     _: ?*wl.struct_wl_keyboard,
-    _: u32,
+    format: u32,
     fd: i32,
-    _: u32,
+    size: u32,
 ) callconv(.c) void {
-    // TODO: 修复 xkb keymap 处理
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+
+    if (format != wl.WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
+        _ = std.os.linux.close(fd);
+        return;
+    }
+
+    // mmap 读取 keymap 字符串 (以 null 结尾, size 含结尾符)
+    const keymap_bytes = std.posix.mmap(null, @intCast(size), .{ .READ = true }, .{ .TYPE = .SHARED }, fd, 0) catch {
+        _ = std.os.linux.close(fd);
+        return;
+    };
+    // 映射已持有文件引用, 可立即关闭 fd
     _ = std.os.linux.close(fd);
+    defer std.posix.munmap(keymap_bytes);
+
+    const ctx = self.xkb_ctx orelse return;
+
+    // 释放旧的 state/keymap (keymap 可能因键盘热插拔而更新)
+    if (self.xkb_state) |s| {
+        xkb.xkb_state_unref(s);
+        self.xkb_state = null;
+    }
+    if (self.xkb_keymap) |km| {
+        xkb.xkb_keymap_unref(km);
+        self.xkb_keymap = null;
+    }
+
+    const keymap = xkb.xkb_keymap_new_from_string(
+        ctx,
+        keymap_bytes.ptr,
+        xkb.XKB_KEYMAP_FORMAT_TEXT_V1,
+        xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
+    ) orelse return;
+
+    const state = xkb.xkb_state_new(keymap) orelse {
+        xkb.xkb_keymap_unref(keymap);
+        return;
+    };
+
+    self.xkb_keymap = keymap;
+    self.xkb_state = state;
 }
 
 fn keyboardEnter(
@@ -485,6 +550,122 @@ const keyboard_listener = wl.wl_keyboard_listener{
     .key = keyboardKey,
     .modifiers = keyboardModifiers,
     .repeat_info = keyboardRepeatInfo,
+};
+
+// ── Text Input (IME) Listener ─────────────────────────────────────────────
+
+/// 将 C 字符串拷贝进 IME 事件内联缓冲, 返回实际长度
+fn copyImeText(text: ?[*:0]const u8, buf: *[event_mod.max_ime_text]u8) u32 {
+    const src = std.mem.span(text orelse return 0);
+    const n = @min(src.len, buf.len);
+    @memcpy(buf[0..n], src[0..n]);
+    return @intCast(n);
+}
+
+fn textInputEnter(
+    data: ?*anyopaque,
+    ti: ?*wl.struct_zwp_text_input_v3,
+    _: ?*wl.struct_wl_surface,
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    const t = ti orelse return;
+    // 激活文本输入: enable + 光标矩形 + commit
+    wl.zwp_text_input_v3_enable(t);
+    wl.zwp_text_input_v3_set_cursor_rectangle(t, self.ime_cursor_rect[0], self.ime_cursor_rect[1], self.ime_cursor_rect[2], self.ime_cursor_rect[3]);
+    wl.zwp_text_input_v3_commit(t);
+}
+
+fn textInputLeave(
+    data: ?*anyopaque,
+    ti: ?*wl.struct_zwp_text_input_v3,
+    _: ?*wl.struct_wl_surface,
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    const t = ti orelse return;
+    wl.zwp_text_input_v3_disable(t);
+    wl.zwp_text_input_v3_commit(t);
+    // 组合结束: 推送空 preedit
+    self.pushEvent(.{ .ime_preedit = .{ .text = undefined, .len = 0, .cursor_begin = 0, .cursor_end = 0 } });
+}
+
+fn textInputPreeditString(
+    data: ?*anyopaque,
+    _: ?*wl.struct_zwp_text_input_v3,
+    text: ?[*:0]const u8,
+    cursor_begin: i32,
+    cursor_end: i32,
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    var buf: [event_mod.max_ime_text]u8 = undefined;
+    const len = copyImeText(text, &buf);
+    self.pushEvent(.{ .ime_preedit = .{ .text = buf, .len = len, .cursor_begin = cursor_begin, .cursor_end = cursor_end } });
+}
+
+fn textInputCommitString(
+    data: ?*anyopaque,
+    _: ?*wl.struct_zwp_text_input_v3,
+    text: ?[*:0]const u8,
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    var buf: [event_mod.max_ime_text]u8 = undefined;
+    const len = copyImeText(text, &buf);
+    if (len > 0) {
+        self.pushEvent(.{ .ime_commit = .{ .text = buf, .len = len } });
+    }
+}
+
+fn textInputDeleteSurroundingText(
+    data: ?*anyopaque,
+    _: ?*wl.struct_zwp_text_input_v3,
+    before_length: u32,
+    after_length: u32,
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    self.pushEvent(.{ .ime_delete = .{ .before_length = before_length, .after_length = after_length } });
+}
+
+fn textInputDone(
+    data: ?*anyopaque,
+    _: ?*wl.struct_zwp_text_input_v3,
+    _: u32,
+) callconv(.c) void {
+    // done 表示 IME 状态更新批次结束 (preedit/commit/delete 已到达)。
+    // 不能在此重新 commit: KWin 对每个 commit 都回 done, 重提交会造成
+    // commit->done->commit 无限循环, 干扰输入法激活。
+    _ = data;
+}
+
+fn textInputAction(
+    _: ?*anyopaque,
+    _: ?*wl.struct_zwp_text_input_v3,
+    _: u32,
+    _: u32,
+) callconv(.c) void {}
+
+fn textInputLanguage(
+    _: ?*anyopaque,
+    _: ?*wl.struct_zwp_text_input_v3,
+    _: ?[*:0]const u8,
+) callconv(.c) void {}
+
+fn textInputPreeditHint(
+    _: ?*anyopaque,
+    _: ?*wl.struct_zwp_text_input_v3,
+    _: u32,
+    _: u32,
+    _: u32,
+) callconv(.c) void {}
+
+const text_input_listener = wl.zwp_text_input_v3_listener{
+    .enter = textInputEnter,
+    .leave = textInputLeave,
+    .preedit_string = textInputPreeditString,
+    .commit_string = textInputCommitString,
+    .delete_surrounding_text = textInputDeleteSurroundingText,
+    .done = textInputDone,
+    .action = textInputAction,
+    .language = textInputLanguage,
+    .preedit_hint = textInputPreeditHint,
 };
 
 // ── Pointer Listener ──────────────────────────────────────────────────────

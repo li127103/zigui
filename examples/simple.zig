@@ -18,6 +18,7 @@ pub fn main() !void {
         .title = "zigui - Simple",
         .width = 480,
         .height = 320,
+        .resizable = false,
     });
     defer app.deinit();
 
@@ -33,17 +34,18 @@ fn drawFrame(app: *zigui.app.App) void {
     // 背景
     r.fillRect(.{ .x = 0, .y = 0, .width = w, .height = h }, math.Color.hex(0x0F172AFF)) catch {};
 
-    // 标题
-    drawText(app, "Hello, zigui!", 40, 80, 32.0, 700, 0x38BDF8FF);
+    // 标题 (相对布局)
+    const margin_x = w * 0.08;
+    drawText(app, "Hello, zigui!", margin_x, h * 0.25, 32.0, 700, 0x38BDF8FF);
 
     // 副标题
-    drawText(app, "Cross-platform GPU-accelerated GUI in Zig.", 40, 140, 16.0, 400, 0xCBD5E1FF);
+    drawText(app, "Cross-platform GPU-accelerated GUI in Zig.", margin_x, h * 0.44, 16.0, 400, 0xCBD5E1FF);
 
     // 平台信息
     if (comptime is_linux) {
-        drawText(app, "Linux X11 + Vulkan + FreeType", 40, 200, 14.0, 400, 0x64748BFF);
+        drawText(app, "Linux X11 + Vulkan + FreeType", margin_x, h * 0.63, 14.0, 400, 0x64748BFF);
     } else if (comptime is_macos) {
-        drawText(app, "macOS Metal + CoreText", 40, 200, 14.0, 400, 0x64748BFF);
+        drawText(app, "macOS Metal + CoreText", margin_x, h * 0.63, 14.0, 400, 0x64748BFF);
     }
 }
 

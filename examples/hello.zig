@@ -17,6 +17,7 @@ pub fn main() !void {
         .title = "zigui - Text Rendering",
         .width = 900,
         .height = 640,
+        .resizable = false,
     });
     defer app.deinit();
 
@@ -45,11 +46,12 @@ fn drawFrame(app: *zigui.app.App) void {
     // 标题文本
     drawText(app, "zigui Text Engine", 90, 24, 28.0, 700, 0xF8FAFCFF);
 
-    // 大标题
-    drawText(app, "Hello, Zigui!", 40, 100, 48.0, 800, 0x38BDF8FF);
+    // 大标题 (相对布局)
+    const margin: f32 = w * 0.045;
+    drawText(app, "Hello, Zigui!", margin, h * 0.16, 48.0, 800, 0x38BDF8FF);
 
     // 正文段落
-    drawText(app, "Cross-platform GPU-accelerated GUI framework written in Zig 0.16.", 40, 170, 16.0, 400, 0xCBD5E1FF);
+    drawText(app, "Cross-platform GPU-accelerated GUI framework written in Zig 0.16.", margin, h * 0.27, 16.0, 400, 0xCBD5E1FF);
 
     // 特性卡片
     const cards = [_]struct { title: []const u8, desc: []const u8, color: u32 }{
@@ -59,12 +61,12 @@ fn drawFrame(app: *zigui.app.App) void {
         .{ .title = "Text Layout", .desc = "Line break + alignment", .color = 0xF59E0BFF },
     };
 
-    const card_w: f32 = (w - 40 * 2 - 16 * 3) / 4.0;
-    const card_y: f32 = 220;
-    const card_h: f32 = 120;
+    const card_w: f32 = (w - margin * 2 - 16 * 3) / 4.0;
+    const card_y: f32 = h * 0.34;
+    const card_h: f32 = h * 0.19;
 
     for (cards, 0..) |card, i| {
-        const cx: f32 = 40 + @as(f32, @floatFromInt(i)) * (card_w + 16);
+        const cx: f32 = margin + @as(f32, @floatFromInt(i)) * (card_w + 16);
         r.fillRoundedRect(.{ .x = cx, .y = card_y, .width = card_w, .height = card_h }, 10, math.Color.hex(0x1E293BFF)) catch {};
         r.fillRoundedRect(.{ .x = cx, .y = card_y, .width = card_w, .height = 4 }, 2, math.Color.hex(card.color)) catch {};
         drawText(app, card.title, cx + 14, card_y + 30, 15.0, 600, 0xF8FAFCFF);
@@ -72,8 +74,9 @@ fn drawFrame(app: *zigui.app.App) void {
     }
 
     // 代码区域
-    const code_y: f32 = 370;
-    r.fillRoundedRect(.{ .x = 40, .y = code_y, .width = w - 80, .height = 180 }, 10, math.Color.hex(0x1E293BFF)) catch {};
+    const code_y: f32 = h * 0.58;
+    const code_h: f32 = h * 0.28;
+    r.fillRoundedRect(.{ .x = margin, .y = code_y, .width = w - margin * 2, .height = code_h }, 10, math.Color.hex(0x1E293BFF)) catch {};
 
     const code_lines = [_][]const u8{
         "const zigui = @import(\"zigui\");",
@@ -100,7 +103,7 @@ fn drawFrame(app: *zigui.app.App) void {
             0xA6ACCDFF;
 
         const ly: f32 = code_y + 24 + @as(f32, @floatFromInt(li)) * 17.0;
-        drawText(app, line_text, 60, ly, 13.0, 400, color);
+        drawText(app, line_text, margin + 20, ly, 13.0, 400, color);
     }
 
     // 底部状态栏

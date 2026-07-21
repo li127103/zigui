@@ -27,6 +27,7 @@ pub const AppConfig = struct {
     title: []const u8 = "zigui app",
     width: u32 = 800,
     height: u32 = 600,
+    resizable: bool = true,
     continuous: bool = true,
     /// 强制后端: null = 自动检测
     force_backend: ?BackendKind = null,
@@ -60,6 +61,28 @@ const PlatformBackend = union(BackendKind) {
             },
         }
     }
+
+    fn setMaximized(self: *PlatformBackend) void {
+        switch (self.*) {
+            .wayland => |*b| {
+                if (comptime enable_wayland) b.setMaximized();
+            },
+            .x11 => |*b| {
+                if (comptime enable_x11) b.setMaximized();
+            },
+        }
+    }
+
+    fn unsetMaximized(self: *PlatformBackend) void {
+        switch (self.*) {
+            .wayland => |*b| {
+                if (comptime enable_wayland) b.unsetMaximized();
+            },
+            .x11 => |*b| {
+                if (comptime enable_x11) b.unsetMaximized();
+            },
+        }
+    }
 };
 
 pub const App = struct {
@@ -72,6 +95,7 @@ pub const App = struct {
     glyph_atlas: atlas_mod.GlyphAtlas,
     event_queue: pal.EventQueue = .{},
     running: bool = false,
+    maximized: bool = false,
     fb_width: u32,
     fb_height: u32,
 
@@ -141,6 +165,7 @@ pub const App = struct {
                     .title = config.title,
                     .width = config.width,
                     .height = config.height,
+                    .resizable = config.resizable,
                 }) catch {
                     self.backend.wayland.deinit();
                     if (comptime enable_x11) {
@@ -189,6 +214,7 @@ pub const App = struct {
                             .title = config.title,
                             .width = config.width,
                             .height = config.height,
+                            .resizable = config.resizable,
                         }) catch return error.BackendInitFailed;
                         const wl_display = self.backend.wayland.getDisplay();
                         const wl_surface = self.backend.wayland.getSurface();
@@ -216,6 +242,7 @@ pub const App = struct {
             .title = config.title,
             .width = config.width,
             .height = config.height,
+            .resizable = config.resizable,
         });
 
         const conn = x11_backend.getConnection();
@@ -284,6 +311,10 @@ pub const App = struct {
                         self.fb_width = r.width;
                         self.fb_height = r.height;
                         self.vk_device.setDrawableSize(r.width, r.height);
+                        self.invalidate();
+                    },
+                    .maximize => |m| {
+                        self.maximized = m.maximized;
                         self.invalidate();
                     },
                     .key => |k| {
@@ -376,6 +407,30 @@ pub const App = struct {
 
     pub fn getVulkanDevice(self: *App) *vulkan.VulkanDevice {
         return &self.vk_device;
+    }
+
+    /// 最大化窗口
+    pub fn maximize(self: *App) void {
+        self.backend.setMaximized();
+    }
+
+    /// 取消最大化
+    pub fn unmaximize(self: *App) void {
+        self.backend.unsetMaximized();
+    }
+
+    /// 切换最大化状态
+    pub fn toggleMaximize(self: *App) void {
+        if (self.maximized) {
+            self.unmaximize();
+        } else {
+            self.maximize();
+        }
+    }
+
+    /// 查询是否最大化
+    pub fn isMaximized(self: *const App) bool {
+        return self.maximized;
     }
 };
 

@@ -32,6 +32,7 @@ pub const WaylandBackend = struct {
     configured: bool = false,
     width: u32 = 0,
     height: u32 = 0,
+    maximized: bool = false,
     // xkb
     xkb_ctx: ?*xkb.xkb_context = null,
     xkb_keymap: ?*xkb.xkb_keymap = null,
@@ -118,9 +119,16 @@ pub const WaylandBackend = struct {
         _ = wl.xdg_surface_add_listener(xdg_surface, &xdg_surface_listener, self);
         _ = wl.xdg_toplevel_add_listener(toplevel, &xdg_toplevel_listener, self);
 
-        // 提交 surface 以触发 configure
+        // 提交 surface 以触发首次 configure
         wl.wl_surface_commit(surface);
         _ = wl.wl_display_roundtrip(self.display);
+
+        // 固定窗口大小: 必须在首次 configure 后设置 (协议要求)
+        if (!desc.resizable) {
+            wl.xdg_toplevel_set_min_size(toplevel, @intCast(desc.width), @intCast(desc.height));
+            wl.xdg_toplevel_set_max_size(toplevel, @intCast(desc.width), @intCast(desc.height));
+            wl.wl_surface_commit(surface);
+        }
 
         self.surface = surface;
         self.xdg_surface = xdg_surface;
@@ -182,6 +190,22 @@ pub const WaylandBackend = struct {
 
     pub fn getWindowSize(self: *const WaylandBackend) struct { width: u32, height: u32 } {
         return .{ .width = self.width, .height = self.height };
+    }
+
+    /// 请求最大化窗口
+    pub fn setMaximized(self: *WaylandBackend) void {
+        if (self.toplevel) |tl| {
+            wl.xdg_toplevel_set_maximized(tl);
+            if (self.surface) |s| wl.wl_surface_commit(s);
+        }
+    }
+
+    /// 取消最大化
+    pub fn unsetMaximized(self: *WaylandBackend) void {
+        if (self.toplevel) |tl| {
+            wl.xdg_toplevel_unset_maximized(tl);
+            if (self.surface) |s| wl.wl_surface_commit(s);
+        }
     }
 
     // ── 内部: 事件推送辅助 ──────────────────────────────────────────────────
@@ -282,13 +306,32 @@ fn xdgToplevelConfigure(
     _: ?*wl.struct_xdg_toplevel,
     width: i32,
     height: i32,
-    _: ?*wl.struct_wl_array,
+    states: ?*wl.struct_wl_array,
 ) callconv(.c) void {
     const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
     if (width > 0 and height > 0) {
         self.width = @intCast(width);
         self.height = @intCast(height);
         self.pushEvent(.{ .resize = .{ .width = self.width, .height = self.height } });
+    }
+    // 解析 states 数组检测最大化状态
+    if (states) |arr| {
+        const count = arr.size / @sizeOf(u32);
+        if (count > 0) {
+            const data_ptr: [*]const u32 = @ptrCast(@alignCast(arr.data));
+            const slice = data_ptr[0..count];
+            var is_maximized = false;
+            for (slice) |s| {
+                if (s == wl.XDG_TOPLEVEL_STATE_MAXIMIZED) {
+                    is_maximized = true;
+                    break;
+                }
+            }
+            if (is_maximized != self.maximized) {
+                self.maximized = is_maximized;
+                self.pushEvent(.{ .maximize = .{ .maximized = is_maximized } });
+            }
+        }
     }
 }
 

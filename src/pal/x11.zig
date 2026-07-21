@@ -21,6 +21,10 @@ pub const X11Backend = struct {
     window_id: u32 = 0,
     wm_delete_window: u32 = 0,
     wm_protocols: u32 = 0,
+    net_wm_state: u32 = 0,
+    net_wm_state_maximized_vert: u32 = 0,
+    net_wm_state_maximized_horz: u32 = 0,
+    maximized: bool = false,
     // xkbcommon
     xkb_ctx: *xkb.xkb_context,
     xkb_keymap: ?*xkb.xkb_keymap = null,
@@ -90,7 +94,8 @@ pub const X11Backend = struct {
                 xcb.XCB_EVENT_MASK_POINTER_MOTION |
                 xcb.XCB_EVENT_MASK_ENTER_WINDOW |
                 xcb.XCB_EVENT_MASK_LEAVE_WINDOW |
-                xcb.XCB_EVENT_MASK_FOCUS_CHANGE,
+                xcb.XCB_EVENT_MASK_FOCUS_CHANGE |
+                xcb.XCB_EVENT_MASK_PROPERTY_CHANGE,
             self.screen.white_pixel,
         };
 
@@ -113,6 +118,9 @@ pub const X11Backend = struct {
         // 设置 WM_PROTOCOLS (WM_DELETE_WINDOW)
         self.wm_protocols = internAtom(self.conn, "WM_PROTOCOLS");
         self.wm_delete_window = internAtom(self.conn, "WM_DELETE_WINDOW");
+        self.net_wm_state = internAtom(self.conn, "_NET_WM_STATE");
+        self.net_wm_state_maximized_vert = internAtom(self.conn, "_NET_WM_STATE_MAXIMIZED_VERT");
+        self.net_wm_state_maximized_horz = internAtom(self.conn, "_NET_WM_STATE_MAXIMIZED_HORZ");
         if (self.wm_protocols != 0 and self.wm_delete_window != 0) {
             _ = xcb.xcb_change_property(
                 self.conn,
@@ -129,10 +137,39 @@ pub const X11Backend = struct {
         // 设置窗口标题
         setTitle(self.conn, wid, desc.title);
 
-        // 设置最小尺寸提示
-        if (desc.min_width) |mw| {
-            _ = mw;
-            // TODO: 设置 WM_SIZE_HINTS
+        // 设置 WM_NORMAL_HINTS (尺寸约束)
+        {
+            var hints: [18]u32 = .{0} ** 18;
+            // flags: PSize | PMinSize | PMaxSize
+            hints[0] = 0x08 | 0x10 | 0x20;
+            // width, height (index 2, 3)
+            hints[2] = desc.width;
+            hints[3] = desc.height;
+            if (!desc.resizable) {
+                // 固定大小: min = max = 窗口尺寸
+                hints[4] = desc.width; // min_width
+                hints[5] = desc.height; // min_height
+                hints[6] = desc.width; // max_width
+                hints[7] = desc.height; // max_height
+            } else {
+                hints[4] = desc.min_width orelse 1;
+                hints[5] = desc.min_height orelse 1;
+                hints[6] = desc.max_width orelse 0;
+                hints[7] = desc.max_height orelse 0;
+            }
+            const wm_normal_hints = internAtom(self.conn, "WM_NORMAL_HINTS");
+            if (wm_normal_hints != 0) {
+                _ = xcb.xcb_change_property(
+                    self.conn,
+                    xcb.XCB_PROP_MODE_REPLACE,
+                    wid,
+                    wm_normal_hints,
+                    wm_normal_hints, // type = WM_SIZE_HINTS
+                    32,
+                    18,
+                    &hints,
+                );
+            }
         }
 
         if (desc.visible) {
@@ -214,6 +251,7 @@ pub const X11Backend = struct {
             xcb.XCB_BUTTON_PRESS, xcb.XCB_BUTTON_RELEASE => self.translateButtonEvent(ev),
             xcb.XCB_MOTION_NOTIFY => self.translateMotionEvent(ev),
             xcb.XCB_CONFIGURE_NOTIFY => self.translateConfigureEvent(ev),
+            xcb.XCB_PROPERTY_NOTIFY => self.translatePropertyNotify(ev),
             xcb.XCB_CLIENT_MESSAGE => self.translateClientMessage(ev),
             xcb.XCB_FOCUS_IN => .{ .focus_change = .{ .focused = true } },
             xcb.XCB_FOCUS_OUT => .{ .focus_change = .{ .focused = false } },
@@ -314,6 +352,79 @@ pub const X11Backend = struct {
             .width = @intCast(cfg_ev.*.width),
             .height = @intCast(cfg_ev.*.height),
         } };
+    }
+
+    fn translatePropertyNotify(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t) ?event_mod.Event {
+        const prop_ev = @as([*c]xcb.xcb_property_notify_event_t, @ptrCast(ev));
+        if (prop_ev.*.atom != self.net_wm_state) return null;
+        // 查询当前 _NET_WM_STATE 属性
+        const is_max = self.queryMaximizedState();
+        if (is_max != self.maximized) {
+            self.maximized = is_max;
+            return .{ .maximize = .{ .maximized = is_max } };
+        }
+        return null;
+    }
+
+    /// 查询窗口当前最大化状态
+    fn queryMaximizedState(self: *X11Backend) bool {
+        if (self.net_wm_state == 0) return false;
+        const cookie = xcb.xcb_get_property(
+            self.conn,
+            0, // delete
+            self.window_id,
+            self.net_wm_state,
+            xcb.XCB_ATOM_ATOM,
+            0,
+            64,
+        );
+        var err: [*c]xcb.xcb_generic_error_t = null;
+        const reply = xcb.xcb_get_property_reply(self.conn, cookie, &err);
+        defer if (reply != null) std.c.free(reply);
+        if (reply == null or err != null) return false;
+        const len = xcb.xcb_get_property_value_length(reply);
+        if (len <= 0) return false;
+        const atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
+        const count: usize = @intCast(@divFloor(len, 4));
+        for (atoms[0..count]) |atom| {
+            if (atom == self.net_wm_state_maximized_vert or atom == self.net_wm_state_maximized_horz) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// 请求最大化窗口 (发送 _NET_WM_STATE client message)
+    pub fn setMaximized(self: *X11Backend) void {
+        self.sendWmStateChange(1); // _NET_WM_STATE_ADD
+    }
+
+    /// 取消最大化
+    pub fn unsetMaximized(self: *X11Backend) void {
+        self.sendWmStateChange(0); // _NET_WM_STATE_REMOVE
+    }
+
+    fn sendWmStateChange(self: *X11Backend, action: u32) void {
+        if (self.net_wm_state == 0) return;
+        var ev: xcb.xcb_client_message_event_t = undefined;
+        ev.response_type = xcb.XCB_CLIENT_MESSAGE;
+        ev.format = 32;
+        ev.sequence = 0;
+        ev.window = self.window_id;
+        ev.type = self.net_wm_state;
+        ev.data.data32[0] = action;
+        ev.data.data32[1] = self.net_wm_state_maximized_vert;
+        ev.data.data32[2] = self.net_wm_state_maximized_horz;
+        ev.data.data32[3] = 1; // source: normal application
+        ev.data.data32[4] = 0;
+        _ = xcb.xcb_send_event(
+            self.conn,
+            0,
+            self.screen.root,
+            xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT | xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY,
+            @ptrCast(&ev),
+        );
+        _ = xcb.xcb_flush(self.conn);
     }
 
     fn translateClientMessage(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t) ?event_mod.Event {

@@ -84,6 +84,7 @@ pub const VulkanDevice = struct {
     // 状态
     fb_width: u32,
     fb_height: u32,
+    needs_recreate: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, xcb_conn_ptr: *anyopaque, window_id: u32, width: u32, height: u32) !VulkanDevice {
         // 1. 创建 Instance
@@ -103,7 +104,7 @@ pub const VulkanDevice = struct {
         const queue = device_result.queue;
 
         // 5. 创建 Swapchain
-        const swapchain_result = try createSwapchain(allocator, physical_device, device, surface, width, height);
+        const swapchain_result = try createSwapchain(allocator, physical_device, device, surface, width, height, null);
 
         // 6. 创建 Render Pass
         const render_pass = try createRenderPass(device, swapchain_result.format);
@@ -186,7 +187,7 @@ pub const VulkanDevice = struct {
         const device_result = try createLogicalDevice(physical_device, queue_family);
         const device = device_result.device;
         const queue = device_result.queue;
-        const swapchain_result = try createSwapchain(allocator, physical_device, device, surface, width, height);
+        const swapchain_result = try createSwapchain(allocator, physical_device, device, surface, width, height, null);
         const render_pass = try createRenderPass(device, swapchain_result.format);
         const desc = try createDescriptorSet(device);
         const solid_pipe = try createSolidPipeline(device, render_pass, swapchain_result.extent);
@@ -296,13 +297,19 @@ pub const VulkanDevice = struct {
 
     /// 开始帧: 获取 swapchain image, 返回 framebuffer 尺寸
     pub fn beginFrame(self: *VulkanDevice) ?[2]u32 {
+        // 如果上一帧标记了需要重建 (present 时检测到 resize)
+        if (self.needs_recreate) {
+            self.recreateSwapchain() catch return null;
+            self.needs_recreate = false;
+        }
+
         // 等待 fence
         _ = vk.vkWaitForFences(self.device, 1, &self.in_flight[self.current_frame], vk.VK_TRUE, std.math.maxInt(u64));
         _ = vk.vkResetFences(self.device, 1, &self.in_flight[self.current_frame]);
 
         // 获取 image
         var image_index: u32 = 0;
-        const result = vk.vkAcquireNextImageKHR(
+        var result = vk.vkAcquireNextImageKHR(
             self.device,
             self.swapchain,
             std.math.maxInt(u64),
@@ -310,6 +317,18 @@ pub const VulkanDevice = struct {
             null,
             &image_index,
         );
+        // swapchain 过期 (窗口 resize/最大化): 重建后重试
+        if (result == vk.VK_ERROR_OUT_OF_DATE_KHR) {
+            self.recreateSwapchain() catch return null;
+            result = vk.vkAcquireNextImageKHR(
+                self.device,
+                self.swapchain,
+                std.math.maxInt(u64),
+                self.image_available[self.current_frame],
+                null,
+                &image_index,
+            );
+        }
         if (result != vk.VK_SUCCESS and result != vk.VK_SUBOPTIMAL_KHR) return null;
         self.image_index = image_index;
 
@@ -495,7 +514,10 @@ pub const VulkanDevice = struct {
             .pResults = null,
         };
         const present_result = vk.vkQueuePresentKHR(self.queue, &present_info);
-        if (present_result != vk.VK_SUCCESS and present_result != vk.VK_SUBOPTIMAL_KHR) {
+        if (present_result == vk.VK_ERROR_OUT_OF_DATE_KHR or present_result == vk.VK_SUBOPTIMAL_KHR) {
+            // 窗口尺寸变化, 下一帧重建 swapchain
+            self.needs_recreate = true;
+        } else if (present_result != vk.VK_SUCCESS) {
             std.debug.print("[VK] vkQueuePresentKHR failed: {d}\n", .{present_result});
         }
 
@@ -506,9 +528,43 @@ pub const VulkanDevice = struct {
     pub fn setDrawableSize(self: *VulkanDevice, width: u32, height: u32) void {
         if (width == 0 or height == 0) return;
         if (width == self.fb_width and height == self.fb_height) return;
-        // TODO: 重建 swapchain
         self.fb_width = width;
         self.fb_height = height;
+        self.needs_recreate = true;
+    }
+
+    /// 重建 swapchain (resize / 最大化)
+    fn recreateSwapchain(self: *VulkanDevice) !void {
+        _ = vk.vkDeviceWaitIdle(self.device);
+
+        // 销毁旧 framebuffers
+        for (self.framebuffers) |fb| {
+            vk.vkDestroyFramebuffer(self.device, fb, null);
+        }
+        self.allocator.free(self.framebuffers);
+
+        // 销毁旧 image views
+        for (self.swapchain_views) |view| {
+            vk.vkDestroyImageView(self.device, view, null);
+        }
+        self.allocator.free(self.swapchain_views);
+        self.allocator.free(self.swapchain_images);
+
+        // 创建新 swapchain (传入 oldSwapchain 以便驱动复用资源)
+        const old_swapchain = self.swapchain;
+        const result = try createSwapchain(self.allocator, self.physical_device, self.device, self.surface, self.fb_width, self.fb_height, old_swapchain);
+        vk.vkDestroySwapchainKHR(self.device, old_swapchain, null);
+
+        self.swapchain = result.swapchain;
+        self.swapchain_images = result.images;
+        self.swapchain_views = result.views;
+        self.swapchain_format = result.format;
+        self.swapchain_extent = result.extent;
+        // 保留目标尺寸 (fb_width/fb_height 由 setDrawableSize 设置, 不覆写)
+        // 如果 swapchain 实际尺寸与目标不符, 下一帧 present 会触发再次重建
+
+        // 重建 framebuffers
+        self.framebuffers = try createFramebuffers(self.allocator, self.device, self.render_pass, self.swapchain_views, self.swapchain_extent);
     }
 
     // ── Texture (glyph atlas) ────────────────────────────────────────────────
@@ -1061,7 +1117,7 @@ const SwapchainResult = struct {
     extent: vk.VkExtent2D,
 };
 
-fn createSwapchain(allocator: std.mem.Allocator, physical_device: vk.VkPhysicalDevice, device: vk.VkDevice, surface: vk.VkSurfaceKHR, width: u32, height: u32) !SwapchainResult {
+fn createSwapchain(allocator: std.mem.Allocator, physical_device: vk.VkPhysicalDevice, device: vk.VkDevice, surface: vk.VkSurfaceKHR, width: u32, height: u32, old_swapchain: vk.VkSwapchainKHR) !SwapchainResult {
     var capabilities: vk.VkSurfaceCapabilitiesKHR = undefined;
     _ = vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &capabilities);
 
@@ -1080,9 +1136,15 @@ fn createSwapchain(allocator: std.mem.Allocator, physical_device: vk.VkPhysicalD
         }
     }
 
-    const extent = vk.VkExtent2D{
-        .width = @max(capabilities.minImageExtent.width, @min(capabilities.maxImageExtent.width, width)),
-        .height = @max(capabilities.minImageExtent.height, @min(capabilities.maxImageExtent.height, height)),
+    // Wayland 上 currentExtent 可能为 (0xFFFFFFFF, 0xFFFFFFFF) 表示“未定义”,
+    // 此时 swapchain extent 由客户端决定, 不应被 min/max 钳制
+    const extent = if (capabilities.currentExtent.width == 0xFFFFFFFF) blk: {
+        break :blk vk.VkExtent2D{ .width = width, .height = height };
+    } else blk: {
+        break :blk vk.VkExtent2D{
+            .width = @max(capabilities.minImageExtent.width, @min(capabilities.maxImageExtent.width, width)),
+            .height = @max(capabilities.minImageExtent.height, @min(capabilities.maxImageExtent.height, height)),
+        };
     };
 
     var image_count = capabilities.minImageCount + 1;
@@ -1108,7 +1170,7 @@ fn createSwapchain(allocator: std.mem.Allocator, physical_device: vk.VkPhysicalD
         .compositeAlpha = vk.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .presentMode = vk.VK_PRESENT_MODE_FIFO_KHR,
         .clipped = vk.VK_TRUE,
-        .oldSwapchain = null,
+        .oldSwapchain = old_swapchain,
     };
 
     var swapchain: vk.VkSwapchainKHR = undefined;

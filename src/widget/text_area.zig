@@ -35,11 +35,14 @@ pub const TextArea = struct {
     corner_radius: f32 = 8.0,
     padding: f32 = 10.0,
     cursor_visible: bool = true,
+    /// 文本水平对齐方式 (默认左对齐)
+    text_align: text_layout.TextAlign = .left,
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         placeholder: []const u8 = "",
         font_size: f32 = 14.0,
         on_change: ?*const fn (self: *TextArea, text: []const u8) void = null,
+        text_align: text_layout.TextAlign = .left,
     }) !*TextArea {
         const self = try allocator.create(TextArea);
         self.* = .{
@@ -52,6 +55,7 @@ pub const TextArea = struct {
             .font_size = opts.font_size,
             .placeholder = opts.placeholder,
             .on_change = opts.on_change,
+            .text_align = opts.text_align,
         };
         return self;
     }
@@ -72,6 +76,12 @@ pub const TextArea = struct {
         self.cursor = new_text.len;
         self.selection_start = null;
         self.desired_col = null;
+        self.base.markDirty();
+    }
+
+    /// 设置文本对齐方式 (左/居中/右; 多行编辑两端对齐按左对齐处理)
+    pub fn setTextAlign(self: *TextArea, alignment: text_layout.TextAlign) void {
+        self.text_align = alignment;
         self.base.markDirty();
     }
 
@@ -224,10 +234,14 @@ pub const TextArea = struct {
 
         const text_x = rx + self.padding;
         const lh = self.lineHeight();
+        const avail_w = rw - self.padding * 2;
+
+        var font = coretext.CtFont.create(null, self.font_size, 400) catch return;
+        defer font.destroy();
 
         if (self.text.items.len == 0 and !w.state.focused) {
             if (self.placeholder.len > 0) {
-                self.drawLabel(ctx, self.placeholder, text_x, ry + self.padding, self.placeholder_color);
+                self.drawLabel(ctx, &font, self.placeholder, text_x, ry + self.padding, self.placeholder_color);
             }
             return;
         }
@@ -248,6 +262,10 @@ pub const TextArea = struct {
             const le = self.lineEnd(ls);
             const line_y = ry + self.padding + @as(f32, @floatFromInt(li)) * lh - self.scroll_y;
 
+            // 该行对齐偏移
+            const line_slice = self.text.items[ls..le];
+            const offset = self.lineAlignOffset(font.measureText(line_slice), avail_w);
+
             // 该行选区高亮
             if (has_sel and ls < sel_end and le > sel_start) {
                 const hl_start = @max(ls, sel_start);
@@ -255,14 +273,14 @@ pub const TextArea = struct {
                 const sx: f32 = @floatFromInt(hl_start - ls);
                 const ex: f32 = @floatFromInt(hl_end - ls);
                 ctx.renderer.fillRect(
-                    .{ .x = text_x + sx * self.charWidth(), .y = line_y + 2, .width = (ex - sx) * self.charWidth(), .height = lh - 4 },
+                    .{ .x = text_x + offset + sx * self.charWidth(), .y = line_y + 2, .width = (ex - sx) * self.charWidth(), .height = lh - 4 },
                     self.selection_color,
                 ) catch {};
             }
 
             // 该行文本
             if (le > ls) {
-                self.drawLabel(ctx, self.text.items[ls..le], text_x, line_y, self.text_color);
+                self.drawLabel(ctx, &font, line_slice, text_x + offset, line_y, self.text_color);
             }
         }
 
@@ -270,7 +288,11 @@ pub const TextArea = struct {
         if (w.state.focused and self.cursor_visible) {
             const cursor_line = self.lineIndex(self.cursor);
             const cursor_col = self.colOf(self.cursor);
-            const cx = text_x + @as(f32, @floatFromInt(cursor_col)) * self.charWidth();
+            // 光标所在行的对齐偏移
+            const cls = self.lineStartAtIndex(cursor_line);
+            const cle = self.lineEnd(cls);
+            const c_offset = self.lineAlignOffset(font.measureText(self.text.items[cls..cle]), avail_w);
+            const cx = text_x + c_offset + @as(f32, @floatFromInt(cursor_col)) * self.charWidth();
             const cy = ry + self.padding + @as(f32, @floatFromInt(cursor_line)) * lh - self.scroll_y;
             if (cy >= ry and cy + lh <= ry + rh) {
                 ctx.renderer.fillRect(
@@ -289,17 +311,26 @@ pub const TextArea = struct {
         }
     }
 
-    fn drawLabel(self: *TextArea, ctx: *PaintContext, text: []const u8, x: f32, y: f32, color: math.Color) void {
+    /// 逐行文本对齐偏移 (左/居中/右; 两端对齐按左对齐; 行溢出时保持左对齐)
+    fn lineAlignOffset(self: *const TextArea, line_w: f32, avail_w: f32) f32 {
+        const extra = avail_w - line_w;
+        if (extra <= 0) return 0;
+        return switch (self.text_align) {
+            .center => extra / 2.0,
+            .right => extra,
+            .left, .justify => 0,
+        };
+    }
+
+    fn drawLabel(self: *TextArea, ctx: *PaintContext, font: *const coretext.CtFont, text: []const u8, x: f32, y: f32, color: math.Color) void {
         if (text.len == 0) return;
-        var font = coretext.CtFont.create(null, self.font_size, 400) catch return;
-        defer font.destroy();
 
         var tl = text_layout.TextLayout.layout(
             ctx.allocator,
             &ctx.renderer.glyph_atlas.?,
             ctx.renderer.device,
             text,
-            .{ .font = &font, .font_size = self.font_size },
+            .{ .font = font, .font_size = self.font_size },
         ) catch return;
         defer tl.deinit();
 

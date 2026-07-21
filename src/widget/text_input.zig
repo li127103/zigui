@@ -35,12 +35,15 @@ pub const TextInput = struct {
     padding_h: f32 = 12.0,
     cursor_blink_ms: u32 = 0,
     cursor_visible: bool = true,
+    /// 文本水平对齐方式 (默认左对齐)
+    text_align: text_layout.TextAlign = .left,
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         placeholder: []const u8 = "",
         font_size: f32 = 14.0,
         on_change: ?*const fn (self: *TextInput, text: []const u8) void = null,
         on_submit: ?*const fn (self: *TextInput, text: []const u8) void = null,
+        text_align: text_layout.TextAlign = .left,
     }) !*TextInput {
         const self = try allocator.create(TextInput);
         self.* = .{
@@ -54,6 +57,7 @@ pub const TextInput = struct {
             .placeholder = opts.placeholder,
             .on_change = opts.on_change,
             .on_submit = opts.on_submit,
+            .text_align = opts.text_align,
         };
         return self;
     }
@@ -73,6 +77,12 @@ pub const TextInput = struct {
         try self.text.appendSlice(self.allocator, new_text);
         self.cursor = new_text.len;
         self.selection_start = null;
+        self.base.markDirty();
+    }
+
+    /// 设置文本对齐方式 (左/居中/右; 单行输入两端对齐按左对齐处理)
+    pub fn setTextAlign(self: *TextInput, alignment: text_layout.TextAlign) void {
+        self.text_align = alignment;
         self.base.markDirty();
     }
 
@@ -122,12 +132,20 @@ pub const TextInput = struct {
         const text_x = rx + self.padding_h;
         const text_y = ry + (rh - self.font_size * 1.2) / 2.0;
 
+        var font = coretext.CtFont.create(null, self.font_size, 400) catch return;
+        defer font.destroy();
+
         if (self.text.items.len == 0 and !w.state.focused) {
             // Placeholder
             if (self.placeholder.len > 0) {
-                self.drawLabel(ctx, self.placeholder, text_x, text_y, self.placeholder_color);
+                self.drawLabel(ctx, &font, self.placeholder, text_x, text_y, self.placeholder_color);
             }
         } else {
+            // 对齐偏移 (单行: 左/居中/右)
+            const avail_w = rw - self.padding_h * 2;
+            const text_w = font.measureText(self.text.items);
+            const offset = self.alignOffset(text_w, avail_w);
+
             // 选区高亮
             if (self.hasSelection()) {
                 const sel_start = @min(self.selection_start.?, self.cursor);
@@ -137,18 +155,18 @@ pub const TextInput = struct {
                 const sx: f32 = @floatFromInt(sel_start);
                 const ex: f32 = @floatFromInt(sel_end);
                 ctx.renderer.fillRect(
-                    .{ .x = text_x + sx * char_w, .y = ry + 4, .width = (ex - sx) * char_w, .height = rh - 8 },
+                    .{ .x = text_x + offset + sx * char_w, .y = ry + 4, .width = (ex - sx) * char_w, .height = rh - 8 },
                     self.selection_color,
                 ) catch {};
             }
 
             // 文本
-            self.drawLabel(ctx, self.text.items, text_x, text_y, self.text_color);
+            self.drawLabel(ctx, &font, self.text.items, text_x + offset, text_y, self.text_color);
 
             // 光标
             if (w.state.focused and self.cursor_visible) {
                 const char_w = self.font_size * 0.6;
-                const cx = text_x + @as(f32, @floatFromInt(self.cursor)) * char_w;
+                const cx = text_x + offset + @as(f32, @floatFromInt(self.cursor)) * char_w;
                 ctx.renderer.fillRect(
                     .{ .x = cx, .y = ry + 5, .width = 2, .height = rh - 10 },
                     self.cursor_color,
@@ -157,16 +175,24 @@ pub const TextInput = struct {
         }
     }
 
-    fn drawLabel(self: *TextInput, ctx: *PaintContext, text: []const u8, x: f32, y: f32, color: math.Color) void {
-        var font = coretext.CtFont.create(null, self.font_size, 400) catch return;
-        defer font.destroy();
+    /// 单行文本对齐偏移 (左/居中/右; 两端对齐按左对齐; 文本溢出时保持左对齐)
+    fn alignOffset(self: *const TextInput, text_w: f32, avail_w: f32) f32 {
+        const extra = avail_w - text_w;
+        if (extra <= 0) return 0;
+        return switch (self.text_align) {
+            .center => extra / 2.0,
+            .right => extra,
+            .left, .justify => 0,
+        };
+    }
 
+    fn drawLabel(self: *TextInput, ctx: *PaintContext, font: *const coretext.CtFont, text: []const u8, x: f32, y: f32, color: math.Color) void {
         var tl = text_layout.TextLayout.layout(
             ctx.allocator,
             &ctx.renderer.glyph_atlas.?,
             ctx.renderer.device,
             text,
-            .{ .font = &font, .font_size = self.font_size },
+            .{ .font = font, .font_size = self.font_size },
         ) catch return;
         defer tl.deinit();
 

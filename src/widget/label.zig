@@ -18,11 +18,14 @@ pub const Label = struct {
     font_size: f32,
     font_weight: u16,
     color: math.Color,
+    /// 文本水平对齐方式 (默认左对齐)
+    text_align: text_layout.TextAlign = .left,
 
     pub fn create(allocator: std.mem.Allocator, text: []const u8, opts: struct {
         font_size: f32 = 14.0,
         font_weight: u16 = 400,
         color: math.Color = math.Color.hex(0xF8FAFCFF),
+        text_align: text_layout.TextAlign = .left,
     }) !*Label {
         const self = try allocator.create(Label);
         self.* = .{
@@ -34,6 +37,7 @@ pub const Label = struct {
             .font_size = opts.font_size,
             .font_weight = opts.font_weight,
             .color = opts.color,
+            .text_align = opts.text_align,
         };
         return self;
     }
@@ -47,6 +51,12 @@ pub const Label = struct {
         self.text = text;
         self.base.markDirty();
         self.base.markLayoutDirty();
+    }
+
+    /// 设置文本对齐方式 (左/居中/右/两端对齐)
+    pub fn setTextAlign(self: *Label, alignment: text_layout.TextAlign) void {
+        self.text_align = alignment;
+        self.base.markDirty();
     }
 
     // ── VTable 实现 ──────────────────────────────────────────────────────────
@@ -90,12 +100,15 @@ pub const Label = struct {
         var font = coretext.CtFont.create(null, self.font_size, self.font_weight) catch return;
         defer font.destroy();
 
+        // 对齐需要容器宽度; 左对齐 (默认) 不传 max_width, 保持原单行行为
+        const max_w: ?f32 = if (self.text_align != .left) w.rect.width else null;
+
         var tl = text_layout.TextLayout.layout(
             ctx.allocator,
             &ctx.renderer.glyph_atlas.?,
             ctx.renderer.device,
             self.text,
-            .{ .font = &font, .font_size = self.font_size },
+            .{ .font = &font, .font_size = self.font_size, .max_width = max_w, .text_align = self.text_align },
         ) catch return;
         defer tl.deinit();
 

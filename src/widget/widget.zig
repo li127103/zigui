@@ -3,10 +3,16 @@
 const std = @import("std");
 const math = @import("../math.zig");
 const pal = @import("../pal/pal.zig");
-const renderer2d = @import("../render2d/renderer.zig");
+const r2d = @import("../render2d/r2d.zig");
 const dirty_mod = @import("../render2d/dirty.zig");
 const theme_mod = @import("../theme/theme.zig");
 const layout_mod = @import("../layout/engine.zig");
+const background_mod = @import("background.zig");
+
+pub const Background = background_mod.Background;
+pub const BackgroundImage = background_mod.BackgroundImage;
+pub const BackgroundSizing = background_mod.BackgroundSizing;
+pub const BackgroundStyle = background_mod.BackgroundStyle;
 
 pub const WidgetId = u64;
 
@@ -33,7 +39,7 @@ pub const EventResult = enum { handled, ignored };
 
 /// 绘制上下文
 pub const PaintContext = struct {
-    renderer: *renderer2d.Renderer2D,
+    renderer: *r2d.Renderer2D,
     theme: *const theme_mod.Theme,
     allocator: std.mem.Allocator,
     // 当前绘制的绝对偏移 (由控件树递归传递)
@@ -59,6 +65,8 @@ pub const Widget = struct {
     state: WidgetState = .{},
     // 布局样式
     layout_style: layout_mod.LayoutStyle = .{},
+    /// 背景样式 (框架在 paintTree 中自动绘制于控件内容之前, 默认无背景)
+    background: BackgroundStyle = .{},
     // 脏矩形跟踪器 (仅根控件设置, markDirty 时记录绝对脏区)
     dirty_tracker: ?*dirty_mod.DirtyRegion = null,
 
@@ -169,12 +177,15 @@ pub const Widget = struct {
         const inner_w = self.rect.width - pad.left - pad.right;
         const inner_h = self.rect.height - pad.top - pad.bottom;
 
-        // 测量所有子项
+        // 测量所有子项 (跳过绝对定位子项, 它们不参与 flex 流)
         var total_main: f32 = 0;
         var total_grow: f32 = 0;
         var count: usize = 0;
 
         for (self.children.items) |child| {
+            if (child.layout_style.position == .absolute) continue;
+            // 不可见子项不参与 flex 流 (不占布局空间)
+            if (!child.state.visible) continue;
             const child_constraints = layout_mod.Constraints{
                 .max_width = if (is_row) inner_w else inner_w,
                 .max_height = if (is_row) inner_h else inner_h,
@@ -205,6 +216,8 @@ pub const Widget = struct {
         const free_space = (if (is_row) inner_w else inner_h) - total_main;
         if (free_space > 0 and total_grow > 0) {
             for (self.children.items) |child| {
+                if (child.layout_style.position == .absolute) continue;
+                if (!child.state.visible) continue;
                 if (child.layout_style.flex_grow > 0) {
                     const extra = free_space * (child.layout_style.flex_grow / total_grow);
                     if (is_row) {
@@ -216,26 +229,139 @@ pub const Widget = struct {
             }
         }
 
-        // 定位
-        var cursor: f32 = 0;
+        // 定位 (flex 流)
+        // 主轴分布: 重新统计 flex 分配后的主轴总尺寸 (可见子项)
+        const justify = self.layout_style.justify_content;
+        var final_main: f32 = 0;
+        var visible_count: usize = 0;
         for (self.children.items) |child| {
+            if (child.layout_style.position == .absolute) continue;
+            if (!child.state.visible) continue;
             const cm = child.layout_style.margin;
+            if (is_row) {
+                final_main += child.rect.width + cm.left + cm.right;
+            } else {
+                final_main += child.rect.height + cm.top + cm.bottom;
+            }
+            visible_count += 1;
+        }
+        if (visible_count > 1) final_main += gap * @as(f32, @floatFromInt(visible_count - 1));
+
+        const remaining = @max(0, (if (is_row) inner_w else inner_h) - final_main);
+        var start: f32 = 0;
+        var extra_gap: f32 = 0;
+        const vc: f32 = @floatFromInt(visible_count);
+        switch (justify) {
+            .start => {},
+            .center => start = remaining / 2,
+            .end => start = remaining,
+            .space_between => {
+                if (visible_count > 1) extra_gap = remaining / (vc - 1);
+            },
+            .space_around => {
+                if (visible_count > 0) {
+                    extra_gap = remaining / vc;
+                    start = extra_gap / 2;
+                }
+            },
+            .space_evenly => {
+                extra_gap = remaining / (vc + 1);
+                start = extra_gap;
+            },
+        }
+
+        const cross_align = self.layout_style.align_items;
+        var cursor: f32 = start;
+        for (self.children.items) |child| {
+            if (child.layout_style.position == .absolute) continue;
+            if (!child.state.visible) continue;
+            const cm = child.layout_style.margin;
+            // 交叉轴对齐: align_self 优先于容器 align_items
+            const cross = child.layout_style.align_self orelse cross_align;
             if (is_row) {
                 cursor += cm.left;
                 child.rect.x = pad.left + cursor;
-                child.rect.y = pad.top + cm.top;
-                cursor += child.rect.width + cm.right + gap;
+                switch (cross) {
+                    .stretch => {
+                        child.rect.y = pad.top + cm.top;
+                        // 未显式指定高度时撑满容器内高
+                        if (child.layout_style.height == .auto) {
+                            child.rect.height = inner_h - cm.top - cm.bottom;
+                        }
+                    },
+                    .center => child.rect.y = pad.top + cm.top + (inner_h - cm.top - cm.bottom - child.rect.height) / 2,
+                    .end => child.rect.y = pad.top + inner_h - child.rect.height - cm.bottom,
+                    .start, .baseline => child.rect.y = pad.top + cm.top,
+                }
+                cursor += child.rect.width + cm.right + gap + extra_gap;
             } else {
                 cursor += cm.top;
-                child.rect.x = pad.left + cm.left;
                 child.rect.y = pad.top + cursor;
-                cursor += child.rect.height + cm.bottom + gap;
+                switch (cross) {
+                    .stretch => {
+                        child.rect.x = pad.left + cm.left;
+                        // 未显式指定宽度时撑满容器内宽
+                        if (child.layout_style.width == .auto) {
+                            child.rect.width = inner_w - cm.left - cm.right;
+                        }
+                    },
+                    .center => child.rect.x = pad.left + cm.left + (inner_w - cm.left - cm.right - child.rect.width) / 2,
+                    .end => child.rect.x = pad.left + inner_w - child.rect.width - cm.right,
+                    .start, .baseline => child.rect.x = pad.left + cm.left,
+                }
+                cursor += child.rect.height + cm.bottom + gap + extra_gap;
             }
 
             // 递归布局子项
             if (child.children.items.len > 0) {
                 child.layoutChildren(ctx);
             }
+        }
+
+        // 绝对定位子项 (不参与 flex 流, 按 top/left/right/bottom 相对父容器定位)
+        for (self.children.items) |child| {
+            if (child.layout_style.position != .absolute) continue;
+            self.layoutAbsolute(child, ctx);
+        }
+    }
+
+    /// 绝对定位子项: 根据 top/left/right/bottom + 父容器尺寸定位
+    fn layoutAbsolute(self: *Widget, child: *Widget, ctx: *PaintContext) void {
+        const cs = child.layout_style;
+
+        // 测量 (应用显式尺寸)
+        const child_size = child.vtable.measure(child, ctx, .{
+            .max_width = self.rect.width,
+            .max_height = self.rect.height,
+        });
+        var cw = child_size.width;
+        var ch = child_size.height;
+        if (cs.width.resolve(self.rect.width)) |ew| cw = ew;
+        if (cs.height.resolve(self.rect.height)) |eh| ch = eh;
+        child.rect.width = cw;
+        child.rect.height = ch;
+
+        // 水平定位
+        if (cs.left) |l| {
+            child.rect.x = l + cs.margin.left;
+        } else if (cs.right) |rv| {
+            child.rect.x = self.rect.width - rv - cw - cs.margin.right;
+        } else {
+            child.rect.x = cs.margin.left;
+        }
+
+        // 垂直定位
+        if (cs.top) |t| {
+            child.rect.y = t + cs.margin.top;
+        } else if (cs.bottom) |bv| {
+            child.rect.y = self.rect.height - bv - ch - cs.margin.bottom;
+        } else {
+            child.rect.y = cs.margin.top;
+        }
+
+        // 递归布局子项
+        if (child.children.items.len > 0) {
+            child.layoutChildren(ctx);
         }
     }
 
@@ -262,6 +388,9 @@ pub const Widget = struct {
             }
         }
 
+        // 框架自动绘制背景 (先于控件内容, 子树绘制在其上)
+        self.paintBackground(ctx);
+
         // 绘制自身
         self.vtable.paint(self, ctx);
 
@@ -274,6 +403,66 @@ pub const Widget = struct {
         }
 
         self.state.dirty = false;
+    }
+
+    // ── 背景 (框架自主绘制) ────────────────────────────────────
+
+    /// 绘制背景: 阴影 (可选) + 纯色 (支持圆角) / 图片 (stretch/cover/contain/center/tile)
+    fn paintBackground(self: *Widget, ctx: *PaintContext) void {
+        const rect = math.Rect(f32){
+            .x = ctx.offset_x + self.rect.x,
+            .y = ctx.offset_y + self.rect.y,
+            .width = self.rect.width,
+            .height = self.rect.height,
+        };
+
+        // 阴影 (先于背景绘制, 位于背景之下)
+        if (self.background.shadow_color) |sc| {
+            ctx.renderer.drawShadow(rect, self.background.corner_radius, .{
+                .color = sc,
+                .blur_radius = self.background.shadow_blur,
+                .offset_x = self.background.shadow_offset_x,
+                .offset_y = self.background.shadow_offset_y,
+            }) catch {};
+        }
+
+        switch (self.background.bg) {
+            .none => {},
+            .color => |c| {
+                if (self.background.corner_radius > 0) {
+                    ctx.renderer.fillRoundedRect(rect, self.background.corner_radius, c) catch {};
+                } else {
+                    ctx.renderer.fillRect(rect, c) catch {};
+                }
+            },
+            .image => |*img| {
+                img.ensureTexture(ctx.renderer) catch return;
+                if (img.texture == null) return;
+                // 图片走立即绘制路径: 先 flush 之前累积的几何以保持 z 序
+                ctx.renderer.flush();
+                background_mod.drawImageBackground(ctx.renderer, img, rect);
+            },
+        }
+    }
+
+    /// 设置背景色 (框架自动绘制; 传 null 清除背景)
+    pub fn setBackgroundColor(self: *Widget, allocator: std.mem.Allocator, color: ?math.Color) void {
+        self.background.deinit(allocator);
+        self.background.bg = if (color) |c| .{ .color = c } else .none;
+        self.markDirty();
+    }
+
+    /// 设置背景图片 (PNG 数据被拷贝, GPU 纹理惰性创建; sizing 为适配模式)
+    pub fn setBackgroundImage(self: *Widget, allocator: std.mem.Allocator, png_data: []const u8, sizing: BackgroundSizing) !void {
+        self.background.deinit(allocator);
+        self.background.bg = .{ .image = try BackgroundImage.fromPng(allocator, png_data, sizing) };
+        self.markDirty();
+    }
+
+    /// 设置背景圆角半径 (仅对纯色背景生效)
+    pub fn setCornerRadius(self: *Widget, radius: f32) void {
+        self.background.corner_radius = radius;
+        self.markDirty();
     }
 
     // ── 事件分发 ──────────────────────────────────────────────────────────
@@ -508,4 +697,42 @@ test "widget dispatchEvent hits target and bubbles" {
     test_event_count = 0;
     try std.testing.expectEqual(EventResult.ignored, root.dispatchEvent(&ev3, &ectx));
     try std.testing.expectEqual(@as(usize, 0), test_event_count);
+}
+
+test "widget background defaults to none" {
+    const w: Widget = .{ .vtable = &test_vtable, .id = 1 };
+    try std.testing.expect(std.meta.activeTag(w.background.bg) == .none);
+    try std.testing.expectEqual(@as(f32, 0), w.background.corner_radius);
+}
+
+test "widget setBackgroundColor sets and clears" {
+    var w: Widget = .{ .vtable = &test_vtable, .id = 1 };
+    w.setBackgroundColor(std.testing.allocator, math.Color.hex(0xFF0000FF));
+    try std.testing.expect(std.meta.activeTag(w.background.bg) == .color);
+    try std.testing.expectEqual(@as(u8, 0xFF), w.background.bg.color.r);
+    try std.testing.expect(w.state.dirty);
+
+    // 传 null 清除
+    w.setBackgroundColor(std.testing.allocator, null);
+    try std.testing.expect(std.meta.activeTag(w.background.bg) == .none);
+}
+
+test "widget setBackgroundImage owns png data" {
+    var w: Widget = .{ .vtable = &test_vtable, .id = 1 };
+    try w.setBackgroundImage(std.testing.allocator, "fake-png", .tile);
+    try std.testing.expect(std.meta.activeTag(w.background.bg) == .image);
+    try std.testing.expectEqualSlices(u8, "fake-png", w.background.bg.image.png_data);
+    try std.testing.expectEqual(BackgroundSizing.tile, w.background.bg.image.sizing);
+
+    // 切换为颜色: 旧图片数据被释放
+    w.setBackgroundColor(std.testing.allocator, math.Color.hex(0x00FF00FF));
+    try std.testing.expect(std.meta.activeTag(w.background.bg) == .color);
+}
+
+test "widget setCornerRadius keeps background" {
+    var w: Widget = .{ .vtable = &test_vtable, .id = 1 };
+    w.setBackgroundColor(std.testing.allocator, math.Color.hex(0x0000FFFF));
+    w.setCornerRadius(12);
+    try std.testing.expectEqual(@as(f32, 12), w.background.corner_radius);
+    try std.testing.expect(std.meta.activeTag(w.background.bg) == .color);
 }

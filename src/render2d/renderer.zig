@@ -70,15 +70,80 @@ pub const Renderer2D = struct {
             return self.fillRect(rect, color);
         }
         const c = colorToFloat(color);
-        const r = @min(radius, @min(rect.width, rect.height) / 2.0);
         const cx = rect.x + rect.width / 2.0;
         const cy = rect.y + rect.height / 2.0;
 
         // 生成圆角矩形轮廓点
         var points: std.ArrayListUnmanaged([2]f32) = .{ .items = &.{}, .capacity = 0 };
         defer points.deinit(self.allocator);
+        try self.appendRoundedContour(&points, rect, radius, 8);
 
-        const segments: u32 = 8; // 每个圆角的段数
+        // 中心扇形三角化
+        const center = Vertex2D{ .pos = .{ cx, cy }, .color = c };
+        const n = points.items.len;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const next = (i + 1) % n;
+            try self.vertices.appendSlice(self.allocator, &.{
+                center,
+                .{ .pos = points.items[i], .color = c },
+                .{ .pos = points.items[next], .color = c },
+            });
+        }
+    }
+
+    /// 描边圆角矩形边框 (内外轮廓环形三角化, 不覆盖内部区域,
+    /// 供框架背景之上的边框绘制, 避免挖空式画边覆盖背景色/背景图)
+    pub fn strokeRoundedRect(self: *Renderer2D, rect: math.Rect(f32), radius: f32, border_width: f32, color: math.Color) !void {
+        if (border_width <= 0 or rect.width <= 0 or rect.height <= 0) return;
+
+        // 直角情况: 4 条边框矩形
+        if (radius <= 0) {
+            const bw = @min(border_width, @min(rect.width, rect.height) / 2.0);
+            try self.fillRect(.{ .x = rect.x, .y = rect.y, .width = rect.width, .height = bw }, color);
+            try self.fillRect(.{ .x = rect.x, .y = rect.y + rect.height - bw, .width = rect.width, .height = bw }, color);
+            try self.fillRect(.{ .x = rect.x, .y = rect.y + bw, .width = bw, .height = rect.height - bw * 2.0 }, color);
+            try self.fillRect(.{ .x = rect.x + rect.width - bw, .y = rect.y + bw, .width = bw, .height = rect.height - bw * 2.0 }, color);
+            return;
+        }
+
+        const r_out = @min(radius, @min(rect.width, rect.height) / 2.0);
+        const inner = math.Rect(f32){
+            .x = rect.x + border_width,
+            .y = rect.y + border_width,
+            .width = rect.width - border_width * 2.0,
+            .height = rect.height - border_width * 2.0,
+        };
+        // 边框过厚: 内轮廓退化, 直接填充整个圆角矩形
+        if (inner.width <= 0 or inner.height <= 0) {
+            return self.fillRoundedRect(rect, r_out, color);
+        }
+        const r_in = @max(0.0, r_out - border_width);
+
+        var outer: std.ArrayListUnmanaged([2]f32) = .{ .items = &.{}, .capacity = 0 };
+        defer outer.deinit(self.allocator);
+        var inner_pts: std.ArrayListUnmanaged([2]f32) = .{ .items = &.{}, .capacity = 0 };
+        defer inner_pts.deinit(self.allocator);
+        try self.appendRoundedContour(&outer, rect, r_out, 8);
+        try self.appendRoundedContour(&inner_pts, inner, r_in, 8);
+
+        // 环形三角化: 相邻轮廓点构成四边形 (2 三角形)
+        const c = colorToFloat(color);
+        const n = outer.items.len;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const j = (i + 1) % n;
+            const o0 = Vertex2D{ .pos = outer.items[i], .color = c };
+            const o1 = Vertex2D{ .pos = outer.items[j], .color = c };
+            const n0 = Vertex2D{ .pos = inner_pts.items[i], .color = c };
+            const n1 = Vertex2D{ .pos = inner_pts.items[j], .color = c };
+            try self.vertices.appendSlice(self.allocator, &.{ o0, o1, n0, o1, n1, n0 });
+        }
+    }
+
+    /// 生成圆角矩形轮廓点 (顺时针, 4 个圆角 × (segments+1) 点, 首尾不闭合)
+    fn appendRoundedContour(self: *Renderer2D, points: *std.ArrayListUnmanaged([2]f32), rect: math.Rect(f32), radius: f32, segments: u32) !void {
+        const r = @min(radius, @min(rect.width, rect.height) / 2.0);
         const corners = [_][2]f32{
             .{ rect.x + rect.width - r, rect.y + r }, // top-right
             .{ rect.x + rect.width - r, rect.y + rect.height - r }, // bottom-right
@@ -97,19 +162,6 @@ pub const Renderer2D = struct {
                 const py = cc[1] + r * @sin(angle);
                 try points.append(self.allocator, .{ px, py });
             }
-        }
-
-        // 中心扇形三角化
-        const center = Vertex2D{ .pos = .{ cx, cy }, .color = c };
-        const n = points.items.len;
-        var i: usize = 0;
-        while (i < n) : (i += 1) {
-            const next = (i + 1) % n;
-            try self.vertices.appendSlice(self.allocator, &.{
-                center,
-                .{ .pos = points.items[i], .color = c },
-                .{ .pos = points.items[next], .color = c },
-            });
         }
     }
 
@@ -248,6 +300,31 @@ pub const Renderer2D = struct {
         try self.drawImageRect(texture, dst, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, tint);
     }
 
+    /// 立即绘制图片四边形 (不进入批处理, 经 setVertexBytes 直接提交)。
+    /// 用于需要精确 z 序的场景 (如框架背景图): 调用前须先 flush() 之前累积的几何。
+    pub fn drawImageImmediate(self: *Renderer2D, texture: *anyopaque, dst: math.Rect(f32), src: math.Rect(f32), tint: math.Color) void {
+        // 注意: image shader 内部自行预乘, 这里必须传直色 (非预乘)
+        const c = colorToFloatStraight(tint);
+        const x0 = dst.x;
+        const y0 = dst.y;
+        const x1 = dst.x + dst.width;
+        const y1 = dst.y + dst.height;
+        const su0 = src.x;
+        const sv0 = src.y;
+        const su1 = src.x + src.width;
+        const sv1 = src.y + src.height;
+
+        const verts = [6]TextVertex{
+            .{ .pos = .{ x0, y0 }, .uv = .{ su0, sv0 }, .color = c },
+            .{ .pos = .{ x1, y0 }, .uv = .{ su1, sv0 }, .color = c },
+            .{ .pos = .{ x0, y1 }, .uv = .{ su0, sv1 }, .color = c },
+            .{ .pos = .{ x1, y0 }, .uv = .{ su1, sv0 }, .color = c },
+            .{ .pos = .{ x1, y1 }, .uv = .{ su1, sv1 }, .color = c },
+            .{ .pos = .{ x0, y1 }, .uv = .{ su0, sv1 }, .color = c },
+        };
+        self.device.drawImage(&verts, texture);
+    }
+
     /// 绘制图片子区域 (src 为归一化 UV 矩形) 到目标矩形
     pub fn drawImageRect(self: *Renderer2D, texture: *anyopaque, dst: math.Rect(f32), src: math.Rect(f32), tint: math.Color) !void {
         // 注意: image shader 内部自行预乘, 这里必须传直色 (非预乘)
@@ -285,15 +362,63 @@ pub const Renderer2D = struct {
         });
     }
 
+    /// 从 RGBA 像素数据创建纹理 (调用方负责 destroyTexture)
+    pub fn createTextureFromRgba(self: *Renderer2D, width: u32, height: u32, pixels: []const u8) !*anyopaque {
+        const tex = self.device.createTextureRGBA(width, height) orelse
+            return error.TextureCreateFailed;
+        self.device.updateTextureRegion(tex, 0, 0, width, height, pixels, width * 4);
+        return tex;
+    }
+
     /// 从 PNG 数据解码并创建 RGBA 纹理 (调用方负责 destroyTexture)
     pub fn createTextureFromPng(self: *Renderer2D, png_data: []const u8) !*anyopaque {
         var img = try png.decode(self.allocator, png_data);
         defer img.deinit(self.allocator);
+        return self.createTextureFromRgba(img.width, img.height, img.pixels);
+    }
 
-        const tex = self.device.createTextureRGBA(img.width, img.height) orelse
-            return error.TextureCreateFailed;
-        self.device.updateTextureRegion(tex, 0, 0, img.width, img.height, img.pixels, img.width * 4);
-        return tex;
+    /// 销毁纹理
+    pub fn destroyTexture(self: *Renderer2D, texture: *anyopaque) void {
+        self.device.destroyTexture(texture);
+    }
+
+    /// 绘制文本布局 (跨平台统一入口, 等价于 drawText)
+    pub fn drawTextLayout(self: *Renderer2D, tl: *const text_layout.TextLayout, origin_x: f32, origin_y: f32, color: math.Color) !void {
+        return self.drawText(tl, origin_x, origin_y, color);
+    }
+
+    /// 立即提交当前累积的几何 (帧内可多次调用, 保持绘制顺序)。
+    /// 走 setVertexBytes 立即路径, 不覆盖共享顶点缓冲;
+    /// 用于背景图片等需要与后续几何交错保持 z 序的场景。
+    pub fn flush(self: *Renderer2D) void {
+        // 1. 纯色几何
+        if (self.vertices.items.len > 0) {
+            self.device.drawTrianglesImmediate(self.vertices.items);
+            self.vertices.clearRetainingCapacity();
+        }
+
+        // 2. 文本 (纹理管线)
+        if (self.text_vertices.items.len > 0) {
+            if (self.glyph_atlas) |atlas| {
+                // 先上传脏区域
+                atlas.flush(self.device);
+
+                if (atlas.texture) |tex| {
+                    self.device.drawTexturedImmediate(self.text_vertices.items, tex);
+                }
+            }
+            self.text_vertices.clearRetainingCapacity();
+        }
+
+        // 3. 图片 (RGBA 纹理管线, 本就经 setVertexBytes 立即绘制)
+        for (self.image_runs.items) |run| {
+            self.device.drawImage(
+                self.image_vertices.items[run.start .. run.start + run.count],
+                run.texture,
+            );
+        }
+        self.image_vertices.clearRetainingCapacity();
+        self.image_runs.clearRetainingCapacity();
     }
 
     /// 提交所有绘制到 GPU

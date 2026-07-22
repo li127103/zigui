@@ -128,6 +128,10 @@ pub const App = struct {
     typed_cps: [16]u21 = undefined,
     typed_cp_count: usize = 0,
     key_hit: ?pal.KeyCode = null,
+    file_drop: ?pal.event.FileDrop = null,
+    // 本帧触摸事件缓冲 (帧末清除)
+    touches: [16]pal.event.Touch = undefined,
+    touch_count: usize = 0,
 
     // IME 状态 (text-input)
     ime_commit_buf: [pal.event.max_ime_text]u8 = undefined, // 本帧提交的文本 (帧末重置)
@@ -140,6 +144,11 @@ pub const App = struct {
 
     pub fn typedCodepoints(self: *App) []const u21 {
         return self.typed_cps[0..self.typed_cp_count];
+    }
+
+    /// 本帧触摸事件 (drawFrame 内调用; 帧末自动清空)
+    pub fn touchEvents(self: *App) []const pal.event.Touch {
+        return self.touches[0..self.touch_count];
     }
 
     /// 本帧 IME 提交的文本 (UTF-8, 帧末重置)
@@ -458,6 +467,8 @@ pub const App = struct {
             self.typed_cp_count = 0;
             self.ime_commit_len = 0;
             self.key_hit = null;
+            self.file_drop = null;
+            self.touch_count = 0;
             self.dirty.clear();
             self.needs_redraw = false;
 

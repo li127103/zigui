@@ -12,13 +12,15 @@ const EventResult = widget_mod.EventResult;
 
 pub const Container = struct {
     base: Widget,
-    bg_color: ?math.Color,
-    corner_radius: f32,
     border_color: ?math.Color,
     border_width: f32,
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         bg_color: ?math.Color = null,
+        /// 背景图片 (PNG 数据); 优先于 bg_color
+        bg_image: ?[]const u8 = null,
+        /// 背景图片适配模式
+        bg_sizing: widget_mod.BackgroundSizing = .cover,
         corner_radius: f32 = 0,
         border_color: ?math.Color = null,
         border_width: f32 = 1.0,
@@ -28,17 +30,24 @@ pub const Container = struct {
         width: layout_mod.Dimension = .{ .auto = {} },
         height: layout_mod.Dimension = .{ .auto = {} },
     }) !*Container {
+        // 背景: 图片优先于颜色 (框架自动绘制)
+        var bg: widget_mod.BackgroundStyle = .{ .corner_radius = opts.corner_radius };
+        if (opts.bg_image) |png_data| {
+            bg.bg = .{ .image = try widget_mod.BackgroundImage.fromPng(allocator, png_data, opts.bg_sizing) };
+        } else if (opts.bg_color) |c| {
+            bg.bg = .{ .color = c };
+        }
+
         const self = try allocator.create(Container);
         self.* = .{
             .base = .{
                 .vtable = &vtable,
                 .id = widget_mod.genWidgetId(),
             },
-            .bg_color = opts.bg_color,
-            .corner_radius = opts.corner_radius,
             .border_color = opts.border_color,
             .border_width = opts.border_width,
         };
+        self.base.background = bg;
         self.base.layout_style.direction = opts.direction;
         self.base.layout_style.padding = opts.padding;
         self.base.layout_style.gap = opts.gap;
@@ -48,6 +57,7 @@ pub const Container = struct {
     }
 
     pub fn destroy(self: *Container, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         // 递归销毁子项
         for (self.base.children.items) |child| {
             child.vtable.destroy(child, allocator);
@@ -85,6 +95,10 @@ pub const Container = struct {
         var count: usize = 0;
 
         for (w.children.items) |child| {
+            // 绝对定位子项不参与 flex 流, 不计入容器内容尺寸
+            if (child.layout_style.position == .absolute) continue;
+            // 不可见子项不占布局空间
+            if (!child.state.visible) continue;
             const child_size = child.vtable.measure(child, ctx, constraints);
             const cm = child.layout_style.margin;
 
@@ -116,43 +130,20 @@ pub const Container = struct {
     fn paint(w: *Widget, ctx: *PaintContext) void {
         const self: *Container = @fieldParentPtr("base", w);
 
-        const rx = ctx.offset_x + w.rect.x;
-        const ry = ctx.offset_y + w.rect.y;
-
-        // 背景
-        if (self.bg_color) |bg| {
-            if (self.corner_radius > 0) {
-                ctx.renderer.fillRoundedRect(
-                    .{ .x = rx, .y = ry, .width = w.rect.width, .height = w.rect.height },
-                    self.corner_radius,
-                    bg,
-                ) catch {};
-            } else {
-                ctx.renderer.fillRect(
-                    .{ .x = rx, .y = ry, .width = w.rect.width, .height = w.rect.height },
-                    bg,
-                ) catch {};
-            }
-        }
-
-        // 边框 (简化: 用两个圆角矩形模拟)
+        // 背景 (颜色/图片 + 圆角) 由框架在 paintTree 中自动绘制, 此处仅画边框
         if (self.border_color) |bc| {
             if (self.border_width > 0) {
-                const bw = self.border_width;
-                // 外框
-                ctx.renderer.fillRoundedRect(
-                    .{ .x = rx, .y = ry, .width = w.rect.width, .height = w.rect.height },
-                    self.corner_radius,
+                ctx.renderer.strokeRoundedRect(
+                    .{
+                        .x = ctx.offset_x + w.rect.x,
+                        .y = ctx.offset_y + w.rect.y,
+                        .width = w.rect.width,
+                        .height = w.rect.height,
+                    },
+                    self.base.background.corner_radius,
+                    self.border_width,
                     bc,
                 ) catch {};
-                // 内部挖空 (用背景色覆盖)
-                if (self.bg_color) |bg| {
-                    ctx.renderer.fillRoundedRect(
-                        .{ .x = rx + bw, .y = ry + bw, .width = w.rect.width - bw * 2, .height = w.rect.height - bw * 2 },
-                        @max(0, self.corner_radius - bw),
-                        bg,
-                    ) catch {};
-                }
             }
         }
     }

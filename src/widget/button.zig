@@ -5,8 +5,7 @@ const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
-const text_layout = @import("../text/layout.zig");
-const coretext = @import("../text/coretext.zig");
+const styled_text = @import("../text/styled_text.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
@@ -59,6 +58,7 @@ pub const Button = struct {
     }
 
     pub fn destroy(self: *Button, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
     }
@@ -81,21 +81,16 @@ pub const Button = struct {
 
     fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
         const self: *Button = @fieldParentPtr("base", w);
-        _ = ctx;
         _ = constraints;
 
-        var font = coretext.CtFont.create(null, self.font_size, 500) catch {
-            return .{ .width = self.padding_h * 2 + 60, .height = self.padding_v * 2 + self.font_size * 1.2 };
-        };
-        defer font.destroy();
-
-        const text_w = font.measureText(self.label);
-        const metrics = font.getMetrics();
-        const text_h = metrics.line_height;
+        const text_size = styled_text.measureText(ctx.allocator, self.label, .{
+            .font_size = self.font_size,
+            .font_weight = 500,
+        });
 
         return .{
-            .width = text_w + self.padding_h * 2,
-            .height = text_h + self.padding_v * 2,
+            .width = text_size.width + self.padding_h * 2,
+            .height = text_size.height + self.padding_v * 2,
         };
     }
 
@@ -131,22 +126,25 @@ pub const Button = struct {
 
         // 文本 (居中)
         if (self.label.len > 0) {
-            var font = coretext.CtFont.create(null, self.font_size, 500) catch return;
-            defer font.destroy();
+            const text_size = styled_text.measureText(ctx.allocator, self.label, .{
+                .font_size = self.font_size,
+                .font_weight = 500,
+            });
+            const text_x = rx + (w.rect.width - text_size.width) / 2.0;
+            const text_y = ry + (w.rect.height - text_size.height) / 2.0;
 
-            var tl = text_layout.TextLayout.layout(
+            styled_text.drawText(
+                ctx.renderer,
                 ctx.allocator,
-                &ctx.renderer.glyph_atlas.?,
-                ctx.renderer.device,
                 self.label,
-                .{ .font = &font, .font_size = self.font_size },
-            ) catch return;
-            defer tl.deinit();
-
-            const text_x = rx + (w.rect.width - tl.total_size.width) / 2.0;
-            const text_y = ry + (w.rect.height - tl.total_size.height) / 2.0;
-
-            ctx.renderer.drawText(&tl, text_x, text_y, self.text_color) catch {};
+                text_x,
+                text_y,
+                .{
+                    .font_size = self.font_size,
+                    .font_weight = 500,
+                    .color = self.text_color,
+                },
+            );
         }
     }
 

@@ -4,8 +4,7 @@ const std = @import("std");
 const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
-const text_layout = @import("../text/layout.zig");
-const coretext = @import("../text/coretext.zig");
+const styled_text = @import("../text/styled_text.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
@@ -19,13 +18,13 @@ pub const Label = struct {
     font_weight: u16,
     color: math.Color,
     /// 文本水平对齐方式 (默认左对齐)
-    text_align: text_layout.TextAlign = .left,
+    text_align: styled_text.TextAlign = .left,
 
     pub fn create(allocator: std.mem.Allocator, text: []const u8, opts: struct {
         font_size: f32 = 14.0,
         font_weight: u16 = 400,
         color: math.Color = math.Color.hex(0xF8FAFCFF),
-        text_align: text_layout.TextAlign = .left,
+        text_align: styled_text.TextAlign = .left,
     }) !*Label {
         const self = try allocator.create(Label);
         self.* = .{
@@ -43,6 +42,7 @@ pub const Label = struct {
     }
 
     pub fn destroy(self: *Label, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
     }
@@ -54,7 +54,7 @@ pub const Label = struct {
     }
 
     /// 设置文本对齐方式 (左/居中/右/两端对齐)
-    pub fn setTextAlign(self: *Label, alignment: text_layout.TextAlign) void {
+    pub fn setTextAlign(self: *Label, alignment: styled_text.TextAlign) void {
         self.text_align = alignment;
         self.base.markDirty();
     }
@@ -77,46 +77,34 @@ pub const Label = struct {
 
     fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
         const self: *Label = @fieldParentPtr("base", w);
-        _ = ctx;
-
-        // 使用 CoreText 测量文本宽度
-        var font = coretext.CtFont.create(null, self.font_size, self.font_weight) catch {
-            return .{ .width = 0, .height = self.font_size * 1.2 };
-        };
-        defer font.destroy();
-
-        const text_w = font.measureText(self.text);
-        const metrics = font.getMetrics();
-        const text_h = metrics.line_height;
-
         _ = constraints;
-        return .{ .width = text_w, .height = text_h };
+
+        return styled_text.measureText(ctx.allocator, self.text, .{
+            .font_size = self.font_size,
+            .font_weight = self.font_weight,
+        });
     }
 
     fn paint(w: *Widget, ctx: *PaintContext) void {
         const self: *Label = @fieldParentPtr("base", w);
         if (self.text.len == 0) return;
 
-        var font = coretext.CtFont.create(null, self.font_size, self.font_weight) catch return;
-        defer font.destroy();
-
         // 对齐需要容器宽度; 左对齐 (默认) 不传 max_width, 保持原单行行为
         const max_w: ?f32 = if (self.text_align != .left) w.rect.width else null;
 
-        var tl = text_layout.TextLayout.layout(
+        styled_text.drawText(
+            ctx.renderer,
             ctx.allocator,
-            &ctx.renderer.glyph_atlas.?,
-            ctx.renderer.device,
             self.text,
-            .{ .font = &font, .font_size = self.font_size, .max_width = max_w, .text_align = self.text_align },
-        ) catch return;
-        defer tl.deinit();
-
-        ctx.renderer.drawText(
-            &tl,
             ctx.offset_x + w.rect.x,
             ctx.offset_y + w.rect.y,
-            self.color,
-        ) catch {};
+            .{
+                .font_size = self.font_size,
+                .font_weight = self.font_weight,
+                .color = self.color,
+                .text_align = self.text_align,
+                .max_width = max_w,
+            },
+        );
     }
 };

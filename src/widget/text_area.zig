@@ -61,6 +61,7 @@ pub const TextArea = struct {
     }
 
     pub fn destroy(self: *TextArea, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         self.text.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);

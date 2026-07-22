@@ -52,6 +52,7 @@ pub const ComboBox = struct {
     }
 
     pub fn destroy(self: *ComboBox, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         self.items.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);

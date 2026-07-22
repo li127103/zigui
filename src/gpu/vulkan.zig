@@ -58,6 +58,8 @@ pub const VulkanDevice = struct {
     solid_pipeline_layout: vk.VkPipelineLayout,
     textured_pipeline: vk.VkPipeline,
     textured_pipeline_layout: vk.VkPipelineLayout,
+    /// RGBA 图片管线 (与 textured 同布局, 不同 frag shader: 保留纹理 RGB)
+    image_pipeline: vk.VkPipeline,
     // 纹理
     sampler: vk.VkSampler,
     desc_set_layout: vk.VkDescriptorSetLayout,
@@ -115,6 +117,7 @@ pub const VulkanDevice = struct {
         // 8. 创建管线
         const solid_pipe = try createSolidPipeline(device, render_pass, swapchain_result.extent);
         const textured_pipe = try createTexturedPipeline(device, render_pass, swapchain_result.extent, desc.layout);
+        const image_pipe = try createImagePipeline(device, render_pass, swapchain_result.extent, desc.layout);
 
         // 8. 创建 Framebuffers
         const framebuffers = try createFramebuffers(allocator, device, render_pass, swapchain_result.views, swapchain_result.extent);
@@ -151,6 +154,7 @@ pub const VulkanDevice = struct {
             .solid_pipeline_layout = solid_pipe.layout,
             .textured_pipeline = textured_pipe.pipeline,
             .textured_pipeline_layout = textured_pipe.layout,
+            .image_pipeline = image_pipe.pipeline,
             .sampler = sampler,
             .desc_set_layout = desc.layout,
             .desc_pool = desc.pool,
@@ -192,6 +196,7 @@ pub const VulkanDevice = struct {
         const desc = try createDescriptorSet(device);
         const solid_pipe = try createSolidPipeline(device, render_pass, swapchain_result.extent);
         const textured_pipe = try createTexturedPipeline(device, render_pass, swapchain_result.extent, desc.layout);
+        const image_pipe = try createImagePipeline(device, render_pass, swapchain_result.extent, desc.layout);
         const framebuffers = try createFramebuffers(allocator, device, render_pass, swapchain_result.views, swapchain_result.extent);
         const cmd_pool = try createCommandPool(device, queue_family);
         const cmd_buffers = try allocateCommandBuffers(allocator, device, cmd_pool, frames_in_flight);
@@ -218,6 +223,7 @@ pub const VulkanDevice = struct {
             .solid_pipeline_layout = solid_pipe.layout,
             .textured_pipeline = textured_pipe.pipeline,
             .textured_pipeline_layout = textured_pipe.layout,
+            .image_pipeline = image_pipe.pipeline,
             .sampler = sampler,
             .desc_set_layout = desc.layout,
             .desc_pool = desc.pool,
@@ -270,6 +276,7 @@ pub const VulkanDevice = struct {
         vk.vkDestroyPipelineLayout(self.device, self.solid_pipeline_layout, null);
         vk.vkDestroyPipeline(self.device, self.textured_pipeline, null);
         vk.vkDestroyPipelineLayout(self.device, self.textured_pipeline_layout, null);
+        vk.vkDestroyPipeline(self.device, self.image_pipeline, null);
 
         // 销毁 render pass
         vk.vkDestroyRenderPass(self.device, self.render_pass, null);
@@ -954,18 +961,160 @@ pub const VulkanDevice = struct {
     }
 
     /// 创建 RGBA8Unorm 纹理 (图片)
-    pub fn createTextureRGBA(self: *VulkanDevice, width: u32, height: u32) ?vk.VkImageView {
-        _ = self;
-        _ = width;
-        _ = height;
-        // TODO: 创建 RGBA 纹理
-        return null;
+    pub fn createTextureRGBA(self: *VulkanDevice, width: u32, height: u32) ?TextureHandle {
+        const device = self.device;
+
+        const image_info = vk.VkImageCreateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .imageType = vk.VK_IMAGE_TYPE_2D,
+            .format = vk.VK_FORMAT_R8G8B8A8_UNORM,
+            .extent = .{ .width = width, .height = height, .depth = 1 },
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk.VK_SAMPLE_COUNT_1_BIT,
+            .tiling = vk.VK_IMAGE_TILING_OPTIMAL,
+            .usage = vk.VK_IMAGE_USAGE_SAMPLED_BIT | vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            .sharingMode = vk.VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = null,
+            .initialLayout = vk.VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+
+        var image: vk.VkImage = undefined;
+        if (vk.vkCreateImage(device, &image_info, null, &image) != vk.VK_SUCCESS) return null;
+
+        var mem_reqs: vk.VkMemoryRequirements = undefined;
+        vk.vkGetImageMemoryRequirements(device, image, &mem_reqs);
+        const mem_type = findMemoryType(self.physical_device, mem_reqs.memoryTypeBits, vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) orelse return null;
+
+        const alloc_info = vk.VkMemoryAllocateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext = null,
+            .allocationSize = mem_reqs.size,
+            .memoryTypeIndex = mem_type,
+        };
+        var memory: vk.VkDeviceMemory = undefined;
+        if (vk.vkAllocateMemory(device, &alloc_info, null, &memory) != vk.VK_SUCCESS) return null;
+        _ = vk.vkBindImageMemory(device, image, memory, 0);
+
+        // RGBA 纹理: identity swizzle (不做通道重映射)
+        const view_info = vk.VkImageViewCreateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .image = image,
+            .viewType = vk.VK_IMAGE_VIEW_TYPE_2D,
+            .format = vk.VK_FORMAT_R8G8B8A8_UNORM,
+            .components = .{ .r = vk.VK_COMPONENT_SWIZZLE_IDENTITY, .g = vk.VK_COMPONENT_SWIZZLE_IDENTITY, .b = vk.VK_COMPONENT_SWIZZLE_IDENTITY, .a = vk.VK_COMPONENT_SWIZZLE_IDENTITY },
+            .subresourceRange = .{
+                .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        var view: vk.VkImageView = undefined;
+        if (vk.vkCreateImageView(device, &view_info, null, &view) != vk.VK_SUCCESS) return null;
+
+        // 转换布局: UNDEFINED → TRANSFER_DST_OPTIMAL
+        self.transitionImageLayout(image, vk.VK_IMAGE_LAYOUT_UNDEFINED, vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+        return .{ .image = image, .view = view, .memory = memory };
     }
 
-    /// 绘制图片
+    /// 更新 RGBA 纹理子区域 (每 texel 4 字节)
+    pub fn updateTextureRegionRGBA(self: *VulkanDevice, texture: TextureHandle, x: u32, y: u32, w: u32, h: u32, data: []const u8, data_stride: u32) void {
+        const device = self.device;
+        const buf_size: usize = @as(usize, w) * @as(usize, h) * 4;
+        if (data.len < buf_size) return;
+        _ = data_stride;
+
+        // 创建 staging buffer
+        const staging_info = vk.VkBufferCreateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .size = buf_size,
+            .usage = vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            .sharingMode = vk.VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = null,
+        };
+        var staging_buf: vk.VkBuffer = undefined;
+        if (vk.vkCreateBuffer(device, &staging_info, null, &staging_buf) != vk.VK_SUCCESS) return;
+
+        var mem_reqs: vk.VkMemoryRequirements = undefined;
+        vk.vkGetBufferMemoryRequirements(device, staging_buf, &mem_reqs);
+        const mem_type = findMemoryType(self.physical_device, mem_reqs.memoryTypeBits, vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) orelse return;
+
+        const alloc_info = vk.VkMemoryAllocateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext = null,
+            .allocationSize = mem_reqs.size,
+            .memoryTypeIndex = mem_type,
+        };
+        var staging_mem: vk.VkDeviceMemory = undefined;
+        if (vk.vkAllocateMemory(device, &alloc_info, null, &staging_mem) != vk.VK_SUCCESS) return;
+        _ = vk.vkBindBufferMemory(device, staging_buf, staging_mem, 0);
+
+        var mapped: ?*anyopaque = null;
+        if (vk.vkMapMemory(device, staging_mem, 0, buf_size, 0, &mapped) != vk.VK_SUCCESS) return;
+        const dst: [*]u8 = @ptrCast(mapped);
+        @memcpy(dst[0..buf_size], data[0..buf_size]);
+        vk.vkUnmapMemory(device, staging_mem);
+
+        self.copyBufferToImage(staging_buf, texture.image, x, y, w, h);
+
+        vk.vkDestroyBuffer(device, staging_buf, null);
+        vk.vkFreeMemory(device, staging_mem, null);
+    }
+
+    /// 绘制图片 (RGBA 纹理, 使用 image 管线)
     pub fn drawImage(self: *VulkanDevice, vertices: []const TextVertex, texture: vk.VkImageView) void {
         self.updateTextVertices(vertices);
-        self.drawTextured(@intCast(vertices.len), texture);
+        self.drawImagePipeline(@intCast(vertices.len), texture);
+    }
+
+    /// 使用 image 管线绘制 (保留纹理 RGB, 用于 RGBA 图片)
+    pub fn drawImagePipeline(self: *VulkanDevice, vertex_count: u32, texture: vk.VkImageView) void {
+        if (vertex_count == 0) return;
+        const cmd = self.cmd_buffers[self.current_frame];
+
+        // 更新 descriptor set 绑定纹理
+        const image_info = vk.VkDescriptorImageInfo{
+            .sampler = self.sampler,
+            .imageView = texture,
+            .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const write = vk.VkWriteDescriptorSet{
+            .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = null,
+            .dstSet = self.desc_set,
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &image_info,
+            .pBufferInfo = null,
+            .pTexelBufferView = null,
+        };
+        vk.vkUpdateDescriptorSets(self.device, 1, &write, 0, null);
+
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.image_pipeline);
+
+        const screen_size = [2]f32{ @floatFromInt(self.swapchain_extent.width), @floatFromInt(self.swapchain_extent.height) };
+        vk.vkCmdPushConstants(cmd, self.textured_pipeline_layout, vk.VK_SHADER_STAGE_VERTEX_BIT, 0, 8, &screen_size);
+
+        vk.vkCmdBindDescriptorSets(cmd, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.textured_pipeline_layout, 0, 1, &self.desc_set, 0, null);
+
+        const buffers = [_]vk.VkBuffer{self.text_vertex_buffer};
+        const offsets = [_]vk.VkDeviceSize{0};
+        vk.vkCmdBindVertexBuffers(cmd, 0, 1, &buffers, &offsets);
+
+        vk.vkCmdDraw(cmd, vertex_count, 1, 0, 0);
     }
 };
 
@@ -1355,6 +1504,59 @@ fn createTexturedPipeline(device: vk.VkDevice, render_pass: vk.VkRenderPass, ext
 
     const vert_spv align(4) = @embedFile("spirv/textured_vert.spv");
     const frag_spv align(4) = @embedFile("spirv/textured_frag.spv");
+
+    const vert_module = createShaderModule(device, vert_spv) orelse return error.ShaderModuleCreationFailed;
+    const frag_module = createShaderModule(device, frag_spv) orelse return error.ShaderModuleCreationFailed;
+    defer vk.vkDestroyShaderModule(device, vert_module, null);
+    defer vk.vkDestroyShaderModule(device, frag_module, null);
+
+    const stages = [_]vk.VkPipelineShaderStageCreateInfo{
+        .{ .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = null, .flags = 0, .stage = vk.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main", .pSpecializationInfo = null },
+        .{ .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = null, .flags = 0, .stage = vk.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_module, .pName = "main", .pSpecializationInfo = null },
+    };
+
+    // TextVertex: pos [2]f32 + uv [2]f32 + color [4]f32 = 32 bytes
+    const binding = vk.VkVertexInputBindingDescription{ .binding = 0, .stride = @sizeOf(TextVertex), .inputRate = vk.VK_VERTEX_INPUT_RATE_VERTEX };
+    const attributes = [_]vk.VkVertexInputAttributeDescription{
+        .{ .location = 0, .binding = 0, .format = vk.VK_FORMAT_R32G32_SFLOAT, .offset = 0 },
+        .{ .location = 1, .binding = 0, .format = vk.VK_FORMAT_R32G32_SFLOAT, .offset = 8 },
+        .{ .location = 2, .binding = 0, .format = vk.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 16 },
+    };
+    const vertex_input = vk.VkPipelineVertexInputStateCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, .pNext = null, .flags = 0,
+        .vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &binding,
+        .vertexAttributeDescriptionCount = attributes.len, .pVertexAttributeDescriptions = &attributes,
+    };
+
+    const pipeline = try createGraphicsPipeline(device, &stages, &vertex_input, render_pass, layout, extent);
+    return .{ .pipeline = pipeline, .layout = layout };
+}
+
+fn createImagePipeline(device: vk.VkDevice, render_pass: vk.VkRenderPass, extent: vk.VkExtent2D, desc_set_layout: vk.VkDescriptorSetLayout) !PipelineResult {
+    const push_range = vk.VkPushConstantRange{
+        .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = 8,
+    };
+
+    const set_layouts = [_]vk.VkDescriptorSetLayout{desc_set_layout};
+    const layout_info = vk.VkPipelineLayoutCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .setLayoutCount = 1,
+        .pSetLayouts = &set_layouts,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &push_range,
+    };
+
+    var layout: vk.VkPipelineLayout = undefined;
+    if (vk.vkCreatePipelineLayout(device, &layout_info, null, &layout) != vk.VK_SUCCESS) {
+        return error.PipelineLayoutCreationFailed;
+    }
+
+    const vert_spv align(4) = @embedFile("spirv/image_vert.spv");
+    const frag_spv align(4) = @embedFile("spirv/image_frag.spv");
 
     const vert_module = createShaderModule(device, vert_spv) orelse return error.ShaderModuleCreationFailed;
     const frag_module = createShaderModule(device, frag_spv) orelse return error.ShaderModuleCreationFailed;

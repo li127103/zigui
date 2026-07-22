@@ -72,6 +72,7 @@ pub const TreeView = struct {
     }
 
     pub fn destroy(self: *TreeView, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         for (self.roots.items) |r| freeNode(allocator, r);
         self.roots.deinit(allocator);
         self.base.children.deinit(allocator);

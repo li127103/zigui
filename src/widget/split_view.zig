@@ -64,6 +64,7 @@ pub const SplitView = struct {
     }
 
     pub fn destroy(self: *SplitView, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
     }

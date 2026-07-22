@@ -120,4 +120,17 @@ pub const MetalDevice = struct {
         if (vertices.len == 0) return;
         c.zigui_metal_draw_image(self.handle, @ptrCast(vertices.ptr), @intCast(vertices.len), texture);
     }
+
+    /// 立即绘制纯色顶点 (setVertexBytes 分块上传, 不覆盖共享顶点缓冲,
+    /// 供帧内多次提交保持 z 序, 如背景图片绘制前的 flush)
+    pub fn drawTrianglesImmediate(self: *MetalDevice, vertices: []const Vertex2D) void {
+        if (vertices.len == 0) return;
+        c.zigui_metal_draw_solid_immediate(self.handle, @ptrCast(vertices.ptr), @intCast(vertices.len));
+    }
+
+    /// 立即绘制纹理顶点 (文本管线, setVertexBytes 分块上传)
+    pub fn drawTexturedImmediate(self: *MetalDevice, vertices: []const TextVertex, texture: *anyopaque) void {
+        if (vertices.len == 0) return;
+        c.zigui_metal_draw_textured_immediate(self.handle, @ptrCast(vertices.ptr), @intCast(vertices.len), texture);
+    }
 };

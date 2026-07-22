@@ -72,6 +72,7 @@ pub const Table = struct {
     }
 
     pub fn destroy(self: *Table, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         for (self.rows.items) |*r| r.deinit(allocator);
         self.rows.deinit(allocator);
         self.columns.deinit(allocator);

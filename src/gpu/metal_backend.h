@@ -66,4 +66,11 @@ void *zigui_metal_create_texture_rgba(ZiguiMetalDevice *dev, uint32_t width, uin
 void zigui_metal_draw_image(ZiguiMetalDevice *dev, const ZiguiTextVertex *vertices,
                             uint32_t count, void *texture);
 
+/* Immediate draws (setVertexBytes chunked upload, safe for mid-frame flush;
+   unlike update_vertices+draw they never overwrite the shared vertex buffers) */
+void zigui_metal_draw_solid_immediate(ZiguiMetalDevice *dev, const ZiguiVertex2D *vertices,
+                                      uint32_t count);
+void zigui_metal_draw_textured_immediate(ZiguiMetalDevice *dev, const ZiguiTextVertex *vertices,
+                                         uint32_t count, void *texture);
+
 #endif

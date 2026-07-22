@@ -42,6 +42,7 @@ pub const Tooltip = struct {
     }
 
     pub fn destroy(self: *Tooltip, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
     }

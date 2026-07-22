@@ -54,6 +54,7 @@ pub const TabView = struct {
     }
 
     pub fn destroy(self: *TabView, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         self.tabs.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);

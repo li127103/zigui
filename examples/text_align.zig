@@ -1,31 +1,27 @@
-//! zigui 文本对齐示例 - 左/居中/右/两端对齐 (Linux Vulkan + FreeType 多行布局)
+//! zigui 文本对齐示例 - 左/居中/右/两端对齐 (跨平台: macOS Metal / Linux Vulkan)
 //!
 //! 演示:
 //!   - 四个文本块分别展示 left / center / right / justify 四种水平对齐
 //!   - 中英混排长段落, 依赖 max_width 自动断行 (word wrap)
 //!   - 两端对齐: 末行保持左对齐, 其余行均匀撑满容器宽度
+//!
+//! 所有背景 (窗口/卡片+阴影) 均为 Widget 背景属性, 由框架在 paintTree 中自动绘制。
 
 const std = @import("std");
 const zigui = @import("zigui");
 const math = zigui.math;
+const styled_text = zigui.styled_text;
+
+const widget = zigui.widget;
+const Container = zigui.container.Container;
+const Label = zigui.label.Label;
+const Canvas = zigui.canvas.Canvas;
 
 const App = zigui.app.App;
-const text_layout = zigui.text_layout_ft;
-const TextAlign = text_layout.TextAlign;
+const TextAlign = styled_text.TextAlign;
 
-// ── 演示数据 ────────────────────────────────────────────────────────────────
-
-const Demo = struct {
-    label: []const u8,
-    alignment: TextAlign,
-};
-
-const demos = [_]Demo{
-    .{ .label = "left · 左对齐", .alignment = .left },
-    .{ .label = "center · 居中对齐", .alignment = .center },
-    .{ .label = "right · 右对齐", .alignment = .right },
-    .{ .label = "justify · 两端对齐", .alignment = .justify },
-};
+/// 主题 (PaintContext 需要 *const Theme)
+const theme_dark: zigui.theme.Theme = zigui.theme.dark;
 
 /// 中英混排段落 (足够长, 可自动断行为多行)
 const paragraph =
@@ -33,6 +29,9 @@ const paragraph =
     "engine supports multi-line word wrapping and four alignment modes. " ++
     "文本布局引擎支持多行自动断行，并提供左对齐、居中、右对齐与两端对齐四种排版方式，" ++
     "适用于中英文混排的界面场景。";
+
+var g_root: ?*Container = null;
+var g_tree_alloc: ?std.mem.Allocator = null;
 
 // ── 入口 ────────────────────────────────────────────────────────────────────
 
@@ -48,143 +47,157 @@ pub fn main() !void {
     });
     defer app.deinit();
 
+    try buildTree(allocator);
+    defer destroyTree();
+
     try app.run(&drawFrame);
 
-    deinitFontCache();
+    styled_text.deinitFontCache();
 }
 
-// ── 每帧: 渲染 ──────────────────────────────────────────────────────────────
+// ── 控件树构建 (背景全部为 Widget 属性) ─────────────────────────────────────
+
+fn buildTree(alloc: std.mem.Allocator) !void {
+    // 根容器: 窗口背景色
+    const root = try Container.create(alloc, .{
+        .bg_color = math.Color.hex(0x0F172AFF),
+        .direction = .column,
+        .padding = math.EdgeInsets.all(30),
+        .gap = .{ .width = 0, .height = 24 },
+    });
+    errdefer root.destroy(alloc);
+
+    // 主标题
+    const title = try Label.create(alloc, "Text Alignment · 文本对齐", .{
+        .font_size = 22,
+        .font_weight = 700,
+        .color = math.Color.hex(0xF8FAFCFF),
+    });
+    try root.base.addChild(alloc, &title.base);
+
+    const subtitle = try Label.create(alloc, "四种水平对齐方式 (多行自动断行, 中英混排)", .{
+        .font_size = 13,
+        .font_weight = 400,
+        .color = math.Color.hex(0x94A3B8FF),
+    });
+    try root.base.addChild(alloc, &subtitle.base);
+
+    // 2x2 网格: 每行一个 row 容器, 各占一半剩余高度
+    const row1 = try Container.create(alloc, .{
+        .direction = .row,
+        .gap = .{ .width = 24, .height = 0 },
+    });
+    row1.base.layout_style.flex_grow = 1;
+    try root.base.addChild(alloc, &row1.base);
+
+    const row2 = try Container.create(alloc, .{
+        .direction = .row,
+        .gap = .{ .width = 24, .height = 0 },
+    });
+    row2.base.layout_style.flex_grow = 1;
+    try root.base.addChild(alloc, &row2.base);
+
+    try addCard(row1, alloc, .left, "left · 左对齐", paintCardLeft);
+    try addCard(row1, alloc, .center, "center · 居中对齐", paintCardCenter);
+    try addCard(row2, alloc, .right, "right · 右对齐", paintCardRight);
+    try addCard(row2, alloc, .justify, "justify · 两端对齐", paintCardJustify);
+
+    g_root = root;
+    g_tree_alloc = alloc;
+}
+
+/// 卡片: 背景色 + 圆角 + 阴影均为 Widget 属性; 内容 (对齐标签 + 段落) 由 Canvas 绘制
+fn addCard(parent: *Container, alloc: std.mem.Allocator, alignment: TextAlign, label: []const u8, paint_fn: *const fn (w: *widget.Widget, ctx: *widget.PaintContext) void) !void {
+    _ = alignment;
+    _ = label;
+    const card = try Canvas.create(alloc, .{
+        .bg_color = math.Color.hex(0x1E293BFF),
+        .corner_radius = 14,
+        .paint_fn = paint_fn,
+    });
+    // 阴影 (框架在背景之前自动绘制)
+    card.base.background.shadow_color = math.Color.rgba(0, 0, 0, 140);
+    card.base.background.shadow_blur = 16;
+    card.base.background.shadow_offset_y = 6;
+    // 填充网格单元: 宽度 flex 均分, 高度 stretch
+    card.base.layout_style.flex_grow = 1;
+    card.base.layout_style.width = .{ .auto = {} };
+    card.base.layout_style.height = .{ .auto = {} };
+    try parent.base.addChild(alloc, &card.base);
+}
+
+fn destroyTree() void {
+    if (g_root) |root| {
+        root.destroy(g_tree_alloc orelse return);
+        g_root = null;
+    }
+}
+
+// ── 每帧: 布局 + 绘制 (背景由框架自动绘制) ──────────────────────────────────
 
 fn drawFrame(app: *App) void {
+    const root = g_root orelse return;
     const fb = app.getFramebufferSize();
     const w: f32 = @floatFromInt(fb.width);
     const h: f32 = @floatFromInt(fb.height);
-    const r = app.getRenderer();
 
-    // 背景
-    r.fillRect(.{ .x = 0, .y = 0, .width = w, .height = h }, math.Color.hex(0x0F172AFF)) catch {};
+    root.base.layout_style.width = .{ .px = w };
+    root.base.layout_style.height = .{ .px = h };
 
-    // 主标题
-    const pad: f32 = 30.0;
-    drawTextBlock(app, "Text Alignment · 文本对齐", pad, 26, null, 22.0, 700, 0xF8FAFCFF, .left);
-    drawTextBlock(app, "四种水平对齐方式 (多行自动断行, 中英混排)", pad, 58, null, 13.0, 400, 0x94A3B8FF, .left);
+    var ctx = widget.PaintContext{
+        .renderer = app.getRenderer(),
+        .theme = &theme_dark,
+        .allocator = app.allocator,
+    };
 
-    // 2x2 网格
-    const gap: f32 = 24.0;
-    const top: f32 = 96.0;
-    const cell_w = (w - pad * 2.0 - gap) / 2.0;
-    const cell_h = (h - top - pad - gap) / 2.0;
-
-    for (demos, 0..) |demo, idx| {
-        const col: f32 = @floatFromInt(idx % 2);
-        const row: f32 = @floatFromInt(idx / 2);
-        const cx = pad + col * (cell_w + gap);
-        const cy = top + row * (cell_h + gap);
-        const card = math.Rect(f32){ .x = cx, .y = cy, .width = cell_w, .height = cell_h };
-
-        // 卡片背景
-        r.drawShadow(card, 12, .{}) catch {};
-        r.fillRoundedRect(card, 14, math.Color.hex(0x1E293BFF)) catch {};
-
-        // 对齐方式标签
-        drawTextBlock(app, demo.label, cx + 18, cy + 16, null, 14.0, 600, 0x60A5FAFF, .left);
-
-        // 段落 (在文本区域内按指定对齐方式布局)
-        const text_x = cx + 18.0;
-        const text_y = cy + 48.0;
-        const text_w = cell_w - 36.0;
-        drawTextBlock(app, paragraph, text_x, text_y, text_w, 14.0, 400, 0xCBD5E1FF, demo.alignment);
-    }
+    root.base.performLayout(&ctx, .{ .max_width = w, .max_height = h });
+    root.base.paintTree(&ctx);
 }
 
-// ── 文本渲染 (多行布局 + 对齐) ──────────────────────────────────────────────
+// ── 卡片内容绘制 (Canvas paint_fn, 背景由框架自动绘制) ──────────────────────
 
-/// 布局并绘制文本块。max_width 为 null 时单行不换行; 否则自动断行并按
-/// alignment 对齐。y 为文本块顶部 (内部换算为各行基线)。
-fn drawTextBlock(
-    app: *App,
-    text: []const u8,
-    x: f32,
-    y: f32,
-    max_width: ?f32,
-    size: f32,
-    weight: u16,
-    color: u32,
-    alignment: TextAlign,
-) void {
-    if (text.len == 0) return;
-    g_font_allocator = app.allocator;
-    const font = getFont(app.allocator, size, weight) orelse return;
+fn paintCard(w: *widget.Widget, ctx: *widget.PaintContext, alignment: TextAlign, label: []const u8) void {
+    const ax = ctx.offset_x + w.rect.x;
+    const ay = ctx.offset_y + w.rect.y;
+    const pad: f32 = 18.0;
 
-    var tl = text_layout.TextLayout.layout(
-        app.allocator,
-        app.getGlyphAtlas(),
-        app.getVulkanDevice(),
-        text,
+    // 对齐方式标签
+    styled_text.drawText(
+        ctx.renderer,
+        ctx.allocator,
+        label,
+        ax + pad,
+        ay + 16,
+        .{ .font_size = 14, .font_weight = 600, .color = math.Color.hex(0x60A5FAFF) },
+    );
+
+    // 段落 (在文本区域内按指定对齐方式布局 + 自动断行)
+    const text_w = w.rect.width - pad * 2.0;
+    styled_text.drawText(
+        ctx.renderer,
+        ctx.allocator,
+        paragraph,
+        ax + pad,
+        ay + 48,
         .{
-            .font = font,
-            .font_size = size,
-            .max_width = max_width,
+            .font_size = 14,
+            .font_weight = 400,
+            .color = math.Color.hex(0xCBD5E1FF),
             .text_align = alignment,
-            .wrap = .word,
+            .max_width = text_w,
         },
-    ) catch return;
-    defer tl.deinit();
-
-    const r = app.getRenderer();
-    for (tl.lines.items) |*line| {
-        // drawText 的 origin_y 是基线; baseline_y 已含 ascent, 相对布局顶部
-        r.drawText(line.glyphs.items, x, y + line.baseline_y, math.Color.hex(color)) catch {};
-    }
+    );
 }
 
-// ── 字体缓存 (复用 input.zig 模式: 按 size+weight 缓存, 优先 CJK 字体) ─────
-
-const CachedFont = struct {
-    size: f32,
-    weight: u16,
-    font: zigui.freetype.FtFont,
-};
-
-const MAX_CACHED_FONTS = 16;
-var g_font_cache: [MAX_CACHED_FONTS]CachedFont = undefined;
-var g_font_cache_len: usize = 0;
-var g_font_path: ?[:0]u8 = null;
-var g_font_allocator: ?std.mem.Allocator = null;
-
-fn resolveFontPath(allocator: std.mem.Allocator) ?[:0]const u8 {
-    if (g_font_path) |p| return p;
-    const freetype = zigui.freetype;
-    if (freetype.findCjkFont(allocator)) |p| {
-        g_font_path = p;
-        return p;
-    } else |_| {}
-    if (freetype.findSystemFont(allocator, null)) |p| {
-        g_font_path = p;
-        return p;
-    } else |_| {}
-    return null;
+fn paintCardLeft(w: *widget.Widget, ctx: *widget.PaintContext) void {
+    paintCard(w, ctx, .left, "left · 左对齐");
 }
-
-fn getFont(allocator: std.mem.Allocator, size: f32, weight: u16) ?*zigui.freetype.FtFont {
-    for (g_font_cache[0..g_font_cache_len]) |*entry| {
-        if (entry.size == size and entry.weight == weight) return &entry.font;
-    }
-    if (g_font_cache_len >= MAX_CACHED_FONTS) return null;
-    const path = resolveFontPath(allocator) orelse return null;
-    const font = zigui.freetype.FtFont.createFromFile(allocator, path.ptr, size, weight) catch return null;
-    g_font_cache[g_font_cache_len] = .{ .size = size, .weight = weight, .font = font };
-    g_font_cache_len += 1;
-    return &g_font_cache[g_font_cache_len - 1].font;
+fn paintCardCenter(w: *widget.Widget, ctx: *widget.PaintContext) void {
+    paintCard(w, ctx, .center, "center · 居中对齐");
 }
-
-fn deinitFontCache() void {
-    for (g_font_cache[0..g_font_cache_len]) |*entry| {
-        entry.font.destroy();
-    }
-    g_font_cache_len = 0;
-    if (g_font_path) |p| {
-        if (g_font_allocator) |a| a.free(p);
-        g_font_path = null;
-    }
+fn paintCardRight(w: *widget.Widget, ctx: *widget.PaintContext) void {
+    paintCard(w, ctx, .right, "right · 右对齐");
+}
+fn paintCardJustify(w: *widget.Widget, ctx: *widget.PaintContext) void {
+    paintCard(w, ctx, .justify, "justify · 两端对齐");
 }

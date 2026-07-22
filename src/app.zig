@@ -18,6 +18,9 @@ pub const AppConfig = struct {
     continuous: bool = true,
 };
 
+/// IME 删除请求 (与 app_linux.zig 对齐)
+pub const ImeDelete = struct { before: u32, after: u32 };
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     config: AppConfig,
@@ -52,6 +55,8 @@ pub const App = struct {
     // 本帧触摸事件缓冲 (帧末清除)
     touches: [16]pal.event.Touch = undefined,
     touch_count: usize = 0,
+    // IME preedit 缓冲 (跨平台 API 使用)
+    preedit_buf: [256]u8 = undefined,
 
     /// 本帧触摸事件 (drawFrame 内调用; 帧末自动清空)
     pub fn touchEvents(self: *App) []const pal.event.Touch {
@@ -66,6 +71,32 @@ pub const App = struct {
     /// 查询当前 IME 组字中的 marked text (如拼音), 写入 buf (UTF-8), 返回字节数
     pub fn getMarkedText(self: *App, buf: []u8) usize {
         return self.cocoa_backend.getMarkedText(buf);
+    }
+
+    // ── IME 跨平台 API (与 app_linux.zig 对齐) ────────────────────────
+
+    /// 当前组合中 (preedit/marked) 文本 (UTF-8)
+    /// macOS: 从 Cocoa backend 查询; 写入内部缓冲并返回 slice
+    pub fn preeditText(self: *App) []const u8 {
+        const n = self.cocoa_backend.getMarkedText(&self.preedit_buf);
+        return self.preedit_buf[0..n];
+    }
+
+    /// 本帧 IME 提交的文本 (macOS: 空, 因为 insertText 已通过 typedCodepoints 发送)
+    pub fn imeCommitText(self: *App) []const u8 {
+        _ = self;
+        return "";
+    }
+
+    /// 取出并清除待处理的 IME 删除请求 (macOS: 无, 返回 null)
+    pub fn takeImeDelete(self: *App) ?ImeDelete {
+        _ = self;
+        return null;
+    }
+
+    /// 设置 IME 光标矩形 (macOS: 空操作, 候选窗由 AppKit 自动定位)
+    pub fn setImeCursorRect(self: *App, x: i32, y: i32, w: i32, h: i32) void {
+        _ = .{ self, x, y, w, h };
     }
 
     pub fn init(allocator: std.mem.Allocator, config: AppConfig) !*App {

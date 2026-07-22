@@ -53,6 +53,7 @@ pub const Dialog = struct {
     }
 
     pub fn destroy(self: *Dialog, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
     }

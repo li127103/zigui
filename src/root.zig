@@ -44,6 +44,12 @@ pub const text_layout_ft = if (is_linux) @import("text/layout_ft.zig") else void
 // 文本对齐 (平台无关, 供 macOS/Linux 布局模块共享)
 pub const text_align = @import("text/align.zig");
 
+// 跨平台文本 helper (字体创建 + 布局 + 绘制)
+pub const styled_text = @import("text/styled_text.zig");
+
+// 跨平台渲染抽象层 (Renderer2D/Device 平台别名)
+pub const r2d = @import("render2d/r2d.zig");
+
 // 图片
 pub const image = @import("image/png.zig");
 
@@ -51,6 +57,7 @@ pub const image = @import("image/png.zig");
 pub const label = @import("widget/label.zig");
 pub const button = @import("widget/button.zig");
 pub const container = @import("widget/container.zig");
+pub const canvas = @import("widget/canvas.zig");
 pub const slider = @import("widget/slider.zig");
 pub const text_input = @import("widget/text_input.zig");
 pub const combo_box = @import("widget/combo_box.zig");
@@ -63,6 +70,9 @@ pub const menu = @import("widget/menu.zig");
 pub const split_view = @import("widget/split_view.zig");
 pub const tree_view = @import("widget/tree_view.zig");
 pub const table = @import("widget/table.zig");
+
+// 控件背景 (颜色/图片, 框架自主绘制)
+pub const background = @import("widget/background.zig");
 
 test {
     _ = math;
@@ -78,4 +88,5 @@ test {
     _ = gesture;
     _ = input;
     _ = text_align;
+    _ = background;
 }

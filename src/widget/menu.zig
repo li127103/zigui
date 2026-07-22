@@ -68,6 +68,7 @@ pub const Menu = struct {
     }
 
     pub fn destroy(self: *Menu, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         // 递归销毁子菜单
         for (self.items.items) |*item| {
             if (item.submenu) |sub| {

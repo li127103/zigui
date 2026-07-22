@@ -55,6 +55,7 @@ pub const ListView = struct {
     }
 
     pub fn destroy(self: *ListView, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         self.items.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);

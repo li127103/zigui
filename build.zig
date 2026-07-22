@@ -103,14 +103,16 @@ pub fn build(b: *std.Build) void {
     }
 
     // 示例 (根据平台选择源文件)
-    const m3_path = if (os_tag == .linux) "examples/m3_demo_linux.zig" else "examples/m3_demo.zig";
-    const m4_path = if (os_tag == .linux) "examples/m4_demo_linux.zig" else "examples/m4_demo.zig";
+    const m3_path = "examples/m3_demo.zig";
+    const m4_path = "examples/m4_demo.zig";
+    const bg_path = "examples/background.zig";
     const examples = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "simple", .path = "examples/simple.zig" },
         .{ .name = "hello", .path = "examples/hello.zig" },
         .{ .name = "input", .path = "examples/input.zig" },
         .{ .name = "text-align", .path = "examples/text_align.zig" },
         .{ .name = "widgets", .path = "examples/widgets.zig" },
+        .{ .name = "background", .path = bg_path },
         .{ .name = "m3-demo", .path = m3_path },
         .{ .name = "m4-demo", .path = m4_path },
     };

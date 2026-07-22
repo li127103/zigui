@@ -543,3 +543,56 @@ void zigui_metal_draw_image(ZiguiMetalDevice *dev, const ZiguiTextVertex *vertic
         offset += n;
     }
 }
+
+void zigui_metal_draw_solid_immediate(ZiguiMetalDevice *dev, const ZiguiVertex2D *vertices,
+                                      uint32_t count) {
+    if (!dev->currentEncoder || count == 0) return;
+
+    [dev->currentEncoder setRenderPipelineState:dev->pipelineState];
+
+    float viewport[2] = { (float)dev->fbWidth, (float)dev->fbHeight };
+    [dev->currentEncoder setVertexBytes:viewport length:sizeof(viewport) atIndex:1];
+
+    /* setVertexBytes 上限 4KB = 170 个 Vertex2D (24B); 分块上传保证帧内多次提交安全 */
+    const uint32_t chunk_max = 170;
+    uint32_t offset = 0;
+    while (offset < count) {
+        uint32_t n = count - offset;
+        if (n > chunk_max) n = chunk_max;
+        [dev->currentEncoder setVertexBytes:&vertices[offset]
+                                     length:sizeof(ZiguiVertex2D) * n
+                                    atIndex:0];
+        [dev->currentEncoder drawPrimitives:MTLPrimitiveTypeTriangle
+                                vertexStart:0
+                                vertexCount:n];
+        offset += n;
+    }
+}
+
+void zigui_metal_draw_textured_immediate(ZiguiMetalDevice *dev, const ZiguiTextVertex *vertices,
+                                         uint32_t count, void *texture) {
+    if (!dev->currentEncoder || count == 0 || !texture) return;
+    id<MTLTexture> tex = (__bridge id<MTLTexture>)texture;
+
+    [dev->currentEncoder setRenderPipelineState:dev->textPipelineState];
+    [dev->currentEncoder setFragmentTexture:tex atIndex:0];
+    [dev->currentEncoder setFragmentSamplerState:dev->samplerState atIndex:0];
+
+    float viewport[2] = { (float)dev->fbWidth, (float)dev->fbHeight };
+    [dev->currentEncoder setVertexBytes:viewport length:sizeof(viewport) atIndex:1];
+
+    /* setVertexBytes 上限 4KB = 128 个 TextVertex (32B) */
+    const uint32_t chunk_max = 128;
+    uint32_t offset = 0;
+    while (offset < count) {
+        uint32_t n = count - offset;
+        if (n > chunk_max) n = chunk_max;
+        [dev->currentEncoder setVertexBytes:&vertices[offset]
+                                     length:sizeof(ZiguiTextVertex) * n
+                                    atIndex:0];
+        [dev->currentEncoder drawPrimitives:MTLPrimitiveTypeTriangle
+                                vertexStart:0
+                                vertexCount:n];
+        offset += n;
+    }
+}

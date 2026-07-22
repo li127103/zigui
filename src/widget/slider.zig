@@ -49,6 +49,7 @@ pub const Slider = struct {
     }
 
     pub fn destroy(self: *Slider, allocator: std.mem.Allocator) void {
+        self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
     }

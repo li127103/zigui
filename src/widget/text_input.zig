@@ -10,6 +10,7 @@ const pal = @import("../pal/pal.zig");
 const styled_text = @import("../text/styled_text.zig");
 const r2d = @import("../render2d/r2d.zig");
 const align_mod = @import("../text/align.zig");
+const clipboard = @import("../pal/clipboard.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
@@ -376,6 +377,40 @@ pub const TextInput = struct {
                             self.selection_start = 0;
                             self.cursor = self.text.items.len;
                             self.base.markDirty();
+                            return .handled;
+                        }
+                    },
+                    // Cmd/Ctrl+C 复制选区
+                    .c => {
+                        if (k.modifiers.super_key or k.modifiers.ctrl) {
+                            if (self.hasSelection()) {
+                                const s = @min(self.selection_start.?, self.cursor);
+                                const e = @max(self.selection_start.?, self.cursor);
+                                clipboard.setText(self.text.items[s..e]) catch {};
+                            }
+                            return .handled;
+                        }
+                    },
+                    // Cmd/Ctrl+X 剪切选区
+                    .x => {
+                        if (k.modifiers.super_key or k.modifiers.ctrl) {
+                            if (self.hasSelection()) {
+                                const s = @min(self.selection_start.?, self.cursor);
+                                const e = @max(self.selection_start.?, self.cursor);
+                                clipboard.setText(self.text.items[s..e]) catch {};
+                                self.deleteSelection();
+                                self.base.markDirty();
+                            }
+                            return .handled;
+                        }
+                    },
+                    // Cmd/Ctrl+V 粘贴
+                    .v => {
+                        if (k.modifiers.super_key or k.modifiers.ctrl) {
+                            if (clipboard.getText(self.allocator)) |pasted| {
+                                defer self.allocator.free(pasted);
+                                if (pasted.len > 0) self.insertBytes(pasted);
+                            } else |_| {}
                             return .handled;
                         }
                     },

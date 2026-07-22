@@ -9,6 +9,7 @@ const renderer2d = @import("render2d/renderer.zig");
 const dirty_mod = @import("render2d/dirty.zig");
 const atlas_mod = @import("text/atlas.zig");
 const coretext = @import("text/coretext.zig");
+const clipboard = @import("pal/clipboard.zig");
 
 pub const AppConfig = struct {
     title: []const u8 = "zigui app",
@@ -51,6 +52,7 @@ pub const App = struct {
     typed_cps: [16]u21 = undefined,
     typed_cp_count: usize = 0,
     key_hit: ?pal.KeyCode = null, // 本帧按下的键
+    key_mods: pal.event.Modifiers = .{}, // 当前修饰键状态 (随按键事件更新)
     file_drop: ?pal.event.FileDrop = null, // 本帧拖放的文件 (帧末清除)
     // 本帧触摸事件缓冲 (帧末清除)
     touches: [16]pal.event.Touch = undefined,
@@ -97,6 +99,19 @@ pub const App = struct {
     /// 设置 IME 光标矩形 (macOS: 空操作, 候选窗由 AppKit 自动定位)
     pub fn setImeCursorRect(self: *App, x: i32, y: i32, w: i32, h: i32) void {
         _ = .{ self, x, y, w, h };
+    }
+
+    // ── 剪贴板 API (Cmd+C/V 快捷键使用) ──────────────────────────
+
+    /// 读取系统剪贴板文本 (调用者拥有返回内存)
+    pub fn clipboardGetText(self: *App) ![]u8 {
+        return clipboard.getText(self.allocator);
+    }
+
+    /// 写入文本到系统剪贴板
+    pub fn clipboardSetText(self: *App, text: []const u8) !void {
+        _ = self;
+        return clipboard.setText(text);
     }
 
     pub fn init(allocator: std.mem.Allocator, config: AppConfig) !*App {
@@ -189,6 +204,7 @@ pub const App = struct {
                         self.invalidate();
                     },
                     .key => |k| {
+                        self.key_mods = k.modifiers;
                         if (k.state == .pressed) {
                             self.key_hit = k.key;
                             self.invalidate();
@@ -205,6 +221,8 @@ pub const App = struct {
                         self.invalidate();
                     },
                     .text_input => |t| {
+                        // Ctrl/Cmd+字母 为快捷键, 不作为文本插入
+                        if (self.key_mods.ctrl or self.key_mods.super_key) continue;
                         if (self.typed_cp_count < self.typed_cps.len) {
                             self.typed_cps[self.typed_cp_count] = t.codepoint;
                             self.typed_cp_count += 1;

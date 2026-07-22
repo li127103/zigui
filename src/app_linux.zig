@@ -9,6 +9,7 @@ const renderer2d = @import("render2d/vulkan_renderer.zig");
 const dirty_mod = @import("render2d/dirty.zig");
 const atlas_mod = @import("text/atlas_vulkan.zig");
 const freetype = @import("text/freetype.zig");
+const clipboard = @import("pal/clipboard.zig");
 
 // 编译期后端选择
 const enable_wayland = build_options.enable_wayland;
@@ -128,6 +129,7 @@ pub const App = struct {
     typed_cps: [16]u21 = undefined,
     typed_cp_count: usize = 0,
     key_hit: ?pal.KeyCode = null,
+    key_mods: pal.event.Modifiers = .{}, // 当前修饰键状态 (随按键事件更新)
     file_drop: ?pal.event.FileDrop = null,
     // 本帧触摸事件缓冲 (帧末清除)
     touches: [16]pal.event.Touch = undefined,
@@ -176,6 +178,36 @@ pub const App = struct {
     /// 设置 IME 光标矩形 (供输入法候选窗定位)
     pub fn setImeCursorRect(self: *App, x: i32, y: i32, w: i32, h: i32) void {
         self.backend.imeSetCursorRect(x, y, w, h);
+    }
+
+    // ── 剪贴板 API (Ctrl+C/V 快捷键使用) ─────────────────────────
+
+    /// 读取系统剪贴板文本 (调用者拥有返回内存)
+    /// Wayland: 原生 wl_data_device; X11: xclip 子进程
+    pub fn clipboardGetText(self: *App) ![]u8 {
+        switch (self.backend) {
+            .wayland => |*b| {
+                if (comptime enable_wayland) {
+                    return b.clipboardGetText(self.allocator) orelse return error.ClipboardUnavailable;
+                }
+            },
+            .x11 => {},
+        }
+        return clipboard.getText(self.allocator);
+    }
+
+    /// 写入文本到系统剪贴板
+    pub fn clipboardSetText(self: *App, text: []const u8) !void {
+        switch (self.backend) {
+            .wayland => |*b| {
+                if (comptime enable_wayland) {
+                    b.clipboardSetText(text);
+                    return;
+                }
+            },
+            .x11 => {},
+        }
+        return clipboard.setText(text);
     }
 
     pub fn init(allocator: std.mem.Allocator, config: AppConfig) !*App {
@@ -377,6 +409,7 @@ pub const App = struct {
                         self.invalidate();
                     },
                     .key => |k| {
+                        self.key_mods = k.modifiers;
                         if (k.state == .pressed) {
                             self.key_hit = k.key;
                             self.invalidate();
@@ -392,6 +425,8 @@ pub const App = struct {
                         self.invalidate();
                     },
                     .text_input => |t| {
+                        // Ctrl+字母 为快捷键 (复制/粘贴等), 不作为文本插入
+                        if (self.key_mods.ctrl) continue;
                         if (self.typed_cp_count < self.typed_cps.len) {
                             self.typed_cps[self.typed_cp_count] = t.codepoint;
                             self.typed_cp_count += 1;

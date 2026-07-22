@@ -119,6 +119,18 @@ const TextField = struct {
         self.sel_anchor = null;
     }
 
+    /// 在光标处插入字节序列 (粘贴用; 超出缓冲容量截断; 有选区先替换)
+    fn insertBytes(self: *TextField, data: []const u8) void {
+        if (self.selRange() != null) self.deleteSelection();
+        const n = @min(data.len, self.text.len - self.len);
+        if (n == 0) return;
+        std.mem.copyBackwards(u8, self.text[self.cursor + n .. self.len + n], self.text[self.cursor..self.len]);
+        @memcpy(self.text[self.cursor .. self.cursor + n], data[0..n]);
+        self.len += n;
+        self.cursor += n;
+        self.sel_anchor = null;
+    }
+
     /// 编辑: 插入本帧输入码点 + 处理编辑键 (选区感知)
     fn edit(self: *TextField, app: *App) void {
         for (app.typedCodepoints()) |cp| self.insertCp(cp);
@@ -179,6 +191,39 @@ const TextField = struct {
                 .end => {
                     self.cursor = self.len;
                     self.sel_anchor = null;
+                },
+                // Ctrl/Cmd+C 复制选区
+                .c => {
+                    if (app.key_mods.ctrl or app.key_mods.super_key) {
+                        if (self.selRange()) |sel| {
+                            app.clipboardSetText(self.text[sel[0]..sel[1]]) catch {};
+                        }
+                    }
+                },
+                // Ctrl/Cmd+X 剪切选区
+                .x => {
+                    if (app.key_mods.ctrl or app.key_mods.super_key) {
+                        if (self.selRange()) |sel| {
+                            app.clipboardSetText(self.text[sel[0]..sel[1]]) catch {};
+                            self.deleteSelection();
+                        }
+                    }
+                },
+                // Ctrl/Cmd+V 粘贴
+                .v => {
+                    if (app.key_mods.ctrl or app.key_mods.super_key) {
+                        if (app.clipboardGetText()) |pasted| {
+                            defer app.allocator.free(pasted);
+                            self.insertBytes(pasted);
+                        } else |_| {}
+                    }
+                },
+                // Ctrl/Cmd+A 全选
+                .a => {
+                    if (app.key_mods.ctrl or app.key_mods.super_key) {
+                        self.sel_anchor = 0;
+                        self.cursor = self.len;
+                    }
                 },
                 else => {},
             }

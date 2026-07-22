@@ -412,6 +412,51 @@ fn handleInput(app: *App) void {
                     }
                 }
             },
+            // Ctrl/Cmd+C 复制选区
+            .c => {
+                if (app.key_mods.ctrl or app.key_mods.super_key) {
+                    if (g_focused) |f| {
+                        if (fieldSelRange(f)) |sel| {
+                            app.clipboardSetText(g_fields[f].slice()[sel[0]..sel[1]]) catch {};
+                        }
+                    }
+                }
+            },
+            // Ctrl/Cmd+X 剪切选区
+            .x => {
+                if (app.key_mods.ctrl or app.key_mods.super_key) {
+                    if (g_focused) |f| {
+                        if (fieldSelRange(f)) |sel| {
+                            app.clipboardSetText(g_fields[f].slice()[sel[0]..sel[1]]) catch {};
+                            deleteFieldSelection(f);
+                        }
+                    }
+                }
+            },
+            // Ctrl/Cmd+V 粘贴
+            .v => {
+                if (app.key_mods.ctrl or app.key_mods.super_key) {
+                    if (g_focused) |f| {
+                        if (app.clipboardGetText()) |pasted| {
+                            defer app.allocator.free(pasted);
+                            if (pasted.len > 0) {
+                                if (fieldSelRange(f) != null) deleteFieldSelection(f);
+                                g_cursors[f] = g_fields[f].insertBytesAt(g_cursors[f], pasted);
+                                g_sel_anchors[f] = null;
+                            }
+                        } else |_| {}
+                    }
+                }
+            },
+            // Ctrl/Cmd+A 全选
+            .a => {
+                if (app.key_mods.ctrl or app.key_mods.super_key) {
+                    if (g_focused) |f| {
+                        g_sel_anchors[f] = 0;
+                        g_cursors[f] = g_fields[f].slice().len;
+                    }
+                }
+            },
             .enter, .kp_enter => doSubmit(),
             else => {},
         }

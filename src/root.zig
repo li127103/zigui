@@ -74,6 +74,9 @@ pub const table = @import("widget/table.zig");
 // 控件背景 (颜色/图片, 框架自主绘制)
 pub const background = @import("widget/background.zig");
 
+// 系统剪贴板 (Ctrl+C/V 复制粘贴)
+pub const clipboard = @import("pal/clipboard.zig");
+
 test {
     _ = math;
     _ = pal;

@@ -10,6 +10,8 @@ const wl = @cImport({
     @cInclude("xdg-shell-client-protocol.h");
     @cInclude("xdg-decoration-client-protocol.h");
     @cInclude("text-input-unstable-v3-client-protocol.h");
+    @cInclude("unistd.h");
+    @cInclude("fcntl.h");
 });
 
 const xkb = @cImport({
@@ -47,6 +49,17 @@ pub const WaylandBackend = struct {
     pointer_y: f64 = 0,
     // 修饰键
     mods: event_mod.Modifiers = .{},
+    // 剪贴板 (wl_data_device)
+    data_device_manager: ?*wl.struct_wl_data_device_manager = null,
+    data_device: ?*wl.struct_wl_data_device = null,
+    clipboard_source: ?*wl.struct_wl_data_source = null,
+    clipboard_text: [8192]u8 = undefined, // 本应用拥有 (复制源) 的文本
+    clipboard_len: usize = 0,
+    selection_offer: ?*wl.struct_wl_data_offer = null,
+    selection_mime_mask: u8 = 0,
+    pending_offer: ?*wl.struct_wl_data_offer = null,
+    pending_mime_mask: u8 = 0,
+    last_serial: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) !WaylandBackend {
         const display = wl.wl_display_connect(null) orelse return error.ConnectionFailed;
@@ -88,6 +101,12 @@ pub const WaylandBackend = struct {
 
         if (self.text_input) |ti| _ = wl.zwp_text_input_v3_destroy(ti);
         if (self.text_input_manager) |tim| _ = wl.zwp_text_input_manager_v3_destroy(tim);
+        // 剪贴板资源
+        if (self.selection_offer) |so| wl.wl_data_offer_destroy(so);
+        if (self.pending_offer) |po| wl.wl_data_offer_destroy(po);
+        if (self.clipboard_source) |cs| wl.wl_data_source_destroy(cs);
+        if (self.data_device) |dd| _ = wl.wl_data_device_destroy(dd);
+        if (self.data_device_manager) |ddm| _ = wl.wl_data_device_manager_destroy(ddm);
         if (self.keyboard) |kb| _ = wl.wl_keyboard_destroy(kb);
         if (self.pointer) |p| _ = wl.wl_pointer_destroy(p);
         if (self.toplevel) |t| _ = wl.xdg_toplevel_destroy(t);
@@ -162,6 +181,13 @@ pub const WaylandBackend = struct {
                     self.text_input = ti;
                 }
             }
+            // 剪贴板: 创建 data_device (需 data_device_manager)
+            if (self.data_device_manager) |ddm| {
+                if (wl.wl_data_device_manager_get_data_device(ddm, seat)) |dd| {
+                    _ = wl.wl_data_device_add_listener(dd, &data_device_listener, self);
+                    self.data_device = dd;
+                }
+            }
         }
     }
 
@@ -231,6 +257,72 @@ pub const WaylandBackend = struct {
         }
     }
 
+    // ── 剪贴板 (wl_data_device 原生实现) ───────────────────────────────
+
+    /// 写入文本到系统剪贴板 (创建 data_source 并 set_selection)
+    pub fn clipboardSetText(self: *WaylandBackend, text: []const u8) void {
+        const ddm = self.data_device_manager orelse return;
+        const dd = self.data_device orelse return;
+
+        // 缓存文本 (其他应用粘贴时通过 source.send 事件读取)
+        const n = @min(text.len, self.clipboard_text.len);
+        @memcpy(self.clipboard_text[0..n], text[0..n]);
+        self.clipboard_len = n;
+
+        // 销毁旧 source (若有)
+        if (self.clipboard_source) |old| {
+            wl.wl_data_source_destroy(old);
+            self.clipboard_source = null;
+        }
+
+        const source = wl.wl_data_device_manager_create_data_source(ddm) orelse return;
+        _ = wl.wl_data_source_add_listener(source, &data_source_listener, self);
+        wl.wl_data_source_offer(source, "text/plain;charset=utf-8");
+        wl.wl_data_source_offer(source, "text/plain");
+        wl.wl_data_source_offer(source, "UTF8_STRING");
+        wl.wl_data_device_set_selection(dd, source, self.last_serial);
+        self.clipboard_source = source;
+        _ = wl.wl_display_flush(self.display);
+    }
+
+    /// 读取系统剪贴板文本 (同步阻塞, 带超时)。调用者拥有返回内存。
+    pub fn clipboardGetText(self: *WaylandBackend, allocator: std.mem.Allocator) ?[]u8 {
+        const offer = self.selection_offer orelse return null;
+        const mime = bestMime(self.selection_mime_mask) orelse return null;
+
+        var fds: [2]c_int = undefined;
+        if (wl.pipe(&fds) != 0) return null;
+
+        wl.wl_data_offer_receive(offer, mime, fds[1]);
+        _ = wl.wl_display_flush(self.display);
+        _ = wl.close(fds[1]); // 关闭写端, 读端才能收到 EOF
+
+        // 读端设为非阻塞, 通过 poll 等待数据 (防止挂死)
+        _ = wl.fcntl(fds[0], wl.F_SETFL, wl.O_NONBLOCK);
+
+        var out: std.ArrayList(u8) = .empty;
+        var buf: [4096]u8 = undefined;
+        var attempts: usize = 0;
+        while (attempts < 8) : (attempts += 1) {
+            var pfd = [_]std.posix.pollfd{.{ .fd = fds[0], .events = std.posix.POLL.IN, .revents = 0 }};
+            const pn = std.posix.poll(&pfd, 50) catch 0; // 50ms × 8 = 400ms 上限
+            if (pn <= 0) {
+                if (out.items.len > 0) break; // 已有部分数据且超时
+                continue;
+            }
+            const r = wl.read(fds[0], &buf, buf.len);
+            if (r <= 0) break; // EOF 或 EAGAIN
+            out.appendSlice(allocator, buf[0..@intCast(r)]) catch break;
+        }
+        _ = wl.close(fds[0]);
+
+        if (out.items.len == 0) {
+            out.deinit(allocator);
+            return null;
+        }
+        return out.toOwnedSlice(allocator) catch null;
+    }
+
     // ── 内部: 事件推送辅助 ──────────────────────────────────────────────────
 
     fn pushEvent(self: *WaylandBackend, ev: event_mod.Event) void {
@@ -279,6 +371,8 @@ fn registryGlobal(
         self.seat = @ptrCast(wl.wl_registry_bind(registry.?, name, &wl.wl_seat_interface, @min(version, 5)));
     } else if (std.mem.eql(u8, iface, "zwp_text_input_manager_v3")) {
         self.text_input_manager = @ptrCast(wl.wl_registry_bind(registry.?, name, &wl.zwp_text_input_manager_v3_interface, @min(version, 2)));
+    } else if (std.mem.eql(u8, iface, "wl_data_device_manager")) {
+        self.data_device_manager = @ptrCast(wl.wl_registry_bind(registry.?, name, &wl.wl_data_device_manager_interface, @min(version, 3)));
     }
 }
 
@@ -459,12 +553,13 @@ fn keyboardLeave(
 fn keyboardKey(
     data: ?*anyopaque,
     _: ?*wl.struct_wl_keyboard,
-    _: u32,
+    serial: u32,
     _: u32,
     key: u32,
     state: u32,
 ) callconv(.c) void {
     const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    self.last_serial = serial;
     const pressed = state == wl.WL_KEYBOARD_KEY_STATE_PRESSED;
 
     // evdev keycode → xkb keycode (+8)
@@ -716,12 +811,13 @@ fn pointerMotion(
 fn pointerButton(
     data: ?*anyopaque,
     _: ?*wl.struct_wl_pointer,
-    _: u32,
+    serial: u32,
     _: u32,
     button: u32,
     state: u32,
 ) callconv(.c) void {
     const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    self.last_serial = serial;
     const btn_state: event_mod.ButtonState = if (state == wl.WL_POINTER_BUTTON_STATE_PRESSED) .pressed else .released;
     const btn: event_mod.MouseButton = switch (button) {
         0x110 => .left, // BTN_LEFT
@@ -855,3 +951,198 @@ fn keysymToKeyCode(keysym: xkb.xkb_keysym_t) event_mod.KeyCode {
         else => @enumFromInt(@as(u16, 0xFFFF)),
     };
 }
+
+// ── 剪贴板 (wl_data_device) Listener ─────────────────────────────────────
+
+/// MIME 类型位掩码 (优先级从高到低)
+const MIME_UTF8: u8 = 1; // text/plain;charset=utf-8
+const MIME_PLAIN: u8 = 2; // text/plain
+const MIME_UTF8_STRING: u8 = 4; // UTF8_STRING
+const MIME_TEXT: u8 = 8; // TEXT / STRING
+
+fn mimeBit(mime: []const u8) u8 {
+    if (std.mem.eql(u8, mime, "text/plain;charset=utf-8")) return MIME_UTF8;
+    if (std.mem.eql(u8, mime, "text/plain")) return MIME_PLAIN;
+    if (std.mem.eql(u8, mime, "UTF8_STRING")) return MIME_UTF8_STRING;
+    if (std.mem.eql(u8, mime, "TEXT") or std.mem.eql(u8, mime, "STRING")) return MIME_TEXT;
+    return 0;
+}
+
+fn bestMime(mask: u8) ?[*:0]const u8 {
+    if (mask & MIME_UTF8 != 0) return "text/plain;charset=utf-8";
+    if (mask & MIME_PLAIN != 0) return "text/plain";
+    if (mask & MIME_UTF8_STRING != 0) return "UTF8_STRING";
+    if (mask & MIME_TEXT != 0) return "TEXT";
+    return null;
+}
+
+// data_offer: 跟踪 offer 提供的 MIME 类型
+fn dataOfferOffer(
+    data: ?*anyopaque,
+    offer: ?*wl.struct_wl_data_offer,
+    mime_type: ?[*:0]const u8,
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    if (offer != self.pending_offer) return;
+    const mime = std.mem.span(mime_type orelse return);
+    self.pending_mime_mask |= mimeBit(mime);
+}
+
+fn dataOfferSourceActions(
+    _: ?*anyopaque,
+    _: ?*wl.struct_wl_data_offer,
+    _: u32,
+) callconv(.c) void {}
+
+fn dataOfferAction(
+    _: ?*anyopaque,
+    _: ?*wl.struct_wl_data_offer,
+    _: u32,
+) callconv(.c) void {}
+
+const data_offer_listener = wl.wl_data_offer_listener{
+    .offer = dataOfferOffer,
+    .source_actions = dataOfferSourceActions,
+    .action = dataOfferAction,
+};
+
+// data_device: 接收 offer 与 selection 变化
+fn dataDeviceDataOffer(
+    data: ?*anyopaque,
+    _: ?*wl.struct_wl_data_device,
+    offer: ?*wl.struct_wl_data_offer,
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    // 销毁未被消费的旧 pending offer
+    if (self.pending_offer) |old| wl.wl_data_offer_destroy(old);
+    self.pending_offer = offer;
+    self.pending_mime_mask = 0;
+    if (offer) |o| {
+        _ = wl.wl_data_offer_add_listener(o, &data_offer_listener, self);
+    }
+}
+
+fn dataDeviceSelection(
+    data: ?*anyopaque,
+    _: ?*wl.struct_wl_data_device,
+    offer: ?*wl.struct_wl_data_offer,
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    // 销毁旧 selection offer
+    if (self.selection_offer) |old| {
+        if (old != offer) wl.wl_data_offer_destroy(old);
+    }
+    // pending offer 转为当前 selection
+    if (offer == self.pending_offer) {
+        self.selection_offer = offer;
+        self.selection_mime_mask = self.pending_mime_mask;
+        self.pending_offer = null;
+        self.pending_mime_mask = 0;
+    } else {
+        self.selection_offer = offer;
+        self.selection_mime_mask = 0;
+    }
+}
+
+fn dataDeviceEnter(
+    data: ?*anyopaque,
+    _: ?*wl.struct_wl_data_device,
+    _: u32,
+    _: ?*wl.struct_wl_surface,
+    _: wl.wl_fixed_t,
+    _: wl.wl_fixed_t,
+    _: ?*wl.struct_wl_data_offer,
+) callconv(.c) void {
+    // 不支持拖放: 销毁 pending offer (DnD 用途)
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    if (self.pending_offer) |old| {
+        wl.wl_data_offer_destroy(old);
+        self.pending_offer = null;
+        self.pending_mime_mask = 0;
+    }
+}
+
+fn dataDeviceLeave(
+    _: ?*anyopaque,
+    _: ?*wl.struct_wl_data_device,
+) callconv(.c) void {}
+
+fn dataDeviceMotion(
+    _: ?*anyopaque,
+    _: ?*wl.struct_wl_data_device,
+    _: u32,
+    _: wl.wl_fixed_t,
+    _: wl.wl_fixed_t,
+) callconv(.c) void {}
+
+fn dataDeviceDrop(
+    _: ?*anyopaque,
+    _: ?*wl.struct_wl_data_device,
+) callconv(.c) void {}
+
+const data_device_listener = wl.wl_data_device_listener{
+    .data_offer = dataDeviceDataOffer,
+    .enter = dataDeviceEnter,
+    .leave = dataDeviceLeave,
+    .motion = dataDeviceMotion,
+    .drop = dataDeviceDrop,
+    .selection = dataDeviceSelection,
+};
+
+// data_source: 本应用作为复制源, 响应其他应用的粘贴请求
+fn dataSourceTarget(
+    _: ?*anyopaque,
+    _: ?*wl.struct_wl_data_source,
+    _: ?[*:0]const u8,
+) callconv(.c) void {}
+
+fn dataSourceSend(
+    data: ?*anyopaque,
+    _: ?*wl.struct_wl_data_source,
+    _: ?[*:0]const u8,
+    fd: i32,
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    // 将缓存文本写入请求方的管道
+    var written: usize = 0;
+    while (written < self.clipboard_len) {
+        const n = wl.write(fd, self.clipboard_text[written..].ptr, self.clipboard_len - written);
+        if (n <= 0) break;
+        written += @intCast(n);
+    }
+    _ = wl.close(fd);
+}
+
+fn dataSourceCancelled(
+    data: ?*anyopaque,
+    source: ?*wl.struct_wl_data_source,
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    if (source) |s| wl.wl_data_source_destroy(s);
+    if (self.clipboard_source == source) self.clipboard_source = null;
+}
+
+fn dataSourceDndDropPerformed(
+    _: ?*anyopaque,
+    _: ?*wl.struct_wl_data_source,
+) callconv(.c) void {}
+
+fn dataSourceDndFinished(
+    _: ?*anyopaque,
+    _: ?*wl.struct_wl_data_source,
+) callconv(.c) void {}
+
+fn dataSourceAction(
+    _: ?*anyopaque,
+    _: ?*wl.struct_wl_data_source,
+    _: u32,
+) callconv(.c) void {}
+
+const data_source_listener = wl.wl_data_source_listener{
+    .target = dataSourceTarget,
+    .send = dataSourceSend,
+    .cancelled = dataSourceCancelled,
+    .dnd_drop_performed = dataSourceDndDropPerformed,
+    .dnd_finished = dataSourceDndFinished,
+    .action = dataSourceAction,
+};

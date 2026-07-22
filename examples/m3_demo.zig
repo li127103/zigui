@@ -116,6 +116,7 @@ const TextField = struct {
             self.len += n;
             self.cursor += n;
         }
+        self.sel_anchor = null;
     }
 
     /// 编辑: 插入本帧输入码点 + 处理编辑键 (选区感知)
@@ -135,6 +136,7 @@ const TextField = struct {
                         self.len -= del;
                         self.cursor = prev;
                     }
+                    self.sel_anchor = null;
                 },
                 .delete => {
                     if (self.selRange() != null) {
@@ -146,6 +148,7 @@ const TextField = struct {
                         std.mem.copyForwards(u8, self.text[self.cursor .. self.len - del], self.text[next .. self.len]);
                         self.len -= del;
                     }
+                    self.sel_anchor = null;
                 },
                 .left => {
                     if (self.selRange()) |sel| {
@@ -155,6 +158,7 @@ const TextField = struct {
                     } else if (self.cursor > 0) {
                         self.cursor -= 1;
                         while (self.cursor > 0 and (self.text[self.cursor] & 0xC0) == 0x80) self.cursor -= 1;
+                        self.sel_anchor = null;
                     }
                 },
                 .right => {
@@ -165,6 +169,7 @@ const TextField = struct {
                     } else if (self.cursor < self.len) {
                         self.cursor += 1;
                         while (self.cursor < self.len and (self.text[self.cursor] & 0xC0) == 0x80) self.cursor += 1;
+                        self.sel_anchor = null;
                     }
                 },
                 .home => {

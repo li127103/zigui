@@ -128,7 +128,11 @@ fn fieldSelRange(idx: usize) ?struct { usize, usize } {
     const anchor = g_sel_anchors[idx] orelse return null;
     const cursor = g_cursors[idx];
     if (anchor == cursor) return null;
-    return if (anchor < cursor) .{ anchor, cursor } else .{ cursor, anchor };
+    const len = g_fields[idx].slice().len;
+    const a = @min(anchor, len);
+    const c = @min(cursor, len);
+    if (a == c) return null;
+    return if (a < c) .{ a, c } else .{ c, a };
 }
 
 /// 删除字段选中文本, 光标置于起点
@@ -404,6 +408,7 @@ fn handleInput(app: *App) void {
                         deleteFieldSelection(f);
                     } else {
                         g_cursors[f] = g_fields[f].deleteCpBefore(g_cursors[f]);
+                        g_sel_anchors[f] = null;
                     }
                 }
             },
@@ -418,17 +423,20 @@ fn handleInput(app: *App) void {
         if (app.takeImeDelete()) |d| {
             if (fieldSelRange(f) != null) deleteFieldSelection(f);
             g_cursors[f] = g_fields[f].deleteNCpsBefore(g_cursors[f], d.before);
+            g_sel_anchors[f] = null;
         }
         // IME 提交文本 (中文等, 已是 UTF-8)
         const commit = app.imeCommitText();
         if (commit.len > 0) {
             if (fieldSelRange(f) != null) deleteFieldSelection(f);
             g_cursors[f] = g_fields[f].insertBytesAt(g_cursors[f], commit);
+            g_sel_anchors[f] = null;
         }
         // 普通键盘输入 (ASCII / macOS insertText codepoints)
         for (app.typedCodepoints()) |cp| {
             if (fieldSelRange(f) != null) deleteFieldSelection(f);
             g_cursors[f] = g_fields[f].insertCpAt(g_cursors[f], cp);
+            g_sel_anchors[f] = null;
         }
     }
 

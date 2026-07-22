@@ -122,6 +122,7 @@ pub const TextInput = struct {
         if (self.hasSelection()) self.deleteSelection();
         self.text.insertSlice(self.allocator, self.cursor, bytes) catch return;
         self.cursor += bytes.len;
+        self.selection_start = null;
         self.notifyChange();
         self.base.markDirty();
     }
@@ -147,6 +148,7 @@ pub const TextInput = struct {
             }
             self.cursor = start;
         }
+        self.selection_start = null;
         self.notifyChange();
         self.base.markDirty();
     }
@@ -347,6 +349,7 @@ pub const TextInput = struct {
                             self.cursor = start;
                             self.notifyChange();
                         }
+                        self.selection_start = null;
                         self.base.markDirty();
                         return .handled;
                     },
@@ -357,6 +360,7 @@ pub const TextInput = struct {
                             _ = self.text.orderedRemove(self.cursor);
                             self.notifyChange();
                         }
+                        self.selection_start = null;
                         self.base.markDirty();
                         return .handled;
                     },

@@ -37,6 +37,41 @@ pub const WidgetState = packed struct(u16) {
 
 pub const EventResult = enum { handled, ignored };
 
+/// 无障碍语义角色 (供屏幕阅读器/辅助技术识别控件类型)
+pub const Role = enum {
+    none,
+    button,
+    checkbox,
+    radio,
+    toggle,
+    slider,
+    progress,
+    text,
+    image,
+    list,
+    list_item,
+    container,
+    scroll_area,
+    tab,
+    menu,
+    dialog,
+    status,
+};
+
+/// 无障碍元数据 (a11y): 描述控件语义, 供辅助技术 (屏幕阅读器) 与焦点导航使用
+pub const Accessibility = struct {
+    /// 语义角色 (默认 none; 控件工厂可自动设置)
+    role: Role = .none,
+    /// 可读名称 (如按钮文本/图片替代文本)
+    label: ?[]const u8 = null,
+    /// 当前值文本 (如进度 "50%"、滑块数值)
+    value: ?[]const u8 = null,
+    /// 操作提示 (如 "按空格切换")
+    hint: ?[]const u8 = null,
+    /// 是否展开 (折叠面板/树节点等用)
+    expanded: ?bool = null,
+};
+
 /// 绘制上下文
 pub const PaintContext = struct {
     renderer: *r2d.Renderer2D,
@@ -67,6 +102,10 @@ pub const Widget = struct {
     layout_style: layout_mod.LayoutStyle = .{},
     /// 背景样式 (框架在 paintTree 中自动绘制于控件内容之前, 默认无背景)
     background: BackgroundStyle = .{},
+    /// 子树裁剪矩形 (绝对坐标; 非 null 时 paintTree 将子项绘制裁剪到此矩形, 供 ScrollView 等容器使用)
+    clip_children: ?math.Rect(f32) = null,
+    /// 无障碍元数据 (role/label/value/hint; 供辅助技术与焦点导航)
+    accessibility: Accessibility = .{},
     // 脏矩形跟踪器 (仅根控件设置, markDirty 时记录绝对脏区)
     dirty_tracker: ?*dirty_mod.DirtyRegion = null,
 
@@ -78,6 +117,8 @@ pub const Widget = struct {
         paint: *const fn (self: *Widget, ctx: *PaintContext) void,
         /// 事件处理
         on_event: ?*const fn (self: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult = null,
+        /// 自定义布局 (可选; 容器如 ScrollView 覆盖默认 flexbox 以应用滚动偏移)
+        perform_layout: ?*const fn (self: *Widget, ctx: *PaintContext) void = null,
         /// 是否可聚焦
         focusable: bool = false,
         /// 销毁
@@ -161,12 +202,22 @@ pub const Widget = struct {
         self.rect.width = std.math.clamp(w, 0, available.max_width);
         self.rect.height = std.math.clamp(h, 0, available.max_height);
 
-        // 布局子项 (简化 flexbox: 垂直堆叠)
+        // 布局子项 (简化 flexbox; 容器可经 vtable.perform_layout 覆盖)
         if (self.children.items.len > 0) {
-            self.layoutChildren(ctx);
+            self.layoutSubtree(ctx);
         }
 
         self.state.layout_dirty = false;
+    }
+
+    /// 布局子树: 优先使用 vtable.perform_layout 自定义布局, 否则默认 flexbox
+    /// (pub 供自定义布局容器如 ScrollView 递归布局子项)
+    pub fn layoutSubtree(self: *Widget, ctx: *PaintContext) void {
+        if (self.vtable.perform_layout) |custom| {
+            custom(self, ctx);
+        } else {
+            self.layoutChildren(ctx);
+        }
     }
 
     fn layoutChildren(self: *Widget, ctx: *PaintContext) void {
@@ -212,18 +263,58 @@ pub const Widget = struct {
 
         if (count > 1) total_main += gap * @as(f32, @floatFromInt(count - 1));
 
+        // 计算 flex_shrink 总和
+        var total_shrink: f32 = 0;
+        for (self.children.items) |child| {
+            if (child.layout_style.position == .absolute) continue;
+            if (!child.state.visible) continue;
+            total_shrink += child.layout_style.flex_shrink;
+        }
+
         // 弹性分配
         const free_space = (if (is_row) inner_w else inner_h) - total_main;
         if (free_space > 0 and total_grow > 0) {
+            // 伸展
             for (self.children.items) |child| {
                 if (child.layout_style.position == .absolute) continue;
                 if (!child.state.visible) continue;
                 if (child.layout_style.flex_grow > 0) {
                     const extra = free_space * (child.layout_style.flex_grow / total_grow);
+                    const cm = child.layout_style.margin;
                     if (is_row) {
-                        child.rect.width += extra;
+                        var new_w = child.rect.width + extra;
+                        if (child.layout_style.max_width.resolve(inner_w)) |mw| new_w = @min(new_w, mw - cm.left - cm.right);
+                        if (child.layout_style.min_width.resolve(inner_w)) |mw| new_w = @max(new_w, mw - cm.left - cm.right);
+                        child.rect.width = new_w;
                     } else {
-                        child.rect.height += extra;
+                        var new_h = child.rect.height + extra;
+                        if (child.layout_style.max_height.resolve(inner_h)) |mh| new_h = @min(new_h, mh - cm.top - cm.bottom);
+                        if (child.layout_style.min_height.resolve(inner_h)) |mh| new_h = @max(new_h, mh - cm.top - cm.bottom);
+                        child.rect.height = new_h;
+                    }
+                }
+            }
+        } else if (free_space < 0 and total_shrink > 0) {
+            // 收缩
+            const deficit = -free_space;
+            for (self.children.items) |child| {
+                if (child.layout_style.position == .absolute) continue;
+                if (!child.state.visible) continue;
+                if (child.layout_style.flex_shrink > 0) {
+                    const shrink = deficit * (child.layout_style.flex_shrink / total_shrink);
+                    const cm = child.layout_style.margin;
+                    if (is_row) {
+                        var new_w = child.rect.width - shrink;
+                        const min_w = child.layout_style.min_width.resolve(inner_w) orelse 0;
+                        new_w = @max(new_w, min_w - cm.left - cm.right);
+                        if (new_w < 0) new_w = 0;
+                        child.rect.width = new_w;
+                    } else {
+                        var new_h = child.rect.height - shrink;
+                        const min_h = child.layout_style.min_height.resolve(inner_h) orelse 0;
+                        new_h = @max(new_h, min_h - cm.top - cm.bottom);
+                        if (new_h < 0) new_h = 0;
+                        child.rect.height = new_h;
                     }
                 }
             }
@@ -314,7 +405,7 @@ pub const Widget = struct {
 
             // 递归布局子项
             if (child.children.items.len > 0) {
-                child.layoutChildren(ctx);
+                child.layoutSubtree(ctx);
             }
         }
 
@@ -361,7 +452,7 @@ pub const Widget = struct {
 
         // 递归布局子项
         if (child.children.items.len > 0) {
-            child.layoutChildren(ctx);
+            child.layoutSubtree(ctx);
         }
     }
 
@@ -394,6 +485,9 @@ pub const Widget = struct {
         // 绘制自身
         self.vtable.paint(self, ctx);
 
+        // 子树裁剪 (容器如 ScrollView 限制子项绘制范围; 先于子项绘制压入, 绘制后恢复)
+        const prev_clip = if (self.clip_children) |clip_rect| ctx.renderer.pushClip(clip_rect) else null;
+
         // 递归子项 (传递偏移)
         for (self.children.items) |child| {
             var child_ctx = ctx.*;
@@ -401,6 +495,8 @@ pub const Widget = struct {
             child_ctx.offset_y += self.rect.y;
             child.paintTree(&child_ctx);
         }
+
+        if (self.clip_children != null) ctx.renderer.popClip(prev_clip);
 
         self.state.dirty = false;
     }
@@ -497,6 +593,10 @@ pub const Widget = struct {
         const target = switch (event.*) {
             .mouse_button => |mb| self.hitTest(@floatFromInt(mb.x), @floatFromInt(mb.y)),
             .mouse_move => |mm| self.hitTest(@floatFromInt(mm.x), @floatFromInt(mm.y)),
+            // 滚轮事件命中鼠标下方的控件 (使 ScrollView 等在鼠标悬停于其范围内时随滚轮滚动)
+            .scroll => self.hitTest(ectx.mouse_x, ectx.mouse_y),
+            // 键盘事件路由到焦点控件 (使聚焦的 ScrollView/TextInput 等接收方向键/编辑键), 无焦点时回退根控件
+            .key => self.findFocused() orelse self,
             else => self,
         } orelse return .ignored;
 
@@ -529,7 +629,119 @@ pub const Widget = struct {
         }
         return null;
     }
+
+    /// 深度优先收集所有可聚焦控件 (按 Tab 顺序)。调用者拥有返回切片。
+    pub fn collectFocusable(self: *Widget, allocator: std.mem.Allocator) ![]*Widget {
+        var list = std.ArrayListUnmanaged(*Widget){ .items = &.{}, .capacity = 0 };
+        errdefer list.deinit(allocator);
+        self.collectFocusableInto(&list, allocator);
+        return list.toOwnedSlice(allocator);
+    }
+
+    fn collectFocusableInto(self: *Widget, list: *std.ArrayListUnmanaged(*Widget), allocator: std.mem.Allocator) void {
+        for (self.children.items) |child| {
+            if (!child.state.visible or child.state.disabled) continue;
+            if (child.vtable.focusable) list.append(allocator, child) catch {};
+            child.collectFocusableInto(list, allocator);
+        }
+    }
+
+    /// 查找子树中当前聚焦的控件
+    pub fn findFocused(self: *Widget) ?*Widget {
+        if (self.state.focused) return self;
+        for (self.children.items) |child| {
+            if (child.findFocused()) |f| return f;
+        }
+        return null;
+    }
+
+    /// 将焦点设置到指定控件 (清除子树中其他焦点)
+    pub fn setFocused(self: *Widget, target: ?*Widget) void {
+        self.clearFocus();
+        if (target) |t| t.state.focused = true;
+    }
+
+    /// 清除子树中所有焦点标记
+    pub fn clearFocus(self: *Widget) void {
+        self.state.focused = false;
+        for (self.children.items) |child| child.clearFocus();
+    }
+
+    /// Tab 焦点前进 (循环)。返回新聚焦控件 (无可聚焦控件时返回 null)。
+    pub fn focusNext(self: *Widget) ?*Widget {
+        return self.focusAdvance(1);
+    }
+
+    /// Shift+Tab 焦点后退 (循环)。
+    pub fn focusPrev(self: *Widget) ?*Widget {
+        return self.focusAdvance(-1);
+    }
+
+    fn focusAdvance(self: *Widget, dir: i32) ?*Widget {
+        const alloc = std.heap.page_allocator;
+        const list = self.collectFocusable(alloc) catch return null;
+        defer alloc.free(list);
+        if (list.len == 0) return null;
+        const focused = self.findFocused();
+        const n = list.len;
+        var next_idx: usize = 0;
+        if (focused) |f| {
+            var idx: usize = 0;
+            for (list, 0..) |w, i| {
+                if (w == f) {
+                    idx = i;
+                    break;
+                }
+            }
+            next_idx = if (dir >= 0) (idx + 1) % n else (idx + n - 1) % n;
+        } else {
+            // 无当前焦点: 前进→首个, 后退→末个
+            next_idx = if (dir >= 0) 0 else n - 1;
+        }
+        self.setFocused(list[next_idx]);
+        return list[next_idx];
+    }
+
+    /// 控件是否为 ancestor 的后代 (含自身)
+    pub fn isDescendantOf(self: *const Widget, ancestor: *const Widget) bool {
+        var cur: ?*const Widget = self;
+        while (cur) |w| : (cur = w.parent) {
+            if (w == ancestor) return true;
+        }
+        return false;
+    }
+
+    /// 无障碍描述文本: "角色 名称 值" (供屏幕阅读器朗读; 调用者拥有返回切片)
+    pub fn accessibilityDescription(self: *const Widget, allocator: std.mem.Allocator) ![]u8 {
+        const role_name = roleName(self.accessibility.role);
+        const label = self.accessibility.label orelse "";
+        const value = self.accessibility.value orelse "";
+        return try std.fmt.allocPrint(allocator, "{s} {s} {s}", .{ role_name, label, value });
+    }
 };
+
+/// 角色 → 可读名称 (无障碍朗读)
+pub fn roleName(role: Role) []const u8 {
+    return switch (role) {
+        .none => "",
+        .button => "按钮",
+        .checkbox => "复选框",
+        .radio => "单选按钮",
+        .toggle => "开关",
+        .slider => "滑块",
+        .progress => "进度条",
+        .text => "文本",
+        .image => "图片",
+        .list => "列表",
+        .list_item => "列表项",
+        .container => "容器",
+        .scroll_area => "滚动区域",
+        .tab => "标签页",
+        .menu => "菜单",
+        .dialog => "对话框",
+        .status => "状态栏",
+    };
+}
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
@@ -735,4 +947,102 @@ test "widget setCornerRadius keeps background" {
     w.setCornerRadius(12);
     try std.testing.expectEqual(@as(f32, 12), w.background.corner_radius);
     try std.testing.expect(std.meta.activeTag(w.background.bg) == .color);
+}
+
+// ── 焦点导航 / 无障碍 Tests ──────────────────────────────────────
+
+const test_vtable_focusable = Widget.VTable{
+    .type_name = "test_focusable",
+    .measure = testMeasure,
+    .paint = testPaint,
+    .on_event = testOnEvent,
+    .focusable = true,
+    .destroy = testDestroy,
+};
+
+test "widget collectFocusable skips disabled and invisible" {
+    var root: Widget = .{ .vtable = &test_vtable, .id = 1 };
+    var a: Widget = .{ .vtable = &test_vtable_focusable, .id = 2 };
+    var b: Widget = .{ .vtable = &test_vtable_focusable, .id = 3 };
+    var c: Widget = .{ .vtable = &test_vtable_focusable, .id = 4 };
+    b.state.disabled = true; // 禁用: 跳过
+    c.state.visible = false; // 不可见: 跳过
+    try root.addChild(std.testing.allocator, &a);
+    try root.addChild(std.testing.allocator, &b);
+    try root.addChild(std.testing.allocator, &c);
+    defer root.children.deinit(std.testing.allocator);
+
+    const list = try root.collectFocusable(std.testing.allocator);
+    defer std.testing.allocator.free(list);
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqual(@as(WidgetId, 2), list[0].id);
+}
+
+test "widget focusNext cycles through focusable children" {
+    var root: Widget = .{ .vtable = &test_vtable, .id = 1 };
+    var a: Widget = .{ .vtable = &test_vtable_focusable, .id = 2 };
+    var b: Widget = .{ .vtable = &test_vtable_focusable, .id = 3 };
+    try root.addChild(std.testing.allocator, &a);
+    try root.addChild(std.testing.allocator, &b);
+    defer root.children.deinit(std.testing.allocator);
+
+    // 初始无焦点 → focusNext 聚焦第一个
+    const f1 = root.focusNext();
+    try std.testing.expectEqual(@as(WidgetId, 2), f1.?.id);
+    try std.testing.expect(a.state.focused);
+
+    // 再 Tab → 第二个
+    const f2 = root.focusNext();
+    try std.testing.expectEqual(@as(WidgetId, 3), f2.?.id);
+    try std.testing.expect(!a.state.focused);
+    try std.testing.expect(b.state.focused);
+
+    // 循环回第一个
+    const f3 = root.focusNext();
+    try std.testing.expectEqual(@as(WidgetId, 2), f3.?.id);
+
+    // Shift+Tab 后退到第二个
+    const f4 = root.focusPrev();
+    try std.testing.expectEqual(@as(WidgetId, 3), f4.?.id);
+}
+
+test "widget findFocused and clearFocus" {
+    var root: Widget = .{ .vtable = &test_vtable, .id = 1 };
+    var a: Widget = .{ .vtable = &test_vtable_focusable, .id = 2 };
+    try root.addChild(std.testing.allocator, &a);
+    defer root.children.deinit(std.testing.allocator);
+
+    try std.testing.expect(root.findFocused() == null);
+    root.setFocused(&a);
+    try std.testing.expectEqual(@as(WidgetId, 2), root.findFocused().?.id);
+    root.clearFocus();
+    try std.testing.expect(root.findFocused() == null);
+}
+
+test "widget isDescendantOf traces parent chain" {
+    var root: Widget = .{ .vtable = &test_vtable, .id = 1 };
+    var child: Widget = .{ .vtable = &test_vtable, .id = 2 };
+    var grand: Widget = .{ .vtable = &test_vtable, .id = 3 };
+    try root.addChild(std.testing.allocator, &child);
+    try child.addChild(std.testing.allocator, &grand);
+    defer child.children.deinit(std.testing.allocator);
+    defer root.children.deinit(std.testing.allocator);
+
+    try std.testing.expect(grand.isDescendantOf(&root));
+    try std.testing.expect(grand.isDescendantOf(&child));
+    try std.testing.expect(!root.isDescendantOf(&grand));
+}
+
+test "widget accessibilityDescription formats role label value" {
+    var w: Widget = .{ .vtable = &test_vtable, .id = 1 };
+    w.accessibility = .{ .role = .checkbox, .label = "同意条款", .value = "已选中" };
+    const desc = try w.accessibilityDescription(std.testing.allocator);
+    defer std.testing.allocator.free(desc);
+    try std.testing.expectEqualStrings("复选框 同意条款 已选中", desc);
+}
+
+test "roleName maps roles to readable names" {
+    try std.testing.expectEqualStrings("按钮", roleName(.button));
+    try std.testing.expectEqualStrings("滚动区域", roleName(.scroll_area));
+    try std.testing.expectEqualStrings("", roleName(.none));
 }

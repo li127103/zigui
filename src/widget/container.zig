@@ -102,12 +102,17 @@ pub const Container = struct {
             const child_size = child.vtable.measure(child, ctx, constraints);
             const cm = child.layout_style.margin;
 
+            var cw = child_size.width;
+            var ch = child_size.height;
+            if (child.layout_style.width.resolve(constraints.max_width)) |ew| cw = ew;
+            if (child.layout_style.height.resolve(constraints.max_height)) |eh| ch = eh;
+
             if (is_row) {
-                total_main += child_size.width + cm.left + cm.right;
-                max_cross = @max(max_cross, child_size.height + cm.top + cm.bottom);
+                total_main += cw + cm.left + cm.right;
+                max_cross = @max(max_cross, ch + cm.top + cm.bottom);
             } else {
-                total_main += child_size.height + cm.top + cm.bottom;
-                max_cross = @max(max_cross, child_size.width + cm.left + cm.right);
+                total_main += ch + cm.top + cm.bottom;
+                max_cross = @max(max_cross, cw + cm.left + cm.right);
             }
             count += 1;
         }

@@ -24,6 +24,10 @@ const Frame = zigui.frame.Frame;
 const CenterBox = zigui.center_box.CenterBox;
 const FlowBox = zigui.flow_box.FlowBox;
 const Overlay = zigui.overlay.Overlay;
+const Expander = zigui.expander.Expander;
+const Revealer = zigui.revealer.Revealer;
+const AspectFrame = zigui.aspect_frame.AspectFrame;
+const ScrollView = zigui.scroll_view.ScrollView;
 
 const theme_dark: zigui.theme.Theme = zigui.theme.dark;
 
@@ -34,8 +38,12 @@ var g_stack_label: ?*Label = null;
 var g_stack_buf: [32]u8 = undefined;
 var g_overlay: ?*Overlay = null;
 var g_overlay_visible: bool = false;
+var g_revealer: ?*Revealer = null;
 var g_frame: u32 = 0;
 var g_prev_mouse_down: bool = false;
+/// FlowBox 数字标签的静态存储 (1-16), 避免堆分配泄漏
+var g_flow_num_texts: [16][2]u8 = undefined;
+var g_flow_num_slices: [16][]const u8 = undefined;
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -58,6 +66,19 @@ pub fn main() !void {
 }
 
 fn buildTree(alloc: std.mem.Allocator) !void {
+    // 初始化 FlowBox 数字标签的静态存储
+    for (0..16) |i| {
+        const n: u8 = @intCast(i + 1);
+        if (n < 10) {
+            g_flow_num_texts[i][0] = '0' + n;
+            g_flow_num_slices[i] = g_flow_num_texts[i][0..1];
+        } else {
+            g_flow_num_texts[i][0] = '0' + (n / 10);
+            g_flow_num_texts[i][1] = '0' + (n % 10);
+            g_flow_num_slices[i] = g_flow_num_texts[i][0..2];
+        }
+    }
+
     const root = try Container.create(alloc, .{
         .bg_color = math.Color.hex(0x0F172AFF),
         .direction = .column,
@@ -102,9 +123,9 @@ fn buildBody(root: *Container, alloc: std.mem.Allocator) !void {
     try buildRightColumn(body, alloc);
 }
 
-fn buildLeftColumn(body: *Container, alloc: std.mem.Allocator) !void {
+fn buildMinimalTest(body: *Container, alloc: std.mem.Allocator) !void {
     const col = try Container.create(alloc, .{
-        .bg_color = math.Color.hex(0x1E293BFF),
+        .bg_color = math.Color.hex(0xF8FAFCFF),
         .corner_radius = 12,
         .direction = .column,
         .width = .{ .px = 420 },
@@ -114,8 +135,81 @@ fn buildLeftColumn(body: *Container, alloc: std.mem.Allocator) !void {
     col.base.layout_style.flex_shrink = 0;
     try body.base.addChild(alloc, &col.base);
 
-    try buildStackDemo(col, alloc);
-    try buildFrameDemo(col, alloc);
+    const label1_bg = try Container.create(alloc, .{
+        .bg_color = math.Color.hex(0xE11D4833),
+        .corner_radius = 4,
+        .padding = math.EdgeInsets.all(8),
+    });
+    try col.base.addChild(alloc, &label1_bg.base);
+    const label1 = try Label.create(alloc, "Expander 上方的标签 (应该可见)", .{
+        .font_size = 14,
+        .color = math.Color.hex(0xE11D48FF),
+    });
+    try label1_bg.base.addChild(alloc, &label1.base);
+
+    const expander = try Expander.create(alloc, "测试 Expander (默认收起)", .{
+        .expanded = false,
+        .header_bg = math.Color.hex(0x334155FF),
+        .header_hover_bg = math.Color.hex(0x475569FF),
+        .text_color = math.Color.hex(0xF1F5F9FF),
+        .border_color = math.Color.hex(0x475569FF),
+    });
+    try col.base.addChild(alloc, &expander.base);
+
+    const exp_content = try Container.create(alloc, .{
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 8 },
+        .padding = math.EdgeInsets.all(12),
+    });
+    try expander.base.addChild(alloc, &exp_content.base);
+
+    const opt1 = try Label.create(alloc, "• 选项一: 测试内容", .{
+        .font_size = 13,
+        .color = math.Color.hex(0x94A3B8FF),
+    });
+    try exp_content.base.addChild(alloc, &opt1.base);
+
+    const label2_bg = try Container.create(alloc, .{
+        .bg_color = math.Color.hex(0x05966933),
+        .corner_radius = 4,
+        .padding = math.EdgeInsets.all(8),
+    });
+    try col.base.addChild(alloc, &label2_bg.base);
+    const label2 = try Label.create(alloc, "Expander 下方的标签 (应该可见)", .{
+        .font_size = 14,
+        .color = math.Color.hex(0x059669FF),
+    });
+    try label2_bg.base.addChild(alloc, &label2.base);
+}
+
+fn buildLeftColumn(body: *Container, alloc: std.mem.Allocator) !void {
+    const col = try Container.create(alloc, .{
+        .direction = .column,
+        .width = .{ .px = 420 },
+    });
+    col.base.layout_style.flex_shrink = 0;
+    try body.base.addChild(alloc, &col.base);
+
+    const scroll = try ScrollView.create(alloc, .{
+        .bg_color = math.Color.hex(0xF8FAFCFF),
+        .corner_radius = 12,
+    });
+    scroll.base.layout_style.flex_grow = 1;
+    try col.base.addChild(alloc, &scroll.base);
+
+    const content = try Container.create(alloc, .{
+        .direction = .column,
+        .padding = math.EdgeInsets.all(16),
+        .gap = .{ .width = 0, .height = 16 },
+    });
+    try scroll.base.addChild(alloc, &content.base);
+
+    try buildStackDemo(content, alloc);
+    try buildFrameDemo(content, alloc);
+    try buildExpanderDemo(content, alloc);
+    try buildRevealerDemo(content, alloc);
+    try buildHexpandDemo(content, alloc);
+    try buildAspectFrameDemo(content, alloc);
 }
 
 fn buildRightColumn(body: *Container, alloc: std.mem.Allocator) !void {
@@ -406,9 +500,7 @@ fn buildFlowBoxDemo(parent: *Container, alloc: std.mem.Allocator) !void {
         const num_lbl = try Label.create(alloc, "", .{ .font_size = 14, .font_weight = 700, .color = math.Color.hex(0xFFFFFFFF) });
         num_lbl.base.layout_style.margin.top = 16;
         num_lbl.base.layout_style.margin.left = 28;
-        const buf = try alloc.alloc(u8, 4);
-        const len = std.fmt.bufPrint(buf, "{}", .{i + 1}) catch "?";
-        num_lbl.text = len;
+        num_lbl.text = g_flow_num_slices[i];
         try item.base.addChild(alloc, &num_lbl.base);
         try flow.addChild(&item.base);
     }
@@ -459,6 +551,173 @@ fn buildOverlayDemo(parent: *Container, alloc: std.mem.Allocator) !void {
     try overlay_container.base.addChild(alloc, &toggle_btn.base);
 }
 
+fn buildExpanderDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "Expander 折叠面板 (带动画)");
+
+    const expander = try Expander.create(alloc, "高级设置", .{
+        .expanded = false,
+        .header_bg = math.Color.hex(0x334155FF),
+        .header_hover_bg = math.Color.hex(0x475569FF),
+        .text_color = math.Color.hex(0xF1F5F9FF),
+        .border_color = math.Color.hex(0x475569FF),
+    });
+    try parent.base.addChild(alloc, &expander.base);
+
+    // 暂时去掉子项, 排查问题
+    const content = try Container.create(alloc, .{
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 8 },
+        .padding = math.EdgeInsets.all(12),
+    });
+    try expander.base.addChild(alloc, &content.base);
+
+    const opt1 = try Label.create(alloc, "• 选项一: 启用深色模式", .{
+        .font_size = 13,
+        .color = math.Color.hex(0x94A3B8FF),
+    });
+    try content.base.addChild(alloc, &opt1.base);
+}
+
+fn buildRevealerDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "Revealer 滑入/滑出 (带动画)");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 8 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    const btn_row = try Container.create(alloc, .{
+        .direction = .row,
+        .gap = .{ .width = 8, .height = 0 },
+    });
+    try demo.base.addChild(alloc, &btn_row.base);
+
+    const toggle_btn = try Button.create(alloc, "显示/隐藏", .{
+        .on_click = onToggleRevealer,
+    });
+    toggle_btn.base.layout_style.height = .{ .px = 28 };
+    try btn_row.base.addChild(alloc, &toggle_btn.base);
+
+    const revealer = try Revealer.create(alloc, .{
+        .transition_type = .slide_down,
+        .transition_duration_ms = 250,
+    });
+    g_revealer = revealer;
+    try demo.base.addChild(alloc, &revealer.base);
+
+    const rev_content = try Container.create(alloc, .{
+        .bg_color = math.Color.hex(0x7C3AEDFF),
+        .corner_radius = 8,
+        .padding = math.EdgeInsets.all(12),
+        .direction = .column,
+    });
+    try revealer.base.addChild(alloc, &rev_content.base);
+
+    const rev_title = try Label.create(alloc, "✨ 新功能上线", .{
+        .font_size = 14,
+        .font_weight = 700,
+        .color = math.Color.hex(0xFFFFFFFF),
+    });
+    try rev_content.base.addChild(alloc, &rev_title.base);
+
+    const rev_desc = try Label.create(alloc, "现在支持平滑动画效果!", .{
+        .font_size = 12,
+        .color = math.Color.hex(0xE9D5FFFF),
+    });
+    rev_desc.base.layout_style.margin.top = 4;
+    try rev_content.base.addChild(alloc, &rev_desc.base);
+}
+
+fn buildHexpandDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "hexpand / vexpand (GTK 风格扩展)");
+
+    const row = try Container.create(alloc, .{
+        .direction = .row,
+        .gap = .{ .width = 8, .height = 0 },
+        .height = .{ .px = 40 },
+    });
+    try parent.base.addChild(alloc, &row.base);
+
+    const btn1 = try Container.create(alloc, .{
+        .bg_color = math.Color.hex(0x475569FF),
+        .corner_radius = 6,
+        .direction = .row,
+        .width = .{ .px = 60 },
+        .height = .{ .px = 40 },
+    });
+    const lbl1 = try Label.create(alloc, "固定", .{
+        .font_size = 13,
+        .color = math.Color.hex(0xFFFFFFFF),
+    });
+    lbl1.base.layout_style.margin.left = 14;
+    lbl1.base.layout_style.margin.top = 11;
+    try btn1.base.addChild(alloc, &lbl1.base);
+    try row.base.addChild(alloc, &btn1.base);
+
+    const btn2 = try Container.create(alloc, .{
+        .bg_color = math.Color.hex(0x3B82F6FF),
+        .corner_radius = 6,
+        .direction = .row,
+        .height = .{ .px = 40 },
+    });
+    btn2.base.layout_style.hexpand = true;
+    const lbl2 = try Label.create(alloc, "hexpand 填充", .{
+        .font_size = 13,
+        .color = math.Color.hex(0xFFFFFFFF),
+    });
+    lbl2.base.layout_style.margin.left = 14;
+    lbl2.base.layout_style.margin.top = 11;
+    try btn2.base.addChild(alloc, &lbl2.base);
+    try row.base.addChild(alloc, &btn2.base);
+
+    const btn3 = try Container.create(alloc, .{
+        .bg_color = math.Color.hex(0x475569FF),
+        .corner_radius = 6,
+        .direction = .row,
+        .width = .{ .px = 60 },
+        .height = .{ .px = 40 },
+    });
+    const lbl3 = try Label.create(alloc, "固定", .{
+        .font_size = 13,
+        .color = math.Color.hex(0xFFFFFFFF),
+    });
+    lbl3.base.layout_style.margin.left = 14;
+    lbl3.base.layout_style.margin.top = 11;
+    try btn3.base.addChild(alloc, &lbl3.base);
+    try row.base.addChild(alloc, &btn3.base);
+}
+
+fn buildAspectFrameDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "AspectFrame 保持宽高比 (16:9)");
+
+    const aspect_frame = try AspectFrame.create(alloc, .{
+        .ratio = 16.0 / 9.0,
+        .xalign = 0.5,
+        .yalign = 0.5,
+        .bg_color = math.Color.hex(0x1E293BFF),
+        .corner_radius = 8,
+        .padding = math.EdgeInsets.all(8),
+    });
+    try parent.base.addChild(alloc, &aspect_frame.base);
+
+    const content = try Container.create(alloc, .{
+        .bg_color = math.Color.hex(0x0EA5E9FF),
+        .corner_radius = 4,
+        .direction = .column,
+    });
+    try aspect_frame.setChild(&content.base);
+
+    const label = try Label.create(alloc, "16:9 Aspect", .{
+        .font_size = 14,
+        .font_weight = 700,
+        .color = math.Color.hex(0xFFFFFFFF),
+    });
+    label.base.layout_style.margin.top = 20;
+    label.base.layout_style.margin.left = 40;
+    try content.base.addChild(alloc, &label.base);
+}
+
 fn destroyTree() void {
     if (g_root) |root| {
         root.destroy(g_alloc orelse return);
@@ -506,8 +765,20 @@ fn onToggleOverlay(btn: *Button) void {
             if (o.base.children.items.len > 1) {
                 const child = o.base.children.items[o.base.children.items.len - 1];
                 o.base.removeChild(alloc, child);
+                child.vtable.destroy(child, alloc);
             }
             btn.label = "显示浮层";
+        }
+    }
+}
+
+fn onToggleRevealer(btn: *Button) void {
+    if (g_revealer) |r| {
+        r.setRevealChild(!r.reveal_child);
+        if (r.reveal_child) {
+            btn.label = "隐藏";
+        } else {
+            btn.label = "显示";
         }
     }
 }
@@ -544,6 +815,10 @@ fn drawFrame(app: *zigui.app.App) void {
     const h: f32 = @floatFromInt(fb.height);
 
     dispatchInput(app);
+
+    // 驱动动画
+    const delta_ms = app.getDeltaMs();
+    root.base.tickTree(delta_ms);
 
     root.base.layout_style.width = .{ .px = w };
     root.base.layout_style.height = .{ .px = h };

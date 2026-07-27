@@ -10,6 +10,7 @@ const dirty_mod = @import("render2d/dirty.zig");
 const atlas_mod = @import("text/atlas_vulkan.zig");
 const freetype = @import("text/freetype.zig");
 const clipboard = @import("pal/clipboard.zig");
+const perf_mod = @import("perf.zig");
 
 // 编译期后端选择
 const enable_wayland = build_options.enable_wayland;
@@ -113,6 +114,10 @@ pub const App = struct {
     maximized: bool = false,
     fb_width: u32,
     fb_height: u32,
+    /// 高 DPI 缩放因子 (逻辑坐标 → 物理像素; 来自后端输出检测)
+    scale_factor: f32 = 1.0,
+    /// 性能监控 (帧时间/FPS 统计)
+    frame_stats: perf_mod.FrameStats = .{},
 
     // 脏矩形驱动重绘
     dirty: dirty_mod.DirtyRegion,
@@ -277,8 +282,10 @@ pub const App = struct {
                 self.renderer = renderer2d.Renderer2D.init(allocator, &self.vk_device);
                 self.renderer.glyph_atlas = &self.glyph_atlas;
 
-                // 设置 Wayland 全局事件队列引用
-                wayland.setEventQueue(&self.event_queue, allocator, &self.backend.wayland);
+                // 设置 Wayland 事件队列
+                self.backend.wayland.event_queue = &self.event_queue;
+                self.scale_factor = self.backend.wayland.getScaleFactor();
+                self.vk_device.setContentScale(self.scale_factor);
             },
             .x11 => {
                 if (comptime !enable_x11) {
@@ -314,7 +321,9 @@ pub const App = struct {
                         try self.glyph_atlas.createTexture(&self.vk_device);
                         self.renderer = renderer2d.Renderer2D.init(allocator, &self.vk_device);
                         self.renderer.glyph_atlas = &self.glyph_atlas;
-                        wayland.setEventQueue(&self.event_queue, allocator, &self.backend.wayland);
+                        self.backend.wayland.event_queue = &self.event_queue;
+                        self.scale_factor = self.backend.wayland.getScaleFactor();
+                        self.vk_device.setContentScale(self.scale_factor);
                         return self;
                     }
                     return error.NoBackendAvailable;
@@ -361,6 +370,8 @@ pub const App = struct {
         };
         self.renderer.device = &self.vk_device;
         self.renderer.glyph_atlas = &self.glyph_atlas;
+        self.scale_factor = self.backend.x11.getScaleFactor();
+        self.vk_device.setContentScale(self.scale_factor);
     }
 
     pub fn deinit(self: *App) void {
@@ -475,6 +486,10 @@ pub const App = struct {
                         }
                         self.invalidate();
                     },
+                    .file_drop => |fd| {
+                        self.file_drop = fd;
+                        self.invalidate();
+                    },
                     else => {},
                 }
             }
@@ -493,8 +508,10 @@ pub const App = struct {
 
             // 5. 用户绘制
             self.renderer.beginFrame();
+            self.frame_stats.beginFrame();
             draw_fn(self);
             self.renderer.submit();
+            self.frame_stats.endFrame();
 
             // 消费本帧输入
             self.mouse_clicked = false;
@@ -518,6 +535,21 @@ pub const App = struct {
 
     pub fn getFramebufferSize(self: *App) math.Size(u32) {
         return .{ .width = self.fb_width, .height = self.fb_height };
+    }
+
+    /// 高 DPI 缩放因子 (逻辑坐标 × scale = 物理像素; 普通屏为 1.0)
+    pub fn getScaleFactor(self: *App) f32 {
+        return self.scale_factor;
+    }
+
+    /// 性能监控统计 (FPS / 帧耗时 / 百分位)
+    pub fn getFrameStats(self: *App) *const perf_mod.FrameStats {
+        return &self.frame_stats;
+    }
+
+    /// 获取上一帧到当前帧的时间差 (ms), 用于驱动动画
+    pub fn getDeltaMs(self: *App) u32 {
+        return self.frame_stats.getDeltaMs();
     }
 
     pub fn getGlyphAtlas(self: *App) *atlas_mod.GlyphAtlas {

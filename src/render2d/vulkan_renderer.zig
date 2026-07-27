@@ -16,6 +16,8 @@ pub const Renderer2D = struct {
     text_vertices: std.ArrayListUnmanaged(TextVertex) = .{ .items = &.{}, .capacity = 0 },
     allocator: std.mem.Allocator,
     glyph_atlas: ?*atlas_mod.GlyphAtlas = null,
+    /// 当前裁剪矩形 (null = 全屏; 由 pushClip/popClip 管理, 供 ScrollView 裁剪溢出子控件)
+    clip: ?math.Rect(f32) = null,
 
     pub fn init(allocator: std.mem.Allocator, device: *vulkan.VulkanDevice) Renderer2D {
         return .{ .device = device, .allocator = allocator };
@@ -29,6 +31,8 @@ pub const Renderer2D = struct {
     pub fn beginFrame(self: *Renderer2D) void {
         self.vertices.clearRetainingCapacity();
         self.text_vertices.clearRetainingCapacity();
+        self.clip = null;
+        self.device.setScissor(null);
     }
 
     /// 填充矩形 (2 三角形)
@@ -163,8 +167,8 @@ pub const Renderer2D = struct {
     pub fn submit(self: *Renderer2D) void {
         // 1. 纯色几何
         if (self.vertices.items.len > 0) {
-            self.device.updateVertices(self.vertices.items);
-            self.device.drawTriangles(@intCast(self.vertices.items.len));
+            const offset = self.device.updateVertices(self.vertices.items);
+            self.device.drawTriangles(@intCast(self.vertices.items.len), offset);
         }
 
         // 2. 文本 (纹理管线)
@@ -172,8 +176,8 @@ pub const Renderer2D = struct {
             if (self.glyph_atlas) |atlas| {
                 atlas.flush(self.device);
                 if (atlas.texture) |tex| {
-                    self.device.updateTextVertices(self.text_vertices.items);
-                    self.device.drawTextured(@intCast(self.text_vertices.items.len), tex.view);
+                    const offset = self.device.updateTextVertices(self.text_vertices.items);
+                    self.device.drawTextured(@intCast(self.text_vertices.items.len), tex.view, offset);
                 }
             }
         }
@@ -183,8 +187,8 @@ pub const Renderer2D = struct {
     pub fn flush(self: *Renderer2D) void {
         // 1. 纯色几何
         if (self.vertices.items.len > 0) {
-            self.device.updateVertices(self.vertices.items);
-            self.device.drawTriangles(@intCast(self.vertices.items.len));
+            const offset = self.device.updateVertices(self.vertices.items);
+            self.device.drawTriangles(@intCast(self.vertices.items.len), offset);
             self.vertices.clearRetainingCapacity();
         }
 
@@ -193,12 +197,30 @@ pub const Renderer2D = struct {
             if (self.glyph_atlas) |atlas| {
                 atlas.flush(self.device);
                 if (atlas.texture) |tex| {
-                    self.device.updateTextVertices(self.text_vertices.items);
-                    self.device.drawTextured(@intCast(self.text_vertices.items.len), tex.view);
+                    const offset = self.device.updateTextVertices(self.text_vertices.items);
+                    self.device.drawTextured(@intCast(self.text_vertices.items.len), tex.view, offset);
                 }
             }
             self.text_vertices.clearRetainingCapacity();
         }
+    }
+
+    /// 压入裁剪矩形 (先 flush 已累积几何以保持 z 序, 再设 scissor)。
+    /// 嵌套时与当前裁剪取交集。返回之前的裁剪供 popClip 恢复。
+    pub fn pushClip(self: *Renderer2D, rect: math.Rect(f32)) ?math.Rect(f32) {
+        self.flush();
+        const prev = self.clip;
+        const new_clip = if (prev) |p| (p.intersection(rect) orelse emptyRect(rect)) else rect;
+        self.clip = new_clip;
+        self.device.setScissor(new_clip);
+        return prev;
+    }
+
+    /// 弹出裁剪 (恢复 prev; 先 flush 再设 scissor)
+    pub fn popClip(self: *Renderer2D, prev: ?math.Rect(f32)) void {
+        self.flush();
+        self.clip = prev;
+        self.device.setScissor(prev);
     }
 
     /// 描边圆角矩形边框 (内外轮廓环形三角化)
@@ -366,6 +388,11 @@ pub const Renderer2D = struct {
         };
     }
 };
+
+/// 空裁剪矩形 (不相交时裁剪一切, 保留位置于参考 rect 内)
+fn emptyRect(ref: math.Rect(f32)) math.Rect(f32) {
+    return .{ .x = ref.x, .y = ref.y, .width = 0, .height = 0 };
+}
 
 /// 放置的 glyph (用于文本渲染)
 pub const PlacedGlyph = struct {

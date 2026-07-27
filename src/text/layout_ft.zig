@@ -207,4 +207,72 @@ pub const TextLayout = struct {
     pub fn measure(font: *const freetype.FtFont, text: []const u8) f32 {
         return font.measureText(text);
     }
+
+    /// 多行测量: 给定最大宽度, 计算文本实际宽高 (不分配 atlas, 仅 shape + 断行)
+    pub fn measureMultiline(
+        font: *const freetype.FtFont,
+        text: []const u8,
+        opts: struct {
+            font_size: f32,
+            max_width: f32,
+            line_height_scale: f32 = 1.2,
+        },
+    ) math.Size(f32) {
+        _ = opts.font_size;
+        if (text.len == 0) {
+            const metrics = font.getMetrics();
+            return .{ .width = 0, .height = metrics.line_height * opts.line_height_scale };
+        }
+
+        var shaped_buf: [4096]freetype.ShapedGlyph = undefined;
+        const glyph_count = font.shapeText(text, &shaped_buf);
+        if (glyph_count == 0) {
+            const metrics = font.getMetrics();
+            return .{ .width = 0, .height = metrics.line_height * opts.line_height_scale };
+        }
+
+        const shaped = shaped_buf[0..glyph_count];
+        const metrics = font.getMetrics();
+        const line_height = metrics.line_height * opts.line_height_scale;
+
+        var max_line_width: f32 = 0;
+        var line_idx: usize = 0;
+        var pen_x: f32 = 0;
+        var last_space_idx: ?usize = null;
+        var last_space_x: f32 = 0;
+        var word_start: usize = 0;
+
+        for (shaped, 0..) |sg, i| {
+            const codepoint = text[sg.cluster];
+            if (codepoint == ' ') {
+                last_space_idx = i;
+                last_space_x = pen_x + sg.x_advance;
+            }
+
+            if (pen_x + sg.x_advance > opts.max_width and i > word_start) {
+                // 换行
+                if (last_space_idx) |sp_idx| {
+                    max_line_width = @max(max_line_width, last_space_x);
+                    pen_x = pen_x - last_space_x;
+                    word_start = sp_idx + 1;
+                    last_space_idx = null;
+                } else {
+                    max_line_width = @max(max_line_width, pen_x);
+                    pen_x = sg.x_advance;
+                    word_start = i;
+                }
+                line_idx += 1;
+            } else {
+                pen_x += sg.x_advance;
+            }
+        }
+
+        max_line_width = @max(max_line_width, pen_x);
+        line_idx += 1;
+
+        return .{
+            .width = max_line_width,
+            .height = @as(f32, @floatFromInt(line_idx)) * line_height,
+        };
+    }
 };

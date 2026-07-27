@@ -36,6 +36,8 @@ pub const WaylandBackend = struct {
     width: u32 = 0,
     height: u32 = 0,
     maximized: bool = false,
+    /// 高 DPI 缩放因子 (来自 wl_output.scale; 默认 1.0)
+    scale_factor: f32 = 1.0,
     // xkb
     xkb_ctx: ?*xkb.xkb_context = null,
     xkb_keymap: ?*xkb.xkb_keymap = null,
@@ -60,6 +62,13 @@ pub const WaylandBackend = struct {
     pending_offer: ?*wl.struct_wl_data_offer = null,
     pending_mime_mask: u8 = 0,
     last_serial: u32 = 0,
+    // 文件拖放 (DnD 接收)
+    drag_offer: ?*wl.struct_wl_data_offer = null,
+    drag_has_uri: bool = false, // offer 是否提供 text/uri-list
+    drop_x: i32 = 0,
+    drop_y: i32 = 0,
+    // 事件队列 (由 pal 层在 init 后设置)
+    event_queue: ?*pal.EventQueue = null,
 
     pub fn init(allocator: std.mem.Allocator) !WaylandBackend {
         const display = wl.wl_display_connect(null) orelse return error.ConnectionFailed;
@@ -104,6 +113,7 @@ pub const WaylandBackend = struct {
         // 剪贴板资源
         if (self.selection_offer) |so| wl.wl_data_offer_destroy(so);
         if (self.pending_offer) |po| wl.wl_data_offer_destroy(po);
+        if (self.drag_offer) |doffer| wl.wl_data_offer_destroy(doffer);
         if (self.clipboard_source) |cs| wl.wl_data_source_destroy(cs);
         if (self.data_device) |dd| _ = wl.wl_data_device_destroy(dd);
         if (self.data_device_manager) |ddm| _ = wl.wl_data_device_manager_destroy(ddm);
@@ -232,6 +242,11 @@ pub const WaylandBackend = struct {
         return .{ .width = self.width, .height = self.height };
     }
 
+    /// 当前高 DPI 缩放因子 (来自 wl_output.scale)
+    pub fn getScaleFactor(self: *const WaylandBackend) f32 {
+        return self.scale_factor;
+    }
+
     /// 请求最大化窗口
     pub fn setMaximized(self: *WaylandBackend) void {
         if (self.toplevel) |tl| {
@@ -323,28 +338,48 @@ pub const WaylandBackend = struct {
         return out.toOwnedSlice(allocator) catch null;
     }
 
+    /// 读取拖放 offer 中的首个文件路径 (同步阻塞带超时)。
+    /// 解析 text/uri-list 的首个 file:// URI 并转为本地路径 (百分号解码)。
+    pub fn readDroppedFile(self: *WaylandBackend, allocator: std.mem.Allocator) ?[]u8 {
+        const offer = self.drag_offer orelse return null;
+
+        var fds: [2]c_int = undefined;
+        if (wl.pipe(&fds) != 0) return null;
+
+        wl.wl_data_offer_receive(offer, "text/uri-list", fds[1]);
+        _ = wl.wl_display_flush(self.display);
+        _ = wl.close(fds[1]);
+        _ = wl.fcntl(fds[0], wl.F_SETFL, wl.O_NONBLOCK);
+
+        var out: std.ArrayList(u8) = .empty;
+        var buf: [4096]u8 = undefined;
+        var attempts: usize = 0;
+        while (attempts < 8) : (attempts += 1) {
+            var pfd = [_]std.posix.pollfd{.{ .fd = fds[0], .events = std.posix.POLL.IN, .revents = 0 }};
+            const pn = std.posix.poll(&pfd, 50) catch 0;
+            if (pn <= 0) {
+                if (out.items.len > 0) break;
+                continue;
+            }
+            const r = wl.read(fds[0], &buf, buf.len);
+            if (r <= 0) break;
+            out.appendSlice(allocator, buf[0..@intCast(r)]) catch break;
+        }
+        _ = wl.close(fds[0]);
+
+        defer out.deinit(allocator);
+        if (out.items.len == 0) return null;
+        return parseFirstFileUri(allocator, out.items) catch null;
+    }
+
     // ── 内部: 事件推送辅助 ──────────────────────────────────────────────────
 
     fn pushEvent(self: *WaylandBackend, ev: event_mod.Event) void {
-        _ = self;
-        // TODO: 需要持有 EventQueue 引用; 当前通过全局变量中转
-        if (g_event_queue) |q| {
-            q.push(g_allocator orelse return, ev) catch {};
+        if (self.event_queue) |q| {
+            q.push(self.allocator, ev) catch {};
         }
     }
 };
-
-// 全局事件队列引用 (Wayland 回调无法传递用户上下文到所有 listener)
-var g_event_queue: ?*pal.EventQueue = null;
-var g_allocator: ?std.mem.Allocator = null;
-var g_backend: ?*WaylandBackend = null;
-
-/// 设置全局事件队列 (在 pollEvents 前调用)
-pub fn setEventQueue(queue: *pal.EventQueue, allocator: std.mem.Allocator, backend: *WaylandBackend) void {
-    g_event_queue = queue;
-    g_allocator = allocator;
-    g_backend = backend;
-}
 
 // ── Registry Listener ──────────────────────────────────────────────────────
 
@@ -373,6 +408,11 @@ fn registryGlobal(
         self.text_input_manager = @ptrCast(wl.wl_registry_bind(registry.?, name, &wl.zwp_text_input_manager_v3_interface, @min(version, 2)));
     } else if (std.mem.eql(u8, iface, "wl_data_device_manager")) {
         self.data_device_manager = @ptrCast(wl.wl_registry_bind(registry.?, name, &wl.wl_data_device_manager_interface, @min(version, 3)));
+    } else if (std.mem.eql(u8, iface, "wl_output")) {
+        // 绑定输出以获取缩放因子 (高 DPI); 仅需 scale 事件 (v2+),
+        // 绑定版本限为 2 以避免 v4 的 name/description 事件 (未实现会触发 libwayland 中止)
+        const output: ?*wl.struct_wl_output = @ptrCast(wl.wl_registry_bind(registry.?, name, &wl.wl_output_interface, @min(version, 2)));
+        _ = wl.wl_output_add_listener(output, &output_listener, self);
     }
 }
 
@@ -385,6 +425,51 @@ fn registryGlobalRemove(
 const registry_listener = wl.wl_registry_listener{
     .global = registryGlobal,
     .global_remove = registryGlobalRemove,
+};
+
+// ── Output Listener (高 DPI 缩放因子) ────────────────────────────────
+
+fn outputGeometry(
+    _: ?*anyopaque,
+    _: ?*wl.struct_wl_output,
+    _: i32,
+    _: i32,
+    _: i32,
+    _: i32,
+    _: i32,
+    _: ?[*:0]const u8,
+    _: ?[*:0]const u8,
+    _: i32,
+) callconv(.c) void {}
+
+fn outputMode(
+    _: ?*anyopaque,
+    _: ?*wl.struct_wl_output,
+    _: u32,
+    _: i32,
+    _: i32,
+    _: i32,
+) callconv(.c) void {}
+
+fn outputDone(
+    _: ?*anyopaque,
+    _: ?*wl.struct_wl_output,
+) callconv(.c) void {}
+
+fn outputScale(
+    data: ?*anyopaque,
+    _: ?*wl.struct_wl_output,
+    factor: i32,
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    if (factor >= 1) self.scale_factor = @floatFromInt(factor);
+}
+
+const output_listener = wl.wl_output_listener{
+    .geometry = outputGeometry,
+    .mode = outputMode,
+    .done = outputDone,
+    .scale = outputScale,
 };
 
 // ── XDG WM Base Listener (ping/pong) ──────────────────────────────────────
@@ -410,6 +495,11 @@ fn xdgSurfaceConfigure(
     serial: u32,
 ) callconv(.c) void {
     const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    // 应用输出缩放因子到高 DPI 表面 (逻辑尺寸 × scale = 物理缓冲)
+    if (self.surface) |s| {
+        const scale: i32 = @intFromFloat(self.scale_factor);
+        if (scale >= 1) wl.wl_surface_set_buffer_scale(s, scale);
+    }
     wl.xdg_surface_ack_configure(xdg_surface.?, serial);
     self.configured = true;
 }
@@ -986,6 +1076,7 @@ fn dataOfferOffer(
     if (offer != self.pending_offer) return;
     const mime = std.mem.span(mime_type orelse return);
     self.pending_mime_mask |= mimeBit(mime);
+    if (std.mem.eql(u8, mime, "text/uri-list")) self.drag_has_uri = true;
 }
 
 fn dataOfferSourceActions(
@@ -1047,38 +1138,164 @@ fn dataDeviceSelection(
 fn dataDeviceEnter(
     data: ?*anyopaque,
     _: ?*wl.struct_wl_data_device,
-    _: u32,
+    serial: u32,
     _: ?*wl.struct_wl_surface,
-    _: wl.wl_fixed_t,
-    _: wl.wl_fixed_t,
-    _: ?*wl.struct_wl_data_offer,
+    x: wl.wl_fixed_t,
+    y: wl.wl_fixed_t,
+    offer: ?*wl.struct_wl_data_offer,
 ) callconv(.c) void {
-    // 不支持拖放: 销毁 pending offer (DnD 用途)
     const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    self.last_serial = serial;
+    self.drop_x = fixedToInt(x);
+    self.drop_y = fixedToInt(y);
+    // 文件拖放: 接受 text/uri-list 拖拽
+    if (offer) |o| {
+        if (self.drag_has_uri) {
+            wl.wl_data_offer_accept(o, serial, "text/uri-list");
+            self.drag_offer = o;
+            self.pending_offer = null;
+            self.pending_mime_mask = 0;
+            return;
+        }
+    }
+    // 非文件拖拽: 销毁 pending offer
     if (self.pending_offer) |old| {
         wl.wl_data_offer_destroy(old);
         self.pending_offer = null;
         self.pending_mime_mask = 0;
     }
+    self.drag_has_uri = false;
 }
 
 fn dataDeviceLeave(
-    _: ?*anyopaque,
+    data: ?*anyopaque,
     _: ?*wl.struct_wl_data_device,
-) callconv(.c) void {}
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    if (self.drag_offer) |o| {
+        wl.wl_data_offer_destroy(o);
+        self.drag_offer = null;
+    }
+    self.drag_has_uri = false;
+}
 
 fn dataDeviceMotion(
-    _: ?*anyopaque,
+    data: ?*anyopaque,
     _: ?*wl.struct_wl_data_device,
     _: u32,
-    _: wl.wl_fixed_t,
-    _: wl.wl_fixed_t,
-) callconv(.c) void {}
+    x: wl.wl_fixed_t,
+    y: wl.wl_fixed_t,
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    self.drop_x = fixedToInt(x);
+    self.drop_y = fixedToInt(y);
+}
 
 fn dataDeviceDrop(
-    _: ?*anyopaque,
+    data: ?*anyopaque,
     _: ?*wl.struct_wl_data_device,
-) callconv(.c) void {}
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    defer {
+        if (self.drag_offer) |o| wl.wl_data_offer_destroy(o);
+        self.drag_offer = null;
+        self.drag_has_uri = false;
+    }
+    if (self.drag_offer == null) return;
+    const alloc = self.allocator;
+    const path = self.readDroppedFile(alloc) orelse return;
+    defer alloc.free(path);
+    var fd: event_mod.FileDrop = .{ .x = self.drop_x, .y = self.drop_y, .path = undefined, .path_len = 0 };
+    const n = @min(path.len, fd.path.len);
+    @memcpy(fd.path[0..n], path[0..n]);
+    fd.path_len = @intCast(n);
+    self.pushEvent(.{ .file_drop = fd });
+}
+
+/// wl_fixed_t (24.8 定点) 转整数像素
+fn fixedToInt(f: wl.wl_fixed_t) i32 {
+    return wl.wl_fixed_to_int(f);
+}
+
+/// 从 text/uri-list 数据解析首个 file:// URI 为本地路径 (调用者释放)
+fn parseFirstFileUri(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    var it = std.mem.splitScalar(u8, data, '\n');
+    while (it.next()) |raw_line| {
+        const line = std.mem.trimEnd(u8, raw_line, "\r \t");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (!std.mem.startsWith(u8, line, "file://")) continue;
+        var path = line["file://".len..];
+        // 去掉可选主机名 (file://host/path → /path)
+        if (path.len > 0 and path[0] != '/') {
+            if (std.mem.indexOfScalar(u8, path, '/')) |slash| {
+                path = path[slash..];
+            }
+        }
+        return percentDecode(allocator, path);
+    }
+    return error.NoFileUri;
+}
+
+/// 百分号解码 (%20 → 空格 等)
+fn percentDecode(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
+    var out = try allocator.alloc(u8, src.len);
+    errdefer allocator.free(out);
+    var j: usize = 0;
+    var i: usize = 0;
+    while (i < src.len) {
+        if (src[i] == '%' and i + 2 < src.len) {
+            const hi = std.fmt.charToDigit(src[i + 1], 16) catch {
+                out[j] = src[i];
+                j += 1;
+                i += 1;
+                continue;
+            };
+            const lo = std.fmt.charToDigit(src[i + 2], 16) catch {
+                out[j] = src[i];
+                j += 1;
+                i += 1;
+                continue;
+            };
+            out[j] = hi * 16 + lo;
+            j += 1;
+            i += 3;
+        } else {
+            out[j] = src[i];
+            j += 1;
+            i += 1;
+        }
+    }
+    return allocator.realloc(out, j) catch out[0..j];
+}
+
+// ── Tests (文件拖放 URI 解析) ──────────────────────────────────────
+
+test "wayland parseFirstFileUri decodes first file uri" {
+    const alloc = std.testing.allocator;
+    const data = "# comment\r\nfile:///home/user/a%20b.txt\r\nfile:///other.txt\r\n";
+    const path = try parseFirstFileUri(alloc, data);
+    defer alloc.free(path);
+    try std.testing.expectEqualStrings("/home/user/a b.txt", path);
+}
+
+test "wayland parseFirstFileUri strips hostname" {
+    const alloc = std.testing.allocator;
+    const path = try parseFirstFileUri(alloc, "file://localhost/tmp/x.png");
+    defer alloc.free(path);
+    try std.testing.expectEqualStrings("/tmp/x.png", path);
+}
+
+test "wayland parseFirstFileUri errors on no file uri" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.NoFileUri, parseFirstFileUri(alloc, "text/plain\nhttp://x"));
+}
+
+test "wayland percentDecode handles plain and invalid" {
+    const alloc = std.testing.allocator;
+    const out = try percentDecode(alloc, "a%2Fb%zzc");
+    defer alloc.free(out);
+    try std.testing.expectEqualStrings("a/b%zzc", out);
+}
 
 const data_device_listener = wl.wl_data_device_listener{
     .data_offer = dataDeviceDataOffer,

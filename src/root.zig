@@ -19,8 +19,11 @@ pub const input = @import("input/event_queue.zig");
 pub const gesture = @import("input/gesture.zig");
 pub const math = @import("math.zig");
 
+// 性能监控 (帧时间统计)
+pub const perf = @import("perf.zig");
+
 // 平台特定 App
-pub const app = if (is_linux) @import("app_linux.zig") else @import("app.zig");
+pub const app = if (is_windows) @import("app_windows.zig") else if (is_linux) @import("app_linux.zig") else @import("app.zig");
 
 // macOS 平台特定导出
 pub const cocoa = if (is_macos) @import("pal/cocoa.zig") else void;
@@ -40,6 +43,13 @@ pub const freetype = if (is_linux) @import("text/freetype.zig") else void;
 pub const atlas_vulkan = if (is_linux) @import("text/atlas_vulkan.zig") else void;
 pub const vulkan_renderer = if (is_linux) @import("render2d/vulkan_renderer.zig") else void;
 pub const text_layout_ft = if (is_linux) @import("text/layout_ft.zig") else void;
+
+// Windows 平台特定导出
+pub const win32 = if (is_windows) @import("pal/win32.zig") else void;
+pub const d3d11 = if (is_windows) @import("gpu/d3d11.zig") else void;
+pub const d3d11_renderer = if (is_windows) @import("render2d/d3d11_renderer.zig") else void;
+pub const dwrite = if (is_windows) @import("text/dwrite.zig") else void;
+pub const atlas_d3d11 = if (is_windows) @import("text/atlas_d3d11.zig") else void;
 
 // 文本对齐 (平台无关, 供 macOS/Linux 布局模块共享)
 pub const text_align = @import("text/align.zig");
@@ -71,6 +81,38 @@ pub const split_view = @import("widget/split_view.zig");
 pub const tree_view = @import("widget/tree_view.zig");
 pub const table = @import("widget/table.zig");
 
+// 新增控件 (阶段1: 补齐技术文档 §7.2 缺失控件)
+pub const checkbox = @import("widget/checkbox.zig");
+pub const radio = @import("widget/radio.zig");
+pub const switch_widget = @import("widget/switch.zig");
+pub const progress_bar = @import("widget/progress_bar.zig");
+pub const spinner = @import("widget/spinner.zig");
+pub const image_widget = @import("widget/image.zig");
+pub const scroll_bar = @import("widget/scroll_bar.zig");
+pub const scroll_view = @import("widget/scroll_view.zig");
+pub const separator = @import("widget/separator.zig");
+pub const status_bar = @import("widget/status_bar.zig");
+pub const expander = @import("widget/expander.zig");
+pub const message_dialog = @import("widget/message_dialog.zig");
+pub const spin_button = @import("widget/spin_button.zig");
+pub const toggle_button = @import("widget/toggle_button.zig");
+pub const link_button = @import("widget/link_button.zig");
+pub const grid = @import("widget/grid.zig");
+pub const menu_bar = @import("widget/menu_bar.zig");
+pub const stack = @import("widget/stack.zig");
+pub const frame = @import("widget/frame.zig");
+pub const center_box = @import("widget/center_box.zig");
+pub const flow_box = @import("widget/flow_box.zig");
+pub const overlay = @import("widget/overlay.zig");
+pub const revealer = @import("widget/revealer.zig");
+pub const aspect_frame = @import("widget/aspect_frame.zig");
+pub const stack_switcher = @import("widget/stack_switcher.zig");
+pub const size_group = @import("widget/size_group.zig");
+pub const popover = @import("widget/popover.zig");
+pub const action_bar = @import("widget/action_bar.zig");
+pub const header_bar = @import("widget/header_bar.zig");
+pub const fixed = @import("widget/fixed.zig");
+
 // 控件背景 (颜色/图片, 框架自主绘制)
 pub const background = @import("widget/background.zig");
 
@@ -92,4 +134,39 @@ test {
     _ = input;
     _ = text_align;
     _ = background;
+    _ = checkbox;
+    _ = radio;
+    _ = switch_widget;
+    _ = progress_bar;
+    _ = spinner;
+    _ = image_widget;
+    _ = scroll_bar;
+    _ = scroll_view;
+    _ = separator;
+    _ = status_bar;
+    _ = expander;
+    _ = message_dialog;
+    _ = spin_button;
+    _ = toggle_button;
+    _ = link_button;
+    _ = grid;
+    _ = stack;
+    _ = frame;
+    _ = center_box;
+    _ = flow_box;
+    _ = overlay;
+    _ = revealer;
+    _ = aspect_frame;
+    _ = stack_switcher;
+    _ = size_group;
+    _ = popover;
+    _ = action_bar;
+    _ = header_bar;
+    _ = fixed;
+    _ = perf;
+    if (is_linux) {
+        _ = x11;
+        _ = wayland;
+        _ = atlas_vulkan;
+    }
 }

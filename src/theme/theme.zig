@@ -105,3 +105,48 @@ pub const dark = Theme{
         .selection = math.Color.hex(0x3B82F633),
     },
 };
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+const std = @import("std");
+
+test "light theme name is correct" {
+    try std.testing.expectEqualStrings("light", light.name);
+}
+
+test "dark theme name is correct" {
+    try std.testing.expectEqualStrings("dark", dark.name);
+}
+
+test "light and dark primary colors differ" {
+    try std.testing.expect(light.colors.primary.r != dark.colors.primary.r or
+        light.colors.primary.g != dark.colors.primary.g or
+        light.colors.primary.b != dark.colors.primary.b);
+}
+
+test "theme colors have non-zero alpha" {
+    try std.testing.expect(light.colors.primary.a != 0);
+    try std.testing.expect(light.colors.background.a != 0);
+    try std.testing.expect(light.colors.text_primary.a != 0);
+    try std.testing.expect(dark.colors.primary.a != 0);
+    try std.testing.expect(dark.colors.background.a != 0);
+    try std.testing.expect(dark.colors.text_primary.a != 0);
+}
+
+test "metrics default values are correct" {
+    const m = light.metrics;
+    try std.testing.expectEqual(@as(f32, 6), m.border_radius_md);
+    try std.testing.expectEqual(@as(f32, 32), m.control_height);
+    try std.testing.expectEqual(@as(f32, 4), m.border_radius_sm);
+    try std.testing.expectEqual(@as(f32, 8), m.border_radius_lg);
+    try std.testing.expectEqual(@as(f32, 1), m.border_width);
+}
+
+test "font default values are correct" {
+    const f = light.fonts;
+    try std.testing.expectEqual(@as(f32, 14), f.size_body);
+    try std.testing.expectEqual(@as(f32, 12), f.size_small);
+    try std.testing.expectEqual(@as(f32, 16), f.size_large);
+    try std.testing.expectEqual(@as(f32, 20), f.size_title);
+    try std.testing.expectEqualStrings("system-ui", f.family);
+}

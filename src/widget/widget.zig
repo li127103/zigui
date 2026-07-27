@@ -106,6 +106,8 @@ pub const Widget = struct {
     clip_children: ?math.Rect(f32) = null,
     /// 无障碍元数据 (role/label/value/hint; 供辅助技术与焦点导航)
     accessibility: Accessibility = .{},
+    /// 透明度 (0.0 - 1.0, 影响整个子树)
+    opacity: f32 = 1.0,
     // 脏矩形跟踪器 (仅根控件设置, markDirty 时记录绝对脏区)
     dirty_tracker: ?*dirty_mod.DirtyRegion = null,
 
@@ -113,12 +115,20 @@ pub const Widget = struct {
         type_name: []const u8,
         /// 测量固有尺寸 (返回内容尺寸, 不含 margin)
         measure: *const fn (self: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32),
+        /// 给定宽度计算高度 (height-for-width, 可选, 文本类控件实现)
+        measure_height_for_width: ?*const fn (self: *Widget, ctx: *PaintContext, width: f32) f32 = null,
+        /// 给定高度计算宽度 (width-for-height, 可选)
+        measure_width_for_height: ?*const fn (self: *Widget, ctx: *PaintContext, height: f32) f32 = null,
+        /// 获取基线位置 (从 widget 顶部到基线的距离, 可选, 文本类控件实现)
+        get_baseline: ?*const fn (self: *Widget, ctx: *PaintContext, height: f32) f32 = null,
         /// 绘制
         paint: *const fn (self: *Widget, ctx: *PaintContext) void,
         /// 事件处理
         on_event: ?*const fn (self: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult = null,
         /// 自定义布局 (可选; 容器如 ScrollView 覆盖默认 flexbox 以应用滚动偏移)
         perform_layout: ?*const fn (self: *Widget, ctx: *PaintContext) void = null,
+        /// 帧动画 tick (可选; 动画控件实现, 每帧调用以推进动画)
+        tick: ?*const fn (self: *Widget, delta_ms: u32) void = null,
         /// 是否可聚焦
         focusable: bool = false,
         /// 销毁
@@ -221,203 +231,438 @@ pub const Widget = struct {
     }
 
     fn layoutChildren(self: *Widget, ctx: *PaintContext) void {
+        const FlexItem = struct {
+            widget: *Widget,
+            main_size: f32,
+            cross_size: f32,
+            baseline: f32 = 0,
+        };
+        const LineInfo = struct {
+            start: usize,
+            end: usize,
+            main_size: f32,
+            cross_size: f32,
+            baseline: f32 = 0,
+        };
+
         const pad = self.layout_style.padding;
         const is_row = self.layout_style.direction == .row or self.layout_style.direction == .row_reverse;
-        const gap: f32 = if (is_row) self.layout_style.gap.width else self.layout_style.gap.height;
+        const wrap = self.layout_style.wrap != .nowrap;
+        const gap_main: f32 = if (is_row) self.layout_style.gap.width else self.layout_style.gap.height;
+        const gap_cross: f32 = if (is_row) self.layout_style.gap.height else self.layout_style.gap.width;
 
         const inner_w = self.rect.width - pad.left - pad.right;
         const inner_h = self.rect.height - pad.top - pad.bottom;
+        const main_max: f32 = if (is_row) inner_w else inner_h;
+        const cross_max: f32 = if (is_row) inner_h else inner_w;
+        const cross_align = self.layout_style.align_items;
 
-        // 测量所有子项 (跳过绝对定位子项, 它们不参与 flex 流)
-        var total_main: f32 = 0;
-        var total_grow: f32 = 0;
-        var count: usize = 0;
+        // 1. 测量所有子项
+        var flex_items = std.ArrayListUnmanaged(FlexItem){ .items = &.{}, .capacity = 0 };
+        defer flex_items.deinit(ctx.allocator);
 
         for (self.children.items) |child| {
             if (child.layout_style.position == .absolute) continue;
-            // 不可见子项不参与 flex 流 (不占布局空间)
             if (!child.state.visible) continue;
+
             const child_constraints = layout_mod.Constraints{
-                .max_width = if (is_row) inner_w else inner_w,
-                .max_height = if (is_row) inner_h else inner_h,
+                .max_width = inner_w,
+                .max_height = inner_h,
             };
             const child_size = child.vtable.measure(child, ctx, child_constraints);
 
-            // 应用显式尺寸
             var cw = child_size.width;
             var ch = child_size.height;
             if (child.layout_style.width.resolve(inner_w)) |ew| cw = ew;
             if (child.layout_style.height.resolve(inner_h)) |eh| ch = eh;
 
+            // flex-basis: 主轴方向的基准尺寸
+            const fb = child.layout_style.flex_basis;
+            if (fb != .auto) {
+                const fb_val = fb.resolve(if (is_row) inner_w else inner_h) orelse 0;
+                if (is_row) {
+                    cw = fb_val;
+                } else {
+                    ch = fb_val;
+                }
+            }
+
             child.rect.width = cw;
             child.rect.height = ch;
 
-            if (is_row) {
-                total_main += cw + child.layout_style.margin.left + child.layout_style.margin.right;
-            } else {
-                total_main += ch + child.layout_style.margin.top + child.layout_style.margin.bottom;
+            // 计算基线 (从子元素顶部到基线的距离)
+            var baseline: f32 = 0;
+            if (child.vtable.get_baseline) |get_baseline| {
+                baseline = get_baseline(child, ctx, ch);
             }
-            total_grow += child.layout_style.flex_grow;
-            count += 1;
-        }
 
-        if (count > 1) total_main += gap * @as(f32, @floatFromInt(count - 1));
-
-        // 计算 flex_shrink 总和
-        var total_shrink: f32 = 0;
-        for (self.children.items) |child| {
-            if (child.layout_style.position == .absolute) continue;
-            if (!child.state.visible) continue;
-            total_shrink += child.layout_style.flex_shrink;
-        }
-
-        // 弹性分配
-        const free_space = (if (is_row) inner_w else inner_h) - total_main;
-        if (free_space > 0 and total_grow > 0) {
-            // 伸展
-            for (self.children.items) |child| {
-                if (child.layout_style.position == .absolute) continue;
-                if (!child.state.visible) continue;
-                if (child.layout_style.flex_grow > 0) {
-                    const extra = free_space * (child.layout_style.flex_grow / total_grow);
-                    const cm = child.layout_style.margin;
-                    if (is_row) {
-                        var new_w = child.rect.width + extra;
-                        if (child.layout_style.max_width.resolve(inner_w)) |mw| new_w = @min(new_w, mw - cm.left - cm.right);
-                        if (child.layout_style.min_width.resolve(inner_w)) |mw| new_w = @max(new_w, mw - cm.left - cm.right);
-                        child.rect.width = new_w;
-                    } else {
-                        var new_h = child.rect.height + extra;
-                        if (child.layout_style.max_height.resolve(inner_h)) |mh| new_h = @min(new_h, mh - cm.top - cm.bottom);
-                        if (child.layout_style.min_height.resolve(inner_h)) |mh| new_h = @max(new_h, mh - cm.top - cm.bottom);
-                        child.rect.height = new_h;
-                    }
-                }
-            }
-        } else if (free_space < 0 and total_shrink > 0) {
-            // 收缩
-            const deficit = -free_space;
-            for (self.children.items) |child| {
-                if (child.layout_style.position == .absolute) continue;
-                if (!child.state.visible) continue;
-                if (child.layout_style.flex_shrink > 0) {
-                    const shrink = deficit * (child.layout_style.flex_shrink / total_shrink);
-                    const cm = child.layout_style.margin;
-                    if (is_row) {
-                        var new_w = child.rect.width - shrink;
-                        const min_w = child.layout_style.min_width.resolve(inner_w) orelse 0;
-                        new_w = @max(new_w, min_w - cm.left - cm.right);
-                        if (new_w < 0) new_w = 0;
-                        child.rect.width = new_w;
-                    } else {
-                        var new_h = child.rect.height - shrink;
-                        const min_h = child.layout_style.min_height.resolve(inner_h) orelse 0;
-                        new_h = @max(new_h, min_h - cm.top - cm.bottom);
-                        if (new_h < 0) new_h = 0;
-                        child.rect.height = new_h;
-                    }
-                }
-            }
-        }
-
-        // 定位 (flex 流)
-        // 主轴分布: 重新统计 flex 分配后的主轴总尺寸 (可见子项)
-        const justify = self.layout_style.justify_content;
-        var final_main: f32 = 0;
-        var visible_count: usize = 0;
-        for (self.children.items) |child| {
-            if (child.layout_style.position == .absolute) continue;
-            if (!child.state.visible) continue;
             const cm = child.layout_style.margin;
-            if (is_row) {
-                final_main += child.rect.width + cm.left + cm.right;
-            } else {
-                final_main += child.rect.height + cm.top + cm.bottom;
-            }
-            visible_count += 1;
-        }
-        if (visible_count > 1) final_main += gap * @as(f32, @floatFromInt(visible_count - 1));
+            const main_size = if (is_row) cw + cm.left + cm.right else ch + cm.top + cm.bottom;
+            const cross_size = if (is_row) ch + cm.top + cm.bottom else cw + cm.left + cm.right;
 
-        const remaining = @max(0, (if (is_row) inner_w else inner_h) - final_main);
-        var start: f32 = 0;
-        var extra_gap: f32 = 0;
-        const vc: f32 = @floatFromInt(visible_count);
-        switch (justify) {
+            flex_items.append(ctx.allocator, .{
+                .widget = child,
+                .main_size = main_size,
+                .cross_size = cross_size,
+                .baseline = baseline,
+            }) catch {};
+        }
+
+        if (flex_items.items.len == 0) {
+            // 绝对定位子项
+            for (self.children.items) |child| {
+                if (child.layout_style.position != .absolute) continue;
+                self.layoutAbsolute(child, ctx);
+            }
+            return;
+        }
+
+        // 2. 按行/列分组 (flex-wrap)
+        var lines = std.ArrayListUnmanaged(LineInfo){ .items = &.{}, .capacity = 0 };
+        defer lines.deinit(ctx.allocator);
+        var cur_line_main: f32 = 0;
+        var cur_line_cross: f32 = 0;
+        var line_start: usize = 0;
+
+        for (flex_items.items, 0..) |item, i| {
+            const with_gap = if (i > line_start) cur_line_main + gap_main + item.main_size else cur_line_main + item.main_size;
+            if (wrap and with_gap > main_max and i > line_start) {
+                // 换行
+                lines.append(ctx.allocator, .{
+                    .start = line_start,
+                    .end = i,
+                    .main_size = cur_line_main,
+                    .cross_size = cur_line_cross,
+                }) catch {};
+                line_start = i;
+                cur_line_main = item.main_size;
+                cur_line_cross = item.cross_size;
+            } else {
+                cur_line_main = with_gap;
+                cur_line_cross = @max(cur_line_cross, item.cross_size);
+            }
+        }
+        // 最后一行
+        lines.append(ctx.allocator, .{
+            .start = line_start,
+            .end = flex_items.items.len,
+            .main_size = cur_line_main,
+            .cross_size = cur_line_cross,
+        }) catch {};
+
+        // 3. 每行的 flex_grow/flex_shrink (每行独立计算)
+        for (lines.items) |*line| {
+            // 计算该行的 grow/shrink 总和
+            var line_grow: f32 = 0;
+            var line_shrink: f32 = 0;
+            for (flex_items.items[line.start..line.end]) |item| {
+                const child = item.widget;
+                if (is_row) {
+                    line_grow += if (child.layout_style.hexpand) @max(child.layout_style.flex_grow, 1.0) else child.layout_style.flex_grow;
+                    line_shrink += if (child.layout_style.hexpand) @max(child.layout_style.flex_shrink, 1.0) else child.layout_style.flex_shrink;
+                } else {
+                    line_grow += if (child.layout_style.vexpand) @max(child.layout_style.flex_grow, 1.0) else child.layout_style.flex_grow;
+                    line_shrink += if (child.layout_style.vexpand) @max(child.layout_style.flex_shrink, 1.0) else child.layout_style.flex_shrink;
+                }
+            }
+
+            const free_space = main_max - line.main_size;
+            if (free_space > 0 and line_grow > 0) {
+                // 伸展
+                for (flex_items.items[line.start..line.end]) |*item| {
+                    const child = item.widget;
+                    const fg = if (is_row) (if (child.layout_style.hexpand) @max(child.layout_style.flex_grow, 1.0) else child.layout_style.flex_grow) else (if (child.layout_style.vexpand) @max(child.layout_style.flex_grow, 1.0) else child.layout_style.flex_grow);
+                    if (fg > 0) {
+                        const extra = free_space * (fg / line_grow);
+                        const cm = child.layout_style.margin;
+                        if (is_row) {
+                            var new_w = child.rect.width + extra;
+                            if (child.layout_style.max_width.resolve(inner_w)) |mw| new_w = @min(new_w, mw - cm.left - cm.right);
+                            if (child.layout_style.min_width.resolve(inner_w)) |mw| new_w = @max(new_w, mw - cm.left - cm.right);
+                            child.rect.width = new_w;
+                            item.main_size = new_w + cm.left + cm.right;
+                        } else {
+                            var new_h = child.rect.height + extra;
+                            if (child.layout_style.max_height.resolve(inner_h)) |mh| new_h = @min(new_h, mh - cm.top - cm.bottom);
+                            if (child.layout_style.min_height.resolve(inner_h)) |mh| new_h = @max(new_h, mh - cm.top - cm.bottom);
+                            child.rect.height = new_h;
+                            item.main_size = new_h + cm.top + cm.bottom;
+                        }
+                    }
+                }
+                // 重新计算行主轴尺寸
+                line.main_size = 0;
+                for (flex_items.items[line.start..line.end], 0..) |item, i| {
+                    if (i > 0) line.main_size += gap_main;
+                    line.main_size += item.main_size;
+                }
+            } else if (free_space < 0 and line_shrink > 0) {
+                // 收缩
+                const deficit = -free_space;
+                for (flex_items.items[line.start..line.end]) |*item| {
+                    const child = item.widget;
+                    const fs = if (is_row) (if (child.layout_style.hexpand) @max(child.layout_style.flex_shrink, 1.0) else child.layout_style.flex_shrink) else (if (child.layout_style.vexpand) @max(child.layout_style.flex_shrink, 1.0) else child.layout_style.flex_shrink);
+                    if (fs > 0) {
+                        const shrink = deficit * (fs / line_shrink);
+                        const cm = child.layout_style.margin;
+                        if (is_row) {
+                            var new_w = child.rect.width - shrink;
+                            const min_w = child.layout_style.min_width.resolve(inner_w) orelse 0;
+                            new_w = @max(new_w, min_w - cm.left - cm.right);
+                            if (new_w < 0) new_w = 0;
+                            child.rect.width = new_w;
+                            item.main_size = new_w + cm.left + cm.right;
+                        } else {
+                            var new_h = child.rect.height - shrink;
+                            const min_h = child.layout_style.min_height.resolve(inner_h) orelse 0;
+                            new_h = @max(new_h, min_h - cm.top - cm.bottom);
+                            if (new_h < 0) new_h = 0;
+                            child.rect.height = new_h;
+                            item.main_size = new_h + cm.top + cm.bottom;
+                        }
+                    }
+                }
+                line.main_size = 0;
+                for (flex_items.items[line.start..line.end], 0..) |item, i| {
+                    if (i > 0) line.main_size += gap_main;
+                    line.main_size += item.main_size;
+                }
+            }
+            // stretch 模式下, 行的交叉轴尺寸等于容器交叉轴尺寸
+            if (cross_align == .stretch) {
+                line.cross_size = cross_max;
+            }
+        }
+
+        // 3.2 height-for-width: 确定宽度后重新测量高度 (仅 nowrap 单行模式, 非 stretch 时)
+        // 暂时完全禁用, 排查左栏布局问题
+        // if (is_row and !wrap and cross_align != .stretch) {
+        //     for (lines.items) |line| {
+        //         for (flex_items.items[line.start..line.end]) |*item| {
+        //             const child = item.widget;
+        //             if (child.vtable.measure_height_for_width) |hfw| {
+        //                 const cm = child.layout_style.margin;
+        //                 const avail_w = child.rect.width;
+        //                 if (avail_w > 0) {
+        //                     const new_h = hfw(child, ctx, avail_w);
+        //                     child.rect.height = new_h;
+        //                     item.cross_size = new_h + cm.top + cm.bottom;
+        //                     if (child.vtable.get_baseline) |get_baseline| {
+        //                         item.baseline = get_baseline(child, ctx, new_h);
+        //                     }
+        //                 }
+        //             }
+        //         }
+        //     }
+        //     for (lines.items) |*line| {
+        //         var max_cross: f32 = 0;
+        //         for (flex_items.items[line.start..line.end]) |item| {
+        //             max_cross = @max(max_cross, item.cross_size);
+        //         }
+        //         line.cross_size = max_cross;
+        //     }
+        // }
+
+        // 3.5 baseline 对齐: 重新计算每行的行高和基线位置
+        if (cross_align == .baseline and is_row) {
+            for (lines.items) |*line| {
+                var max_ascent: f32 = 0;
+                var max_descent: f32 = 0;
+                for (flex_items.items[line.start..line.end]) |item| {
+                    const cm = item.widget.layout_style.margin;
+                    const ascent = cm.top + item.baseline;
+                    const descent = item.widget.rect.height - item.baseline + cm.bottom;
+                    max_ascent = @max(max_ascent, ascent);
+                    max_descent = @max(max_descent, descent);
+                }
+                line.baseline = max_ascent;
+                line.cross_size = max_ascent + max_descent;
+            }
+        }
+
+        // 4. 计算所有行的总交叉轴尺寸
+        var total_cross: f32 = 0;
+        for (lines.items, 0..) |line, i| {
+            if (i > 0) total_cross += gap_cross;
+            total_cross += line.cross_size;
+        }
+
+        // 5. align_content: 多行在交叉轴上的分布
+        const align_content = self.layout_style.align_content;
+        const cross_remaining = @max(0, cross_max - total_cross);
+        var cross_start: f32 = 0;
+        var cross_extra_gap: f32 = 0;
+        const line_count_f: f32 = @floatFromInt(lines.items.len);
+
+        switch (align_content) {
             .start => {},
-            .center => start = remaining / 2,
-            .end => start = remaining,
+            .center => cross_start = cross_remaining / 2,
+            .end => cross_start = cross_remaining,
             .space_between => {
-                if (visible_count > 1) extra_gap = remaining / (vc - 1);
+                if (lines.items.len > 1) cross_extra_gap = cross_remaining / (line_count_f - 1);
             },
             .space_around => {
-                if (visible_count > 0) {
-                    extra_gap = remaining / vc;
-                    start = extra_gap / 2;
+                if (lines.items.len > 0) {
+                    cross_extra_gap = cross_remaining / line_count_f;
+                    cross_start = cross_extra_gap / 2;
                 }
             },
-            .space_evenly => {
-                extra_gap = remaining / (vc + 1);
-                start = extra_gap;
+            .stretch => {
+                // stretch 模式下各行交叉轴尺寸平分剩余空间
+                if (lines.items.len > 0 and cross_remaining > 0) {
+                    const extra_per_line = cross_remaining / line_count_f;
+                    for (lines.items) |*line| {
+                        line.cross_size += extra_per_line;
+                    }
+                }
             },
         }
 
-        const cross_align = self.layout_style.align_items;
-        var cursor: f32 = start;
-        for (self.children.items) |child| {
-            if (child.layout_style.position == .absolute) continue;
-            if (!child.state.visible) continue;
-            const cm = child.layout_style.margin;
-            // 交叉轴对齐: align_self 优先于容器 align_items
-            const cross = child.layout_style.align_self orelse cross_align;
-            if (is_row) {
-                cursor += cm.left;
-                child.rect.x = pad.left + cursor;
-                switch (cross) {
-                    .stretch => {
-                        child.rect.y = pad.top + cm.top;
-                        // 未显式指定高度时撑满容器内高
-                        if (child.layout_style.height == .auto) {
-                            child.rect.height = inner_h - cm.top - cm.bottom;
-                        }
-                    },
-                    .center => child.rect.y = pad.top + cm.top + (inner_h - cm.top - cm.bottom - child.rect.height) / 2,
-                    .end => child.rect.y = pad.top + inner_h - child.rect.height - cm.bottom,
-                    .start, .baseline => child.rect.y = pad.top + cm.top,
-                }
-                cursor += child.rect.width + cm.right + gap + extra_gap;
-            } else {
-                cursor += cm.top;
-                child.rect.y = pad.top + cursor;
-                switch (cross) {
-                    .stretch => {
-                        child.rect.x = pad.left + cm.left;
-                        // 未显式指定宽度时撑满容器内宽
-                        if (child.layout_style.width == .auto) {
-                            child.rect.width = inner_w - cm.left - cm.right;
-                        }
-                    },
-                    .center => child.rect.x = pad.left + cm.left + (inner_w - cm.left - cm.right - child.rect.width) / 2,
-                    .end => child.rect.x = pad.left + inner_w - child.rect.width - cm.right,
-                    .start, .baseline => child.rect.x = pad.left + cm.left,
-                }
-                cursor += child.rect.height + cm.bottom + gap + extra_gap;
+        // 6. 逐行定位子项
+        const justify = self.layout_style.justify_content;
+        var cross_cursor: f32 = cross_start;
+
+        for (lines.items) |line| {
+            // 每行的 justify-content
+            const line_items = flex_items.items[line.start..line.end];
+            const line_count = line.end - line.start;
+            const lc_f: f32 = @floatFromInt(line_count);
+            const main_remaining = @max(0, main_max - line.main_size);
+            var main_start: f32 = 0;
+            var main_extra_gap: f32 = 0;
+
+            // RTL: start/end 互换
+            const is_rtl = is_row and self.layout_style.text_direction == .rtl;
+            var effective_justify = justify;
+            if (is_rtl) {
+                effective_justify = switch (justify) {
+                    .start => .end,
+                    .end => .start,
+                    else => justify,
+                };
             }
 
-            // 递归布局子项
-            if (child.children.items.len > 0) {
-                child.layoutSubtree(ctx);
+            switch (effective_justify) {
+                .start => {},
+                .center => main_start = main_remaining / 2,
+                .end => main_start = main_remaining,
+                .space_between => {
+                    if (line_count > 1) main_extra_gap = main_remaining / (lc_f - 1);
+                },
+                .space_around => {
+                    if (line_count > 0) {
+                        main_extra_gap = main_remaining / lc_f;
+                        main_start = main_extra_gap / 2;
+                    }
+                },
+                .space_evenly => {
+                    main_extra_gap = main_remaining / (lc_f + 1);
+                    main_start = main_extra_gap;
+                },
             }
+
+            var main_cursor: f32 = main_start;
+
+            for (line_items) |*item| {
+                const child = item.widget;
+                const cm = child.layout_style.margin;
+                const cross = child.layout_style.align_self orelse cross_align;
+
+                if (is_row) {
+                    // 主轴: x
+                    main_cursor += cm.left;
+                    child.rect.x = pad.left + main_cursor;
+                    main_cursor -= cm.left;
+
+                    // 交叉轴: y
+                    switch (cross) {
+                        .stretch => {
+                            child.rect.y = pad.top + cross_cursor + cm.top;
+                            if (child.layout_style.height == .auto) {
+                                child.rect.height = line.cross_size - cm.top - cm.bottom;
+                            }
+                        },
+                        .center => child.rect.y = pad.top + cross_cursor + cm.top + (line.cross_size - cm.top - cm.bottom - child.rect.height) / 2,
+                        .end => child.rect.y = pad.top + cross_cursor + line.cross_size - child.rect.height - cm.bottom,
+                        .start => child.rect.y = pad.top + cross_cursor + cm.top,
+                        .baseline => {
+                            // 行基线位置 = cross_cursor + line.baseline
+                            // 子元素顶部 = 行基线位置 - item.baseline - cm.top
+                            child.rect.y = pad.top + cross_cursor + line.baseline - item.baseline - cm.top;
+                        },
+                    }
+
+                    main_cursor += item.main_size + gap_main + main_extra_gap;
+                } else {
+                    // 主轴: y
+                    main_cursor += cm.top;
+                    child.rect.y = pad.top + main_cursor;
+                    main_cursor -= cm.top;
+
+                    // 交叉轴: x
+                    switch (cross) {
+                        .stretch => {
+                            child.rect.x = pad.left + cross_cursor + cm.left;
+                            if (child.layout_style.width == .auto) {
+                                child.rect.width = line.cross_size - cm.left - cm.right;
+                            }
+                        },
+                        .center => child.rect.x = pad.left + cross_cursor + cm.left + (line.cross_size - cm.left - cm.right - child.rect.width) / 2,
+                        .end => child.rect.x = pad.left + cross_cursor + line.cross_size - child.rect.width - cm.right,
+                        .start, .baseline => child.rect.x = pad.left + cross_cursor + cm.left,
+                    }
+
+                    main_cursor += item.main_size + gap_main + main_extra_gap;
+                }
+
+                if (child.children.items.len > 0) {
+                    child.layoutSubtree(ctx);
+                }
+            }
+
+            cross_cursor += line.cross_size + gap_cross + cross_extra_gap;
         }
 
-        // 绝对定位子项 (不参与 flex 流, 按 top/left/right/bottom 相对父容器定位)
+        // 绝对定位子项
         for (self.children.items) |child| {
             if (child.layout_style.position != .absolute) continue;
             self.layoutAbsolute(child, ctx);
         }
+
+        // reverse 方向: 对已布局的子元素做坐标镜像
+        const direction = self.layout_style.direction;
+        const is_row_reverse = direction == .row_reverse;
+        const is_col_reverse = direction == .column_reverse;
+        const is_wrap_reverse = self.layout_style.wrap == .wrap_reverse;
+
+        if (is_row_reverse or is_col_reverse or is_wrap_reverse) {
+            for (self.children.items) |child| {
+                if (child.layout_style.position == .absolute) continue;
+                if (!child.state.visible) continue;
+
+                if (is_row_reverse) {
+                    const rel_x = child.rect.x - self.rect.x - pad.left;
+                    child.rect.x = self.rect.x + pad.left + inner_w - rel_x - child.rect.width;
+                }
+                if (is_col_reverse) {
+                    const rel_y = child.rect.y - self.rect.y - pad.top;
+                    child.rect.y = self.rect.y + pad.top + inner_h - rel_y - child.rect.height;
+                }
+                if (is_wrap_reverse) {
+                    if (is_row) {
+                        const rel_y = child.rect.y - self.rect.y - pad.top;
+                        child.rect.y = self.rect.y + pad.top + inner_h - rel_y - child.rect.height;
+                    } else {
+                        const rel_x = child.rect.x - self.rect.x - pad.left;
+                        child.rect.x = self.rect.x + pad.left + inner_w - rel_x - child.rect.width;
+                    }
+                }
+            }
+        }
     }
 
     /// 绝对定位子项: 根据 top/left/right/bottom + 父容器尺寸定位
-    fn layoutAbsolute(self: *Widget, child: *Widget, ctx: *PaintContext) void {
+    pub fn layoutAbsolute(self: *Widget, child: *Widget, ctx: *PaintContext) void {
         const cs = child.layout_style;
 
         // 测量 (应用显式尺寸)
@@ -461,6 +706,7 @@ pub const Widget = struct {
     /// 递归绘制子树
     pub fn paintTree(self: *Widget, ctx: *PaintContext) void {
         if (!self.state.visible) return;
+        if (self.opacity <= 0.0) return;
 
         // 脏矩形裁剪: 与脏区不相交的子树整体跳过
         // (阴影等超出自身范围的绘制, 由调用方外扩脏区 margin 保证)
@@ -499,6 +745,19 @@ pub const Widget = struct {
         if (self.clip_children != null) ctx.renderer.popClip(prev_clip);
 
         self.state.dirty = false;
+    }
+
+    /// 递归 tick 动画子树
+    pub fn tickTree(self: *Widget, delta_ms: u32) void {
+        if (!self.state.visible) return;
+
+        if (self.vtable.tick) |tick_fn| {
+            tick_fn(self, delta_ms);
+        }
+
+        for (self.children.items) |child| {
+            child.tickTree(delta_ms);
+        }
     }
 
     // ── 背景 (框架自主绘制) ────────────────────────────────────

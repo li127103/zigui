@@ -6,14 +6,15 @@ A cross-platform, GPU-accelerated GUI framework written in [Zig](https://ziglang
 
 ## Features
 
-- **Native GPU rendering** — macOS Metal / Windows D3D11 / Linux Vulkan. Batched vertex submission across three pipelines (solid color / textured text / images).
-- **Native text engine** — CoreText shaping with automatic font fallback (CJK routed to fallback fonts such as PingFang), a cached glyph atlas, paragraph layout, word wrapping and alignment.
-- **Pure-Zig PNG decoding** — zero external dependencies. Grayscale / RGB / RGBA with all five scanline filters; decode-to-GPU-texture in a single step.
-- **Flexbox-style layout** — constraint-based two-pass algorithm (measure + arrange) with flex_grow distribution, margin / padding / gap.
-- **Widget system** — Widget base class, widget tree, bubbling event dispatch, dirty flags. 16 built-in widgets (Label / Button / TextInput / TextArea / Slider / ComboBox / ListView / TabView / TreeView / Table / SplitView / Menu / Dialog / Tooltip, etc.).
-- **Full input stack** — unified event model, IME composition, file drag & drop, multi-touch with gesture recognizers (Tap / Drag / Pinch), shortcut bindings.
-- **On-demand redraw** — dirty-region collection and merging, subtree culling, offscreen accumulation canvas with scissored partial redraws. Zero GPU cost on idle frames.
-- **Animation system** — easing curves, tweens, springs, color interpolation, animation controller.
+- **Native GPU rendering** - macOS Metal / Linux Vulkan. Batched vertex submission across three pipelines (solid color / textured text / images).
+- **Native text engine** - macOS CoreText / Linux FreeType+HarfBuzz shaping with automatic font fallback (CJK routed to fallback fonts such as PingFang), a cached glyph atlas, paragraph layout, word wrapping and alignment.
+- **Pure-Zig PNG decoding** - zero external dependencies. Grayscale / RGB / RGBA with all five scanline filters; decode-to-GPU-texture in a single step.
+- **Flexbox-style layout** - constraint-based two-pass algorithm (measure + arrange) with flex_grow distribution, margin / padding / gap.
+- **Widget system** - Widget base class, widget tree, bubbling event dispatch, dirty flags. 38 built-in widgets (Label / Button / TextInput / TextArea / Slider / ComboBox / ListView / TabView / TreeView / Table / SplitView / Menu / MenuBar / Dialog / MessageDialog / Tooltip / Checkbox / Radio / Switch / ProgressBar / Spinner / Image / ScrollView / ScrollBar / Canvas / Separator / StatusBar / Expander / SpinButton / ToggleButton / LinkButton / Grid / Stack / Frame / CenterBox / FlowBox / Overlay, etc.).
+- **Full input stack** - unified event model, IME composition, file drag & drop, multi-touch with gesture recognizers (Tap / Drag / Pinch), shortcut bindings, system clipboard.
+- **On-demand redraw** - dirty-region collection and merging, subtree culling, offscreen accumulation canvas with scissored partial redraws. Zero GPU cost on idle frames.
+- **Animation system** - easing curves, tweens, springs, color interpolation, animation controller.
+- **Accessibility & perf monitoring** - widget semantic roles (a11y), focus navigation, frame-time stats (FPS / P99 stutter metrics).
 
 ## Platform Support
 
@@ -21,8 +22,8 @@ A cross-platform, GPU-accelerated GUI framework written in [Zig](https://ziglang
 | --- | --- | --- | --- |
 | macOS | Cocoa | Metal | ✅ Implemented (M1–M4) |
 | Windows | Win32 | D3D11 | Planned |
-| Linux | X11 / Wayland | Vulkan | Planned |
-| OpenHarmony | — | — | Long-term |
+| Linux | X11 / Wayland | Vulkan | ✅ Implemented |
+| OpenHarmony | - | - | Long-term |
 
 ## Quick Start
 
@@ -30,12 +31,14 @@ Requires Zig 0.16.
 
 ```bash
 zig build                      # Build the library and all examples
-zig build test --summary all   # Run the unit test suite (51 tests)
+zig build test --summary all   # Run the unit test suite (154 tests)
 
 zig build run-simple           # Minimal example: window + text
 zig build run-widgets          # Widget showcase
+zig build run-new-widgets      # New widget showcase (Checkbox/Radio/Switch/ScrollView, etc.)
 zig build run-m3-demo          # Text / IME / animation demo
 zig build run-m4-demo          # Image / shadow / drag-drop / gesture demo
+zig build run-perf-demo        # Performance monitoring demo (FPS / frame time)
 ```
 
 Minimal code:
@@ -69,13 +72,15 @@ fn draw(app: *zigui.app.App) void {
 ```
 src/
 ├── app.zig            # App main loop (window + rendering + events, all-in-one entry)
+├── app_linux.zig      # Linux app main loop (Wayland/X11 + Vulkan)
 ├── math.zig           # Rect / Mat3x2 / Color geometry primitives
-├── pal/               # Platform abstraction: unified events, windows, Cocoa backend
-├── gpu/               # Graphics HAL + Metal backend (MSL shaders)
+├── perf.zig           # Frame-time stats (FPS / P99 stutter metrics)
+├── pal/               # Platform abstraction: unified events, windows, Cocoa/Wayland/X11 backends
+├── gpu/               # Graphics HAL + Metal/Vulkan backends (shaders)
 ├── render2d/          # 2D renderer: rects / rounded rects / shadows / images / dirty regions
-├── text/              # CoreText bindings + glyph atlas + paragraph layout
+├── text/              # CoreText/FreeType bindings + glyph atlas + paragraph layout
 ├── image/             # Pure-Zig PNG decoder
-├── widget/            # Widget base class + 16 built-in widgets
+├── widget/            # Widget base class + 38 built-in widgets
 ├── layout/            # Flexbox constraint layout engine
 ├── theme/             # Built-in light / dark themes
 ├── animation/         # Easing / tweens / spring animations
@@ -91,7 +96,7 @@ examples/              # Example programs
 
 ## Roadmap
 
-M1 windowing & rendering ✅ → M2 widgets & layout ✅ → M3 text & IME ✅ → M4 images / dirty rects / touch / drag-drop ✅ → M5 Windows (Win32 + D3D11) → M6 Linux (X11/Wayland + Vulkan) → accessibility, HiDPI refinements, performance monitoring
+M1 windowing & rendering ✅ -> M2 widgets & layout ✅ -> M3 text & IME ✅ -> M4 images / dirty rects / touch / drag-drop / accessibility / perf monitoring ✅ -> Linux (X11/Wayland + Vulkan) ✅ -> M5 Windows (Win32 + D3D11) -> accessibility refinements, HiDPI, visual editor
 
 ## License
 

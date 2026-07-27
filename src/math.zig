@@ -226,4 +226,63 @@ test "Color.hex" {
     try std.testing.expectEqual(@as(u8, 0xCC), c.a);
 }
 
+test "Rect.intersects" {
+    const a = Rect(f32){ .x = 0, .y = 0, .width = 100, .height = 100 };
+    const b = Rect(f32){ .x = 50, .y = 50, .width = 100, .height = 100 };
+    const c = Rect(f32){ .x = 200, .y = 0, .width = 50, .height = 50 };
+    try std.testing.expect(a.intersects(b));
+    try std.testing.expect(!a.intersects(c));
+}
+
+test "Rect.intersection returns null when no overlap" {
+    const a = Rect(f32){ .x = 0, .y = 0, .width = 50, .height = 50 };
+    const b = Rect(f32){ .x = 100, .y = 100, .width = 50, .height = 50 };
+    try std.testing.expect(a.intersection(b) == null);
+}
+
+test "Rect.union_ combines two rects" {
+    const a = Rect(f32){ .x = 0, .y = 0, .width = 50, .height = 50 };
+    const b = Rect(f32){ .x = 40, .y = 40, .width = 60, .height = 60 };
+    const u = a.union_(b);
+    try std.testing.expectEqual(@as(f32, 0), u.x);
+    try std.testing.expectEqual(@as(f32, 0), u.y);
+    try std.testing.expectEqual(@as(f32, 100), u.width);
+    try std.testing.expectEqual(@as(f32, 100), u.height);
+}
+
+test "Mat3x2 multiply compose transforms" {
+    const m = Mat3x2.translate(10, 20).multiply(Mat3x2.scale(2, 3));
+    const p = m.transformPoint(.{ 5.0, 5.0 });
+    try std.testing.expectApproxEqAbs(@as(f32, 30.0), p[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 75.0), p[1], 1e-6);
+}
+
+test "Mat3x2 rotate 90 degrees" {
+    const m = Mat3x2.rotate(std.math.pi / 2.0);
+    const p = m.transformPoint(.{ 1.0, 0.0 });
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), p[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), p[1], 1e-6);
+}
+
+test "Color white and black constants" {
+    try std.testing.expectEqual(@as(u8, 255), Color.white.r);
+    try std.testing.expectEqual(@as(u8, 255), Color.white.g);
+    try std.testing.expectEqual(@as(u8, 255), Color.white.b);
+    try std.testing.expectEqual(@as(u8, 255), Color.white.a);
+    try std.testing.expectEqual(@as(u8, 0), Color.black.r);
+    try std.testing.expectEqual(@as(u8, 0), Color.transparent.a);
+}
+
+test "EdgeInsets helpers" {
+    const all = EdgeInsets.all(8);
+    try std.testing.expectEqual(@as(f32, 8), all.top);
+    try std.testing.expectEqual(@as(f32, 8), all.right);
+    try std.testing.expectEqual(@as(f32, 8), all.bottom);
+    try std.testing.expectEqual(@as(f32, 8), all.left);
+
+    const sym = EdgeInsets.symmetric(10, 5);
+    try std.testing.expectEqual(@as(f32, 20), sym.horizontal());
+    try std.testing.expectEqual(@as(f32, 10), sym.vertical());
+}
+
 const std = @import("std");

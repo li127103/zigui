@@ -25,6 +25,25 @@ pub const X11Backend = struct {
     net_wm_state_maximized_vert: u32 = 0,
     net_wm_state_maximized_horz: u32 = 0,
     maximized: bool = false,
+    /// 高 DPI 缩放因子 (来自 Xft.dpi 资源或屏幕物理尺寸; 默认 1.0)
+    scale_factor: f32 = 1.0,
+    // Xdnd 文件拖放 atoms
+    xdnd_aware: u32 = 0,
+    xdnd_enter: u32 = 0,
+    xdnd_leave: u32 = 0,
+    xdnd_position: u32 = 0,
+    xdnd_drop: u32 = 0,
+    xdnd_finished: u32 = 0,
+    xdnd_status: u32 = 0,
+    xdnd_selection: u32 = 0,
+    xdnd_type_list: u32 = 0,
+    text_uri_list: u32 = 0,
+    // Xdnd 拖放状态
+    xdnd_source: u32 = 0, // 拖放源窗口
+    xdnd_version: u32 = 0,
+    xdnd_has_uri: bool = false, // 源是否提供 text/uri-list
+    drop_x: i32 = 0,
+    drop_y: i32 = 0,
     // xkbcommon
     xkb_ctx: *xkb.xkb_context,
     xkb_keymap: ?*xkb.xkb_keymap = null,
@@ -61,7 +80,7 @@ pub const X11Backend = struct {
         const xkb_keymap = xkb.xkb_keymap_new_from_names(xkb_ctx, &rmlvo, xkb.XKB_KEYMAP_COMPILE_NO_FLAGS);
         const xkb_state = if (xkb_keymap) |km| xkb.xkb_state_new(km) else null;
 
-        return .{
+        var backend: X11Backend = .{
             .allocator = allocator,
             .conn = conn,
             .screen = screen,
@@ -69,6 +88,8 @@ pub const X11Backend = struct {
             .xkb_keymap = xkb_keymap,
             .xkb_state = xkb_state,
         };
+        backend.scale_factor = backend.detectScaleFactor();
+        return backend;
     }
 
     pub fn deinit(self: *X11Backend) void {
@@ -137,6 +158,9 @@ pub const X11Backend = struct {
         // 设置窗口标题
         setTitle(self.conn, wid, desc.title);
 
+        // 初始化 Xdnd 文件拖放 (声明 XdndAware 版本 5)
+        self.initXdnd(wid);
+
         // 设置 WM_NORMAL_HINTS (尺寸约束)
         {
             var hints: [18]u32 = .{0} ** 18;
@@ -182,8 +206,59 @@ pub const X11Backend = struct {
         return .{
             .handle = .{ .x11_window = wid },
             .size = .{ .width = desc.width, .height = desc.height },
-            .scale_factor = 1.0,
+            .scale_factor = self.scale_factor,
         };
+    }
+
+    /// 当前高 DPI 缩放因子
+    pub fn getScaleFactor(self: *const X11Backend) f32 {
+        return self.scale_factor;
+    }
+
+    /// 检测缩放因子: 优先读取根窗口 RESOURCE_MANAGER 中的 Xft.dpi (基准 96),
+    /// 缺失时回退到屏幕像素/物理尺寸比值。
+    fn detectScaleFactor(self: *X11Backend) f32 {
+        if (self.queryXftDpi()) |dpi| {
+            if (dpi > 0) return @max(1.0, dpi / 96.0);
+        }
+        const w_mm = self.screen.width_in_millimeters;
+        const h_mm = self.screen.height_in_millimeters;
+        if (w_mm > 0 and h_mm > 0) {
+            const dpi_x = @as(f32, @floatFromInt(self.screen.width_in_pixels)) / (@as(f32, @floatFromInt(w_mm)) / 25.4);
+            const dpi_y = @as(f32, @floatFromInt(self.screen.height_in_pixels)) / (@as(f32, @floatFromInt(h_mm)) / 25.4);
+            const dpi = (dpi_x + dpi_y) * 0.5;
+            if (dpi > 0) return @max(1.0, dpi / 96.0);
+        }
+        return 1.0;
+    }
+
+    /// 从根窗口 RESOURCE_MANAGER 属性解析 Xft.dpi (返回 null 表示未设置)
+    fn queryXftDpi(self: *X11Backend) ?f32 {
+        const res_atom = internAtom(self.conn, "RESOURCE_MANAGER");
+        const str_atom = internAtom(self.conn, "STRING");
+        if (res_atom == 0) return null;
+        const cookie = xcb.xcb_get_property(
+            self.conn,
+            0,
+            self.screen.root,
+            res_atom,
+            if (str_atom != 0) str_atom else xcb.XCB_ATOM_ANY,
+            0,
+            0x10000,
+        );
+        var err: [*c]xcb.xcb_generic_error_t = null;
+        const reply = xcb.xcb_get_property_reply(self.conn, cookie, &err);
+        defer if (reply != null) std.c.free(reply);
+        if (reply == null or err != null) return null;
+        const len = xcb.xcb_get_property_value_length(reply);
+        if (len <= 0) return null;
+        const data: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
+        const resources = data[0..@intCast(len)];
+        const key = "Xft.dpi:\t";
+        const start = (std.mem.indexOf(u8, resources, key) orelse return null) + key.len;
+        var end = start;
+        while (end < resources.len and resources[end] != '\n' and resources[end] != 0) : (end += 1) {}
+        return std.fmt.parseFloat(f32, resources[start..end]) catch return null;
     }
 
     pub fn pollEvents(self: *X11Backend, queue: *pal.EventQueue, allocator: std.mem.Allocator) !void {
@@ -435,7 +510,203 @@ pub const X11Backend = struct {
                 return .{ .close_requested = .{ .window_id = self.window_id } };
             }
         }
+        // Xdnd 文件拖放协议
+        return self.handleXdndClientMessage(client_ev);
+    }
+
+    // ── Xdnd 文件拖放 (接收端) ──────────────────────────────────────
+
+    /// 初始化 Xdnd: 内部化协议 atoms 并声明 XdndAware=5 (支持拖放接收)
+    fn initXdnd(self: *X11Backend, wid: u32) void {
+        self.xdnd_aware = internAtom(self.conn, "XdndAware");
+        self.xdnd_enter = internAtom(self.conn, "XdndEnter");
+        self.xdnd_leave = internAtom(self.conn, "XdndLeave");
+        self.xdnd_position = internAtom(self.conn, "XdndPosition");
+        self.xdnd_drop = internAtom(self.conn, "XdndDrop");
+        self.xdnd_finished = internAtom(self.conn, "XdndFinished");
+        self.xdnd_status = internAtom(self.conn, "XdndStatus");
+        self.xdnd_selection = internAtom(self.conn, "XdndSelection");
+        self.xdnd_type_list = internAtom(self.conn, "XdndTypeList");
+        self.text_uri_list = internAtom(self.conn, "text/uri-list");
+        if (self.xdnd_aware != 0) {
+            const version: u32 = 5;
+            _ = xcb.xcb_change_property(
+                self.conn,
+                xcb.XCB_PROP_MODE_REPLACE,
+                wid,
+                self.xdnd_aware,
+                xcb.XCB_ATOM_ATOM,
+                32,
+                1,
+                &version,
+            );
+        }
+    }
+
+    /// 处理 Xdnd 客户端消息 (Enter/Position/Drop/Leave)
+    fn handleXdndClientMessage(self: *X11Backend, client_ev: [*c]xcb.xcb_client_message_event_t) ?event_mod.Event {
+        const t = client_ev.*.type;
+        const data32: [*c]const u32 = @ptrCast(&client_ev.*.data);
+        if (t == self.xdnd_enter) {
+            self.xdnd_source = client_ev.*.window;
+            self.xdnd_version = (data32[0] >> 24) & 0xff;
+            self.xdnd_has_uri = self.xdndOfferHasUri(data32);
+            return null;
+        } else if (t == self.xdnd_position) {
+            self.xdnd_source = client_ev.*.window;
+            // data32[1] = 根窗口坐标 (x<<16 | y)
+            const root_x: i32 = @intCast(data32[1] >> 16);
+            const root_y: i32 = @intCast(data32[1] & 0xffff);
+            const local = self.rootToLocal(root_x, root_y);
+            self.drop_x = local[0];
+            self.drop_y = local[1];
+            self.sendXdndStatus(data32[2]); // 回应接受/拒绝
+            return null;
+        } else if (t == self.xdnd_leave) {
+            self.xdnd_source = 0;
+            self.xdnd_has_uri = false;
+            return null;
+        } else if (t == self.xdnd_drop) {
+            self.xdnd_source = client_ev.*.window;
+            const time = data32[2];
+            // 请求源将 XdndSelection 转换为 text/uri-list 存于本窗口属性
+            if (self.xdnd_has_uri and self.xdnd_selection != 0 and self.text_uri_list != 0) {
+                _ = xcb.xcb_convert_selection(
+                    self.conn,
+                    self.window_id,
+                    self.xdnd_selection,
+                    self.text_uri_list,
+                    self.xdnd_selection, // 存储属性名
+                    time,
+                );
+                _ = xcb.xcb_flush(self.conn);
+                const path = self.readXdndDrop() orelse {
+                    self.sendXdndFinished();
+                    return null;
+                };
+                defer self.allocator.free(path);
+                var fd: event_mod.FileDrop = .{ .x = self.drop_x, .y = self.drop_y, .path = undefined, .path_len = 0 };
+                const n = @min(path.len, fd.path.len);
+                @memcpy(fd.path[0..n], path[0..n]);
+                fd.path_len = @intCast(n);
+                self.sendXdndFinished();
+                return .{ .file_drop = fd };
+            }
+            self.sendXdndFinished();
+            return null;
+        }
         return null;
+    }
+
+    /// 检查 XdndEnter 提供的类型是否含 text/uri-list。
+    /// data32[0] bit0 表示类型多于 3 个 (需读源窗口 XdndTypeList 属性)。
+    fn xdndOfferHasUri(self: *X11Backend, data32: [*c]const u32) bool {
+        if (self.text_uri_list == 0) return false;
+        if ((data32[0] & 1) != 0) {
+            // 类型列表存于源窗口 XdndTypeList 属性
+            if (self.xdnd_source == 0 or self.xdnd_type_list == 0) return false;
+            const cookie = xcb.xcb_get_property(self.conn, 0, self.xdnd_source, self.xdnd_type_list, xcb.XCB_ATOM_ATOM, 0, 256);
+            var err: [*c]xcb.xcb_generic_error_t = null;
+            const reply = xcb.xcb_get_property_reply(self.conn, cookie, &err);
+            defer if (reply != null) std.c.free(reply);
+            if (reply == null or err != null) return false;
+            const len = xcb.xcb_get_property_value_length(reply);
+            if (len <= 0) return false;
+            const atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
+            const count: usize = @intCast(@divFloor(len, 4));
+            for (atoms[0..count]) |a| if (a == self.text_uri_list) return true;
+            return false;
+        }
+        // 内联类型: data32[1..3]
+        var i: usize = 1;
+        while (i <= 3) : (i += 1) if (data32[i] == self.text_uri_list) return true;
+        return false;
+    }
+
+    /// 回应 XdndStatus (接受=has_uri; 动作=XdndActionCopy)
+    fn sendXdndStatus(self: *X11Backend, target_action: u32) void {
+        _ = target_action;
+        if (self.xdnd_source == 0 or self.xdnd_status == 0) return;
+        var ev: xcb.xcb_client_message_event_t = undefined;
+        ev.response_type = xcb.XCB_CLIENT_MESSAGE;
+        ev.format = 32;
+        ev.sequence = 0;
+        ev.window = self.xdnd_source;
+        ev.type = self.xdnd_status;
+        ev.data.data32[0] = self.window_id;
+        ev.data.data32[1] = if (self.xdnd_has_uri) @as(u32, 1) else 0; // bit0 = accept
+        ev.data.data32[2] = 0;
+        ev.data.data32[3] = 0;
+        ev.data.data32[4] = internAtom(self.conn, "XdndActionCopy");
+        _ = xcb.xcb_send_event(self.conn, 0, self.xdnd_source, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&ev));
+        _ = xcb.xcb_flush(self.conn);
+    }
+
+    /// 发送 XdndFinished 通知源拖放完成
+    fn sendXdndFinished(self: *X11Backend) void {
+        if (self.xdnd_source == 0 or self.xdnd_finished == 0) return;
+        var ev: xcb.xcb_client_message_event_t = undefined;
+        ev.response_type = xcb.XCB_CLIENT_MESSAGE;
+        ev.format = 32;
+        ev.sequence = 0;
+        ev.window = self.xdnd_source;
+        ev.type = self.xdnd_finished;
+        ev.data.data32[0] = self.window_id;
+        ev.data.data32[1] = 1; // accepted
+        ev.data.data32[2] = internAtom(self.conn, "XdndActionCopy");
+        ev.data.data32[3] = 0;
+        ev.data.data32[4] = 0;
+        _ = xcb.xcb_send_event(self.conn, 0, self.xdnd_source, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&ev));
+        _ = xcb.xcb_flush(self.conn);
+        self.xdnd_source = 0;
+        self.xdnd_has_uri = false;
+    }
+
+    /// 读取转换后的 XdndSelection 属性 (text/uri-list) 并解析首个文件路径 (调用者释放)。
+    /// 通过 poll X11 连接 fd 等待 SelectionNotify (源完成转换) 后读取属性。
+    fn readXdndDrop(self: *X11Backend) ?[]u8 {
+        if (self.xdnd_selection == 0) return null;
+        const fd = xcb.xcb_get_file_descriptor(self.conn);
+        var elapsed_ms: i32 = 0;
+        while (elapsed_ms < 1000) {
+            // 等待连接可读 (SelectionNotify 到达)
+            var pfd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+            const pn = std.posix.poll(&pfd, 100) catch 0;
+            elapsed_ms += 100;
+            // 抽取事件 (SelectionNotify 触发源写入属性; 其余事件丢弃)
+            if (pn > 0) {
+                while (xcb.xcb_poll_for_event(self.conn)) |e| std.c.free(e);
+            }
+            // 尝试读取已转换的属性 (delete=1 读后清除)
+            const cookie = xcb.xcb_get_property(self.conn, 1, self.window_id, self.xdnd_selection, xcb.XCB_ATOM_ANY, 0, 0x10000);
+            var err: [*c]xcb.xcb_generic_error_t = null;
+            const reply = xcb.xcb_get_property_reply(self.conn, cookie, &err);
+            if (reply == null or err != null) {
+                if (reply != null) std.c.free(reply);
+                continue;
+            }
+            const len = xcb.xcb_get_property_value_length(reply);
+            if (len <= 0) {
+                std.c.free(reply);
+                continue;
+            }
+            const data: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
+            const slice = data[0..@intCast(len)];
+            const result = parseFirstFileUriX11(self.allocator, slice) catch null;
+            std.c.free(reply);
+            return result;
+        }
+        return null;
+    }
+
+    /// 根窗口坐标 → 本窗口局部坐标
+    fn rootToLocal(self: *X11Backend, root_x: i32, root_y: i32) [2]i32 {
+        const cookie = xcb.xcb_translate_coordinates(self.conn, self.window_id, self.window_id, @intCast(root_x), @intCast(root_y));
+        var err: [*c]xcb.xcb_generic_error_t = null;
+        const reply = xcb.xcb_translate_coordinates_reply(self.conn, cookie, &err);
+        defer if (reply != null) std.c.free(reply);
+        if (reply == null or err != null) return .{ root_x, root_y };
+        return .{ reply.*.dst_x, reply.*.dst_y };
     }
 
     fn getModifiers(self: *X11Backend, state: u16) event_mod.Modifiers {
@@ -581,4 +852,77 @@ fn internAtom(conn: *xcb.xcb_connection_t, name: [*:0]const u8) u32 {
     if (err != null) return 0;
     if (reply) |r| return r.*.atom;
     return 0;
+}
+
+/// 从 text/uri-list 数据解析首个 file:// URI 为本地路径 (调用者释放)
+fn parseFirstFileUriX11(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    var it = std.mem.splitScalar(u8, data, '\n');
+    while (it.next()) |raw_line| {
+        const line = std.mem.trimEnd(u8, raw_line, "\r \t");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (!std.mem.startsWith(u8, line, "file://")) continue;
+        var path = line["file://".len..];
+        // 去掉可选主机名 (file://host/path → /path)
+        if (path.len > 0 and path[0] != '/') {
+            if (std.mem.indexOfScalar(u8, path, '/')) |slash| {
+                path = path[slash..];
+            }
+        }
+        return percentDecodeX11(allocator, path);
+    }
+    return error.NoFileUri;
+}
+
+/// 百分号解码 (%20 → 空格 等)
+fn percentDecodeX11(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
+    var out = try allocator.alloc(u8, src.len);
+    errdefer allocator.free(out);
+    var j: usize = 0;
+    var i: usize = 0;
+    while (i < src.len) {
+        if (src[i] == '%' and i + 2 < src.len) {
+            const hi = std.fmt.charToDigit(src[i + 1], 16) catch {
+                out[j] = src[i];
+                j += 1;
+                i += 1;
+                continue;
+            };
+            const lo = std.fmt.charToDigit(src[i + 2], 16) catch {
+                out[j] = src[i];
+                j += 1;
+                i += 1;
+                continue;
+            };
+            out[j] = hi * 16 + lo;
+            j += 1;
+            i += 3;
+        } else {
+            out[j] = src[i];
+            j += 1;
+            i += 1;
+        }
+    }
+    return allocator.realloc(out, j) catch out[0..j];
+}
+
+// ── Tests (文件拖放 URI 解析) ──────────────────────────────────────
+
+test "x11 parseFirstFileUriX11 decodes first file uri" {
+    const alloc = std.testing.allocator;
+    const data = "# comment\r\nfile:///home/user/a%20b.txt\r\nfile:///other.txt\r\n";
+    const path = try parseFirstFileUriX11(alloc, data);
+    defer alloc.free(path);
+    try std.testing.expectEqualStrings("/home/user/a b.txt", path);
+}
+
+test "x11 parseFirstFileUriX11 strips hostname" {
+    const alloc = std.testing.allocator;
+    const path = try parseFirstFileUriX11(alloc, "file://localhost/tmp/x.png");
+    defer alloc.free(path);
+    try std.testing.expectEqualStrings("/tmp/x.png", path);
+}
+
+test "x11 parseFirstFileUriX11 errors on no file uri" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.NoFileUri, parseFirstFileUriX11(alloc, "http://x\nfoo"));
 }

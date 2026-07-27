@@ -74,6 +74,11 @@ pub const MetalDevice = struct {
         c.zigui_metal_set_drawable_size(self.handle, width, height);
     }
 
+    /// 设置当前 encoder 的裁剪矩形 (夹紧到 framebuffer; 供 ScrollView 裁剪溢出子控件)
+    pub fn setScissor(self: *MetalDevice, x: i32, y: i32, w: i32, h: i32) void {
+        c.zigui_metal_set_scissor(self.handle, x, y, w, h);
+    }
+
     // ── Texture (glyph atlas) ────────────────────────────────────────────────
 
     /// 创建 R8Unorm 纹理，返回不透明纹理句柄

@@ -8,6 +8,10 @@ const ft = @cImport({
     @cInclude("freetype/freetype.h");
 });
 
+const fc = @cImport({
+    @cInclude("fontconfig/fontconfig.h");
+});
+
 pub const ShapedGlyph = struct {
     glyph_id: u32,
     cluster: u32,
@@ -270,7 +274,18 @@ pub const FtFont = struct {
 
 /// 使用 fontconfig 查找系统字体
 pub fn findSystemFont(allocator: std.mem.Allocator, family: ?[]const u8) ![:0]u8 {
-    // 简化实现: 返回常见 Linux 字体路径
+    // 优先用 fontconfig 按族名查找
+    if (family) |fam| {
+        if (findFontWithFontconfig(allocator, fam)) |path| {
+            return path;
+        } else |_| {}
+    }
+    // 无 family 或查找失败, 回退到 sans-serif
+    if (findFontWithFontconfig(allocator, "sans-serif")) |path| {
+        return path;
+    } else |_| {}
+
+    // 最终回退: 硬编码路径
     const default_fonts = [_][:0]const u8{
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
@@ -281,10 +296,7 @@ pub fn findSystemFont(allocator: std.mem.Allocator, family: ?[]const u8) ![:0]u8
         "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
     };
 
-    _ = family; // TODO: 使用 fontconfig 查找
-
     for (default_fonts) |path| {
-        // 检查文件是否存在
         if (std.c.access(path, 0) != 0) continue;
         return allocator.dupeZ(u8, path) catch continue;
     }
@@ -295,6 +307,21 @@ pub fn findSystemFont(allocator: std.mem.Allocator, family: ?[]const u8) ![:0]u8
 /// 查找支持 CJK (中日韩) 字形的系统字体
 /// .otf 为 CFF 单字体, .ttc 为集合, 均取 face_index 0
 pub fn findCjkFont(allocator: std.mem.Allocator) ![:0]u8 {
+    // 优先用 fontconfig 查找 CJK 字体
+    const cjk_families = [_][]const u8{
+        "Noto Sans CJK SC",
+        "Source Han Sans CN",
+        "Source Han Sans SC",
+        "WenQuanYi Micro Hei",
+        "WenQuanYi Zen Hei",
+    };
+    for (cjk_families) |fam| {
+        if (findFontWithFontconfig(allocator, fam)) |path| {
+            return path;
+        } else |_| {}
+    }
+
+    // 回退: 硬编码路径
     const cjk_fonts = [_][:0]const u8{
         "/usr/share/fonts/adobe-source-han-sans/SourceHanSansCN-Regular.otf",
         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
@@ -309,4 +336,39 @@ pub fn findCjkFont(allocator: std.mem.Allocator) ![:0]u8 {
     }
 
     return error.NoFontFound;
+}
+
+/// 通过 fontconfig 按字体族名查找字体文件路径
+fn findFontWithFontconfig(allocator: std.mem.Allocator, family: []const u8) ![:0]u8 {
+    const config = fc.FcInitLoadConfigAndFonts();
+    if (config == null) return error.FontconfigInitFailed;
+    defer fc.FcConfigDestroy(config);
+
+    const pattern = fc.FcPatternCreate();
+    if (pattern == null) return error.PatternCreateFailed;
+    defer fc.FcPatternDestroy(pattern);
+
+    // 将 family 名加入查找模式
+    const family_z = try allocator.dupeZ(u8, family);
+    defer allocator.free(family_z);
+    _ = fc.FcPatternAddString(pattern, fc.FC_FAMILY, @ptrCast(family_z.ptr));
+
+    // 应用 substitution 规则
+    _ = fc.FcConfigSubstitute(config, pattern, fc.FcMatchPattern);
+    fc.FcDefaultSubstitute(pattern);
+
+    // 匹配最佳字体
+    var result: fc.FcResult = fc.FcResultNoMatch;
+    const font = fc.FcFontMatch(config, pattern, &result);
+    if (font == null) return error.NoFontFound;
+    defer fc.FcPatternDestroy(font);
+
+    // 提取文件路径
+    var file: [*c]u8 = null;
+    if (fc.FcPatternGetString(font, fc.FC_FILE, 0, @ptrCast(&file)) != fc.FcResultMatch) {
+        return error.NoFontFound;
+    }
+
+    const file_slice = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(file)), 0);
+    return allocator.dupeZ(u8, file_slice);
 }

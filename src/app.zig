@@ -10,6 +10,7 @@ const dirty_mod = @import("render2d/dirty.zig");
 const atlas_mod = @import("text/atlas.zig");
 const coretext = @import("text/coretext.zig");
 const clipboard = @import("pal/clipboard.zig");
+const perf_mod = @import("perf.zig");
 
 pub const AppConfig = struct {
     title: []const u8 = "zigui app",
@@ -33,6 +34,8 @@ pub const App = struct {
     running: bool = false,
     fb_width: u32,
     fb_height: u32,
+    /// 性能监控 (帧时间/FPS 统计)
+    frame_stats: perf_mod.FrameStats = .{},
 
     // 脏矩形驱动重绘 (continuous=false 时生效; 输入事件自动 invalidate)
     dirty: dirty_mod.DirtyRegion,
@@ -294,8 +297,10 @@ pub const App = struct {
 
             // 5. 用户绘制
             self.renderer.beginFrame();
+            self.frame_stats.beginFrame();
             draw_fn(self);
             self.renderer.submit();
+            self.frame_stats.endFrame();
 
             // 消费本帧的点击边沿标志
             self.mouse_clicked = false;
@@ -320,6 +325,22 @@ pub const App = struct {
     /// 获取 framebuffer 尺寸
     pub fn getFramebufferSize(self: *App) math.Size(u32) {
         return .{ .width = self.fb_width, .height = self.fb_height };
+    }
+
+    /// 高 DPI 缩放因子 (逻辑坐标 × scale = 物理像素; Retina 屏通常为 2.0)
+    pub fn getScaleFactor(self: *App) f32 {
+        if (self.cocoa_backend.window_handle) |h| return h.scale_factor;
+        return 1.0;
+    }
+
+    /// 性能监控统计 (FPS / 帧耗时 / 百分位)
+    pub fn getFrameStats(self: *App) *const perf_mod.FrameStats {
+        return &self.frame_stats;
+    }
+
+    /// 获取上一帧到当前帧的时间差 (ms), 用于驱动动画
+    pub fn getDeltaMs(self: *App) u32 {
+        return self.frame_stats.getDeltaMs();
     }
 
     /// 获取 glyph atlas

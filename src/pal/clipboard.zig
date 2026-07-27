@@ -15,9 +15,12 @@ const is_windows = builtin.os.tag == .windows;
 
 const c = if (!is_windows) @cImport({
     @cInclude("unistd.h");
-    @cInclude("fcntl.h");
     @cInclude("sys/wait.h");
 }) else void;
+
+const O_WRONLY: c_int = 1;
+
+extern fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 
 /// 运行命令并捕获 stdout (同步阻塞; 失败返回 error)
 fn runCapture(allocator: std.mem.Allocator, argv: []const [*:0]const u8) ![]u8 {
@@ -32,9 +35,8 @@ fn runCapture(allocator: std.mem.Allocator, argv: []const [*:0]const u8) ![]u8 {
     }
 
     if (pid == 0) {
-        // ── 子进程: stdout → 管道写端, stderr → /dev/null, exec ──
         _ = c.dup2(pipe_fds[1], 1);
-        const devnull = c.open("/dev/null", 1); // O_WRONLY
+        const devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) {
             _ = c.dup2(devnull, 2);
             _ = c.close(devnull);
@@ -47,21 +49,19 @@ fn runCapture(allocator: std.mem.Allocator, argv: []const [*:0]const u8) ![]u8 {
         c._exit(127);
     }
 
-    // ── 父进程: 读取管道至 EOF, 等待子进程退出 ──
     _ = c.close(pipe_fds[1]);
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     var buf: [4096]u8 = undefined;
     while (true) {
         const n = c.read(pipe_fds[0], &buf, buf.len);
-        if (n <= 0) break; // EOF 或错误
+        if (n <= 0) break;
         try out.appendSlice(allocator, buf[0..@intCast(n)]);
     }
     _ = c.close(pipe_fds[0]);
 
     var status: c_int = 0;
     _ = c.waitpid(pid, &status, 0);
-    // 低 7 位为信号号 (0 = 正常退出), 8-15 位为退出码
     if ((status & 0x7f) != 0 or @as(u8, @intCast((status >> 8) & 0xff)) != 0) {
         return error.CommandFailed;
     }
@@ -109,9 +109,8 @@ fn runSet(argv: []const [*:0]const u8, text: []const u8) !void {
     }
 
     if (pid == 0) {
-        // ── 子进程: stdin ← 管道读端, stdout/stderr → /dev/null, exec ──
         _ = c.dup2(pipe_fds[0], 0);
-        const devnull = c.open("/dev/null", 1); // O_WRONLY
+        const devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) {
             _ = c.dup2(devnull, 1);
             _ = c.dup2(devnull, 2);
@@ -125,7 +124,6 @@ fn runSet(argv: []const [*:0]const u8, text: []const u8) !void {
         c._exit(127);
     }
 
-    // ── 父进程: 写入文本到管道, 关闭后等待子进程退出 ──
     _ = c.close(pipe_fds[0]);
     var written: usize = 0;
     while (written < text.len) {

@@ -1,6 +1,6 @@
 # zigui API 参考
 
-> 跨平台 GPU 加速 GUI 框架 · Zig 0.16 · macOS (Cocoa + Metal) 已实现, Windows / Linux 规划中
+> 跨平台 GPU 加速 GUI 框架 · Zig 0.16 · macOS (Cocoa + Metal) 与 Linux (X11/Wayland + Vulkan) 已实现, Windows 规划中
 >
 > 本文档覆盖 `src/root.zig` 导出的全部公共模块。所有坐标单位为**设备像素** (device pixels, Retina 下 = points × backingScaleFactor), 原点左上角。
 
@@ -20,8 +20,9 @@
 - [layout — 布局引擎](#layout--布局引擎)
 - [theme — 主题](#theme--主题)
 - [animation — 动画](#animation--动画)
-- [input — 快捷键与手势](#input--快捷键与手势)
-- [gpu — Metal 设备](#gpu--metal-设备)
+- [input - 快捷键与手势](#input--快捷键与手势)
+- [perf - 性能监控](#perf--性能监控)
+- [gpu - Metal 设备](#gpu--metal-设备)
 - [构建与测试](#构建与测试)
 
 ---
@@ -37,14 +38,16 @@
 | `zigui.dirty` | DirtyRegion | 脏矩形收集、合并、裁剪 |
 | `zigui.text` | CtFont / GlyphAtlas / TextLayout | CoreText 整形 + glyph atlas + 段落排版 |
 | `zigui.image` | png | 纯 Zig PNG 解码器 (RGBA8 输出) |
-| `zigui.widget` | Widget | 控件基类、控件树、事件分发、脏标记 |
-| `zigui.label` … `zigui.table` | 各控件 | 16 个内置控件 |
+| `zigui.widget` | Widget | 控件基类、控件树、事件分发、脏标记、无障碍语义 |
+| `zigui.label` … `zigui.scroll_view` | 各控件 | 24 个内置控件 |
 | `zigui.layout` | LayoutNode | Flexbox 风格约束布局 |
 | `zigui.theme` | Theme | 内置亮 / 暗主题 |
 | `zigui.animation` | Tween / AnimationController | 缓动、补间、弹簧 |
 | `zigui.input` | ShortcutMap | 快捷键绑定表 |
 | `zigui.gesture` | Tap / Drag / Pinch | 触摸手势识别器 |
-| `zigui.metal` | MetalDevice | Metal 底层设备 (一般经 App/Renderer 间接使用) |
+| `zigui.perf` | FrameStats | 帧时间统计 (FPS / P99 卡顿指标, 无堆分配环形缓冲) |
+| `zigui.metal` | MetalDevice | Metal 底层设备 (macOS, 一般经 App/Renderer 间接使用) |
+| `zigui.vulkan` | VulkanDevice | Vulkan 底层设备 (Linux, 一般经 App/Renderer 间接使用) |
 
 ---
 
@@ -390,6 +393,9 @@ pub const Widget = struct {
     rect: math.Rect(f32),              // 相对父控件
     state: WidgetState,                // hovered/focused/pressed/disabled/visible/dirty/layout_dirty
     layout_style: layout_mod.LayoutStyle,
+    background: BackgroundStyle,       // 框架在 paintTree 中自动绘制 (纯色/图片 + 圆角 + 阴影)
+    clip_children: ?math.Rect(f32),    // 非 null 时子树绘制裁剪到此矩形 (ScrollView 等容器使用)
+    accessibility: Accessibility,      // 无障碍语义 (role/label/value/hint)
     dirty_tracker: ?*dirty_mod.DirtyRegion, // 仅根控件设置
 
     pub const VTable = struct {
@@ -397,6 +403,7 @@ pub const Widget = struct {
         measure: *const fn (self, ctx: *PaintContext, constraints: Constraints) math.Size(f32),
         paint: *const fn (self, ctx: *PaintContext) void,
         on_event: ?*const fn (self, event: *const pal.Event, ectx: *EventContext) EventResult,
+        perform_layout: ?*const fn (self, ctx: *PaintContext) void, // 可选; 容器覆盖默认 flexbox
         focusable: bool = false,
         destroy: *const fn (self, allocator) void,
     };
@@ -430,6 +437,15 @@ pub const PaintContext = struct {
 };
 
 pub const EventResult = enum { handled, ignored };
+
+pub const Role = enum { none, button, checkbox, radio, toggle, slider, progress, text, image, list, list_item, container, scroll_area, tab, menu };
+
+pub const Accessibility = struct {
+    role: Role = .none,                 // 语义角色 (控件工厂自动设置)
+    label: ?[]const u8 = null,          // 可读名称 (按钮文本/图片替代文本)
+    value: ?[]const u8 = null,          // 当前值文本 (如进度 "50%")
+    hint: ?[]const u8 = null,           // 操作提示 (如 "按空格切换")
+};
 ```
 
 `hitTest` 约定: 入参坐标位于**父级坐标空间** (对根控件即窗口坐标), 内部先减去 `self.rect` 偏移转换到局部坐标。事件分发采用目标处理 → 父级冒泡模型。
@@ -445,6 +461,7 @@ pub const EventResult = enum { handled, ignored };
 | `Label` | `text`, `font_size=14`, `font_weight=400`, `color` | `setText(text)` |
 | `Button` | `label_text`, `font_size=14`, `on_click: ?*const fn(*Button)`, `bg_color` | — |
 | `Container` | `bg_color: ?Color`, `corner_radius=0`, `border_color: ?Color` | 纯布局/装饰容器 |
+| `Canvas` | `on_draw: ?*const fn(*Canvas, *PaintContext)` | 自定义绘制 |
 | `Slider` | `value=0`, `min=0`, `max=1`, `on_change` | `setValue(v)` |
 | `TextInput` | `placeholder`, `font_size=14`, `on_change: ?*const fn(*TextInput, []const u8)` | `getText()`, `setText(text)` |
 | `TextArea` | 同 TextInput (多行) | `getText()`, `setText(text)` |
@@ -457,6 +474,28 @@ pub const EventResult = enum { handled, ignored };
 | `SplitView` | `orientation: .horizontal/.vertical`, `split_ratio=0.5`, `divider_size=8` | `setPanes(a, b)`, `setRatio(r)` |
 | `TreeView` | `row_height=32`, `indent=20`, `font_size=14` | `addRoot(label) !*Node`, `addChild(parent, label) !*Node` |
 | `Table` | `header_height=40`, `row_height=36`, `font_size=14` | `addColumn(title, width)`, `addRow(cells)` |
+| `Checkbox` | `checked=false`, `on_change: ?*const fn(*Checkbox, bool)`, `label_text` | `setChecked(b)`, `toggle()` |
+| `Radio` | `index`, `group: *RadioGroup`, `label_text` | `RadioGroup.init(selected, on_change)` 管理互斥选择 |
+| `Switch` | `on=false`, `on_change: ?*const fn(*Switch, bool)` | `setOn(b)`, `toggle()` |
+| `ProgressBar` | `value=0`, `min=0`, `max=1`, `indeterminate=false` | `setValue(v)`, `normalized()` |
+| `Spinner` | `spokes=8`, `size=24`, `color` | `tick()` 每帧推进旋转 |
+| `Image` | `texture: ?Texture`, `width/height`, `tint: ?Color` | `setTexture(t)`, `setTint(c)` |
+| `ScrollView` | `scroll_enabled_x=false`, `scroll_enabled_y=true`, `direction` | 内置滚动条 + 子树裁剪; `clip_children` 自动设置 |
+| `ScrollBar` | `orientation`, `ratio=0`, `visible_ratio=1`, `on_change` | `setRatio(r)`, `setVisibleRatio(r)` |
+| `Separator` | `orientation: .horizontal/.vertical`, `thickness=1`, `margin=8` | `setColor(c)` |
+| `StatusBar` | `text`, `font_size=12`, `height=28` | `setText(t)`, `getText()` |
+| `Expander` | `title`, `expanded=false`, `header_height=40`, `on_toggle` | `setExpanded(b)`, `toggle()`, `setTitle(t)` |
+| `MessageDialog` | `kind: .info/.warning/.err/.question`, `buttons`, `title`, `message`, `on_result` | `show()`, `hide()` |
+| `SpinButton` | `value=0`, `min/max`, `step=1`, `digits=0`, `editable=true`, `on_change` | `getValue()`, `setValue(v)`, `increment()`, `decrement()` |
+| `ToggleButton` | `active=false`, `on_toggle`, 两组颜色 (active/inactive + hover/pressed) | `setActive(b)`, `toggle()` |
+| `LinkButton` | `text`, `url`, `color`, `hover_color`, `visited_color`, `underline=true`, `on_click` | `setText(t)`, `setVisited(b)` |
+| `Grid` | `rows=1`, `cols=2`, `row_gap=8`, `col_gap=8`, `padding`, `bg_color` | `addChild(child, row, col)`, `setDimensions(rows, cols)` |
+| `Stack` | `visible_index=0`, `bg_color`, `corner_radius`, 尺寸 | `addChild(child)`, `setVisibleIndex(i)`, `next()`, `prev()` |
+| `Frame` | `label`, `label_align`, `border_color`, `border_width`, `padding`, `corner_radius` | `setChild(child)`, `setLabel(text)` |
+| `CenterBox` | `direction: row/column`, `bg_color`, `corner_radius`, 尺寸 | `setStart(child)`, `setCenter(child)`, `setEnd(child)` |
+| `FlowBox` | `direction`, `row_gap`, `col_gap`, `padding`, `justify`, `align_items` | `addChild(child)` |
+| `Overlay` | `bg_color`, `corner_radius`, 尺寸 | `addChild(child)`, `setChild(child)`, `addOverlay(child)` |
+| `MenuBar` | `font_size=13`, `height=28`, `bg_color`, `text_color`, `hover_bg` | `addMenu(label, menu)`, `closeAll()` |
 
 示例:
 
@@ -591,7 +630,26 @@ pub const PinchGesture = struct {
 
 ---
 
-## gpu — Metal 设备
+## perf - 性能监控
+
+帧时间统计, 基于 120 帧滚动窗口的无堆分配环形缓冲。`App` 主循环每帧调用 `beginFrame` / `endFrame` 采样, 应用可读取指标用于性能 overlay 或卡顿诊断。
+
+```zig
+pub const FrameStats = struct {
+    pub const window: usize = 120;      // 滚动窗口 (帧数)
+
+    pub fn beginFrame(self) void;       // 记录起始时刻, 由帧间隔更新平滑 FPS
+    pub fn endFrame(self) void;         // 记录本帧 CPU 耗时到环形缓冲
+
+    pub fn averageFrameTime(self) f32;              // 窗口内平均帧耗时 (ms)
+    pub fn frameTimePercentile(self, p: f32) f32;   // P99 等卡顿指标 (p=0..1)
+    // 字段: fps (指数滑动平均), frame_time_ms (最近一帧), total_frames (累计)
+};
+```
+
+---
+
+## gpu - Metal 设备
 
 一般经 `App` / `Renderer2D` 间接使用; 自定义渲染管线时直接操作:
 

@@ -499,6 +499,26 @@ void zigui_metal_set_drawable_size(ZiguiMetalDevice *dev, uint32_t width, uint32
     dev->layer.drawableSize = CGSizeMake(width, height);
 }
 
+/* 设置当前 encoder 的裁剪矩形 (夹紧到 framebuffer 范围)。
+   供 ScrollView 裁剪溢出子控件。空/无效矩形 → 裁剪一切 (零尺寸)。 */
+void zigui_metal_set_scissor(ZiguiMetalDevice *dev, int32_t x, int32_t y, int32_t w, int32_t h) {
+    if (!dev->currentEncoder) return;
+    int32_t fbw = (int32_t)dev->fbWidth;
+    int32_t fbh = (int32_t)dev->fbHeight;
+    int32_t x0 = x < 0 ? 0 : (x > fbw ? fbw : x);
+    int32_t y0 = y < 0 ? 0 : (y > fbh ? fbh : y);
+    int32_t x1 = x + w;
+    int32_t y1 = y + h;
+    if (x1 > fbw) x1 = fbw;
+    if (y1 > fbh) y1 = fbh;
+    int32_t sw = x1 - x0;
+    int32_t sh = y1 - y0;
+    if (sw < 0) sw = 0;
+    if (sh < 0) sh = 0;
+    MTLScissorRect scissor = { (NSUInteger)x0, (NSUInteger)y0, (NSUInteger)sw, (NSUInteger)sh };
+    [dev->currentEncoder setScissorRect:scissor];
+}
+
 /* ── Image Pipeline (RGBA textures) ───────────────────────────────────────── */
 
 void *zigui_metal_create_texture_rgba(ZiguiMetalDevice *dev, uint32_t width, uint32_t height) {

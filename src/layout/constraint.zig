@@ -69,3 +69,55 @@ test "Constraints.deflate" {
     try std.testing.expectEqual(@as(f32, 90), d.min_height);
     try std.testing.expectEqual(@as(f32, 490), d.max_height);
 }
+
+test "Constraints.tight min equals max" {
+    const c = Constraints.tight(50, 30);
+    try std.testing.expectEqual(@as(f32, 50), c.min_width);
+    try std.testing.expectEqual(@as(f32, 50), c.max_width);
+    try std.testing.expectEqual(@as(f32, 30), c.min_height);
+    try std.testing.expectEqual(@as(f32, 30), c.max_height);
+}
+
+test "Constraints.loose min is zero" {
+    const c = Constraints.loose(200, 100);
+    try std.testing.expectEqual(@as(f32, 0), c.min_width);
+    try std.testing.expectEqual(@as(f32, 200), c.max_width);
+    try std.testing.expectEqual(@as(f32, 0), c.min_height);
+    try std.testing.expectEqual(@as(f32, 100), c.max_height);
+}
+
+test "Constraints.unlimited all defaults" {
+    const c = Constraints.unlimited();
+    try std.testing.expectEqual(@as(f32, 0), c.min_width);
+    try std.testing.expectEqual(@as(f32, 0), c.min_height);
+    try std.testing.expect(std.math.isInf(c.max_width));
+    try std.testing.expect(std.math.isInf(c.max_height));
+}
+
+test "Constraints.inflate symmetric with deflate" {
+    const c = Constraints{ .min_width = 100, .max_width = 500, .min_height = 100, .max_height = 500 };
+    const pad = math.EdgeInsets{ .left = 10, .right = 10, .top = 5, .bottom = 5 };
+    const inflated = c.inflate(pad);
+    const deflated = inflated.deflate(pad);
+    try std.testing.expectEqual(c.min_width, deflated.min_width);
+    try std.testing.expectEqual(c.max_width, deflated.max_width);
+    try std.testing.expectEqual(c.min_height, deflated.min_height);
+    try std.testing.expectEqual(c.max_height, deflated.max_height);
+}
+
+test "Constraints.inflate with infinity does not overflow" {
+    const c = Constraints.unlimited();
+    const pad = math.EdgeInsets.all(100);
+    const inflated = c.inflate(pad);
+    try std.testing.expect(std.math.isInf(inflated.max_width));
+    try std.testing.expect(std.math.isInf(inflated.max_height));
+    try std.testing.expectEqual(@as(f32, 200), inflated.min_width);
+    try std.testing.expectEqual(@as(f32, 200), inflated.min_height);
+}
+
+test "Constraints.tight constrain returns exact size" {
+    const c = Constraints.tight(80, 60);
+    const s = c.constrain(.{ .width = 200, .height = 10 });
+    try std.testing.expectEqual(@as(f32, 80), s.width);
+    try std.testing.expectEqual(@as(f32, 60), s.height);
+}

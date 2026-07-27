@@ -2,6 +2,7 @@
 //! 面向 2D UI 渲染优化: 纯色几何 + 纹理文本/图片
 
 const std = @import("std");
+const math = @import("../math.zig");
 
 const vk = @cImport({
     @cDefine("VK_USE_PLATFORM_XCB_KHR", "1");
@@ -70,13 +71,15 @@ pub const VulkanDevice = struct {
     // 命令
     cmd_pool: vk.VkCommandPool,
     cmd_buffers: []vk.VkCommandBuffer,
-    // 顶点缓冲 (host-visible)
+    // 顶点缓冲 (host-visible, ring buffer: frames_in_flight 段)
     vertex_buffer: vk.VkBuffer,
     vertex_memory: vk.VkDeviceMemory,
     vertex_mapped: [*]u8,
+    vertex_cursors: [frames_in_flight]usize = .{0} ** frames_in_flight,
     text_vertex_buffer: vk.VkBuffer,
     text_vertex_memory: vk.VkDeviceMemory,
     text_vertex_mapped: [*]u8,
+    text_vertex_cursors: [frames_in_flight]usize = .{0} ** frames_in_flight,
     // 同步
     image_available: [frames_in_flight]vk.VkSemaphore,
     render_finished: [frames_in_flight]vk.VkSemaphore,
@@ -87,6 +90,8 @@ pub const VulkanDevice = struct {
     fb_width: u32,
     fb_height: u32,
     needs_recreate: bool = false,
+    /// 内容缩放因子 (HiDPI): 逻辑像素 × scale = 物理像素
+    content_scale: f32 = 1.0,
 
     pub fn init(allocator: std.mem.Allocator, xcb_conn_ptr: *anyopaque, window_id: u32, width: u32, height: u32) !VulkanDevice {
         // 1. 创建 Instance
@@ -126,9 +131,9 @@ pub const VulkanDevice = struct {
         const cmd_pool = try createCommandPool(device, queue_family);
         const cmd_buffers = try allocateCommandBuffers(allocator, device, cmd_pool, frames_in_flight);
 
-        // 10. 创建顶点缓冲
-        const vertex_result = try createVertexBuffer(physical_device, device, max_vertices * @sizeOf(Vertex2D));
-        const text_vertex_result = try createVertexBuffer(physical_device, device, max_vertices * @sizeOf(TextVertex));
+        // 10. 创建顶点缓冲 (ring buffer: frames_in_flight 段, 每帧独立空间)
+        const vertex_result = try createVertexBuffer(physical_device, device, max_vertices * @sizeOf(Vertex2D) * frames_in_flight);
+        const text_vertex_result = try createVertexBuffer(physical_device, device, max_vertices * @sizeOf(TextVertex) * frames_in_flight);
 
         // 11. 创建同步对象
         const sync = try createSyncObjects(device);
@@ -200,8 +205,8 @@ pub const VulkanDevice = struct {
         const framebuffers = try createFramebuffers(allocator, device, render_pass, swapchain_result.views, swapchain_result.extent);
         const cmd_pool = try createCommandPool(device, queue_family);
         const cmd_buffers = try allocateCommandBuffers(allocator, device, cmd_pool, frames_in_flight);
-        const vertex_result = try createVertexBuffer(physical_device, device, max_vertices * @sizeOf(Vertex2D));
-        const text_vertex_result = try createVertexBuffer(physical_device, device, max_vertices * @sizeOf(TextVertex));
+        const vertex_result = try createVertexBuffer(physical_device, device, max_vertices * @sizeOf(Vertex2D) * frames_in_flight);
+        const text_vertex_result = try createVertexBuffer(physical_device, device, max_vertices * @sizeOf(TextVertex) * frames_in_flight);
         const sync = try createSyncObjects(device);
         const sampler = try createSampler(device);
 
@@ -325,6 +330,8 @@ pub const VulkanDevice = struct {
             &image_index,
         );
         // swapchain 过期 (窗口 resize/最大化): 重建后重试
+        // 注意: 只用 setDrawableSize 设置的 fb_width/fb_height, 不用 currentExtent 覆盖,
+        //       否则最小化/恢复时 currentExtent 的临时值会导致窗口尺寸累积缩小
         if (result == vk.VK_ERROR_OUT_OF_DATE_KHR) {
             self.recreateSwapchain() catch return null;
             result = vk.vkAcquireNextImageKHR(
@@ -380,44 +387,82 @@ pub const VulkanDevice = struct {
         };
         vk.vkCmdSetScissor(self.cmd_buffers[self.current_frame], 0, 1, &scissor);
 
-        return .{ self.swapchain_extent.width, self.swapchain_extent.height };
+        // 重置当前帧的顶点缓冲写入游标
+        self.vertex_cursors[self.current_frame] = 0;
+        self.text_vertex_cursors[self.current_frame] = 0;
+
+        return .{ self.fb_width, self.fb_height };
     }
 
-    /// 更新纯色顶点数据
-    pub fn updateVertices(self: *VulkanDevice, vertices: []const Vertex2D) void {
-        if (vertices.len == 0) return;
+    /// 更新纯色顶点数据 (ring buffer 追加写入, 返回字节偏移)
+    pub fn updateVertices(self: *VulkanDevice, vertices: []const Vertex2D) vk.VkDeviceSize {
+        if (vertices.len == 0) return 0;
         const size = vertices.len * @sizeOf(Vertex2D);
-        @memcpy(self.vertex_mapped[0..size], std.mem.sliceAsBytes(vertices));
+        const frame = self.current_frame;
+        const frame_base = max_vertices * @sizeOf(Vertex2D) * frame;
+        const offset = self.vertex_cursors[frame];
+        @memcpy(self.vertex_mapped[frame_base + offset .. frame_base + offset + size], std.mem.sliceAsBytes(vertices));
+        self.vertex_cursors[frame] += size;
+        return @intCast(frame_base + offset);
     }
 
-    /// 绘制纯色三角形
-    pub fn drawTriangles(self: *VulkanDevice, vertex_count: u32) void {
+    /// 绘制纯色三角形 (vertex_offset 为顶点缓冲字节偏移)
+    pub fn drawTriangles(self: *VulkanDevice, vertex_count: u32, vertex_offset: vk.VkDeviceSize) void {
         if (vertex_count == 0) return;
         const cmd = self.cmd_buffers[self.current_frame];
 
         vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.solid_pipeline);
 
-        // Push constants (screen size)
-        const screen_size = [2]f32{ @floatFromInt(self.swapchain_extent.width), @floatFromInt(self.swapchain_extent.height) };
+        // Push constants (screen size = 逻辑大小, 顶点着色器会把逻辑坐标拉伸到物理视口)
+        const screen_size = [2]f32{ @floatFromInt(self.fb_width), @floatFromInt(self.fb_height) };
         vk.vkCmdPushConstants(cmd, self.solid_pipeline_layout, vk.VK_SHADER_STAGE_VERTEX_BIT, 0, 8, &screen_size);
 
         // 绑定顶点缓冲
         const buffers = [_]vk.VkBuffer{self.vertex_buffer};
-        const offsets = [_]vk.VkDeviceSize{0};
+        const offsets = [_]vk.VkDeviceSize{vertex_offset};
         vk.vkCmdBindVertexBuffers(cmd, 0, 1, &buffers, &offsets);
 
         vk.vkCmdDraw(cmd, vertex_count, 1, 0, 0);
     }
 
-    /// 更新文本顶点数据
-    pub fn updateTextVertices(self: *VulkanDevice, vertices: []const TextVertex) void {
-        if (vertices.len == 0) return;
-        const size = vertices.len * @sizeOf(TextVertex);
-        @memcpy(self.text_vertex_mapped[0..size], std.mem.sliceAsBytes(vertices));
+    /// 设置裁剪矩形 (夹紧到 swapchain 范围; null 恢复全屏)。
+    /// 供 ScrollView 裁剪溢出子控件; 调用前须先 flush 已累积几何以保持 z 序。
+    /// 注意: 输入是逻辑坐标, 内部会乘以 content_scale 转为物理像素
+    pub fn setScissor(self: *VulkanDevice, rect: ?math.Rect(f32)) void {
+        const cmd = self.cmd_buffers[self.current_frame];
+        const scissor = if (rect) |r| blk: {
+            const fw: i32 = @intCast(self.swapchain_extent.width);
+            const fh: i32 = @intCast(self.swapchain_extent.height);
+            const s = self.content_scale;
+            var x0: i32 = @intFromFloat(@floor(r.x * s));
+            var y0: i32 = @intFromFloat(@floor(r.y * s));
+            var x1: i32 = @intFromFloat(@ceil((r.x + r.width) * s));
+            var y1: i32 = @intFromFloat(@ceil((r.y + r.height) * s));
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 > fw) x1 = fw;
+            if (y1 > fh) y1 = fh;
+            const w: u32 = if (x1 > x0) @intCast(x1 - x0) else 0;
+            const h: u32 = if (y1 > y0) @intCast(y1 - y0) else 0;
+            break :blk vk.VkRect2D{ .offset = .{ .x = x0, .y = y0 }, .extent = .{ .width = w, .height = h } };
+        } else vk.VkRect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = self.swapchain_extent };
+        vk.vkCmdSetScissor(cmd, 0, 1, &scissor);
     }
 
-    /// 使用纹理管线绘制
-    pub fn drawTextured(self: *VulkanDevice, vertex_count: u32, texture: vk.VkImageView) void {
+    /// 更新文本顶点数据 (ring buffer 追加写入, 返回字节偏移)
+    pub fn updateTextVertices(self: *VulkanDevice, vertices: []const TextVertex) vk.VkDeviceSize {
+        if (vertices.len == 0) return 0;
+        const size = vertices.len * @sizeOf(TextVertex);
+        const frame = self.current_frame;
+        const frame_base = max_vertices * @sizeOf(TextVertex) * frame;
+        const offset = self.text_vertex_cursors[frame];
+        @memcpy(self.text_vertex_mapped[frame_base + offset .. frame_base + offset + size], std.mem.sliceAsBytes(vertices));
+        self.text_vertex_cursors[frame] += size;
+        return @intCast(frame_base + offset);
+    }
+
+    /// 使用纹理管线绘制 (vertex_offset 为顶点缓冲字节偏移)
+    pub fn drawTextured(self: *VulkanDevice, vertex_count: u32, texture: vk.VkImageView, vertex_offset: vk.VkDeviceSize) void {
         if (vertex_count == 0) return;
         const cmd = self.cmd_buffers[self.current_frame];
 
@@ -443,8 +488,8 @@ pub const VulkanDevice = struct {
 
         vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.textured_pipeline);
 
-        // Push constants
-        const screen_size = [2]f32{ @floatFromInt(self.swapchain_extent.width), @floatFromInt(self.swapchain_extent.height) };
+        // Push constants (screen size = 逻辑大小)
+        const screen_size = [2]f32{ @floatFromInt(self.fb_width), @floatFromInt(self.fb_height) };
         vk.vkCmdPushConstants(cmd, self.textured_pipeline_layout, vk.VK_SHADER_STAGE_VERTEX_BIT, 0, 8, &screen_size);
 
         // 绑定 descriptor set
@@ -452,7 +497,7 @@ pub const VulkanDevice = struct {
 
         // 绑定顶点缓冲
         const buffers = [_]vk.VkBuffer{self.text_vertex_buffer};
-        const offsets = [_]vk.VkDeviceSize{0};
+        const offsets = [_]vk.VkDeviceSize{vertex_offset};
         vk.vkCmdBindVertexBuffers(cmd, 0, 1, &buffers, &offsets);
 
         vk.vkCmdDraw(cmd, vertex_count, 1, 0, 0);
@@ -540,6 +585,14 @@ pub const VulkanDevice = struct {
         self.needs_recreate = true;
     }
 
+    /// 设置内容缩放因子 (HiDPI)
+    pub fn setContentScale(self: *VulkanDevice, scale: f32) void {
+        if (scale <= 0.0) return;
+        if (scale == self.content_scale) return;
+        self.content_scale = scale;
+        self.needs_recreate = true;
+    }
+
     /// 重建 swapchain (resize / 最大化)
     fn recreateSwapchain(self: *VulkanDevice) !void {
         _ = vk.vkDeviceWaitIdle(self.device);
@@ -557,9 +610,13 @@ pub const VulkanDevice = struct {
         self.allocator.free(self.swapchain_views);
         self.allocator.free(self.swapchain_images);
 
+        // 物理缓冲大小 = 逻辑大小 × 缩放因子 (HiDPI)
+        const phys_w: u32 = @intFromFloat(@as(f32, @floatFromInt(self.fb_width)) * self.content_scale);
+        const phys_h: u32 = @intFromFloat(@as(f32, @floatFromInt(self.fb_height)) * self.content_scale);
+
         // 创建新 swapchain (传入 oldSwapchain 以便驱动复用资源)
         const old_swapchain = self.swapchain;
-        const result = try createSwapchain(self.allocator, self.physical_device, self.device, self.surface, self.fb_width, self.fb_height, old_swapchain);
+        const result = try createSwapchain(self.allocator, self.physical_device, self.device, self.surface, phys_w, phys_h, old_swapchain);
         vk.vkDestroySwapchainKHR(self.device, old_swapchain, null);
 
         self.swapchain = result.swapchain;
@@ -1074,12 +1131,12 @@ pub const VulkanDevice = struct {
 
     /// 绘制图片 (RGBA 纹理, 使用 image 管线)
     pub fn drawImage(self: *VulkanDevice, vertices: []const TextVertex, texture: vk.VkImageView) void {
-        self.updateTextVertices(vertices);
-        self.drawImagePipeline(@intCast(vertices.len), texture);
+        const offset = self.updateTextVertices(vertices);
+        self.drawImagePipeline(@intCast(vertices.len), texture, offset);
     }
 
-    /// 使用 image 管线绘制 (保留纹理 RGB, 用于 RGBA 图片)
-    pub fn drawImagePipeline(self: *VulkanDevice, vertex_count: u32, texture: vk.VkImageView) void {
+    /// 使用 image 管线绘制 (保留纹理 RGB, 用于 RGBA 图片; vertex_offset 为顶点缓冲字节偏移)
+    pub fn drawImagePipeline(self: *VulkanDevice, vertex_count: u32, texture: vk.VkImageView, vertex_offset: vk.VkDeviceSize) void {
         if (vertex_count == 0) return;
         const cmd = self.cmd_buffers[self.current_frame];
 
@@ -1105,13 +1162,13 @@ pub const VulkanDevice = struct {
 
         vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.image_pipeline);
 
-        const screen_size = [2]f32{ @floatFromInt(self.swapchain_extent.width), @floatFromInt(self.swapchain_extent.height) };
+        const screen_size = [2]f32{ @floatFromInt(self.fb_width), @floatFromInt(self.fb_height) };
         vk.vkCmdPushConstants(cmd, self.textured_pipeline_layout, vk.VK_SHADER_STAGE_VERTEX_BIT, 0, 8, &screen_size);
 
         vk.vkCmdBindDescriptorSets(cmd, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.textured_pipeline_layout, 0, 1, &self.desc_set, 0, null);
 
         const buffers = [_]vk.VkBuffer{self.text_vertex_buffer};
-        const offsets = [_]vk.VkDeviceSize{0};
+        const offsets = [_]vk.VkDeviceSize{vertex_offset};
         vk.vkCmdBindVertexBuffers(cmd, 0, 1, &buffers, &offsets);
 
         vk.vkCmdDraw(cmd, vertex_count, 1, 0, 0);
@@ -1470,9 +1527,13 @@ fn createSolidPipeline(device: vk.VkDevice, render_pass: vk.VkRenderPass, extent
         .{ .location = 1, .binding = 0, .format = vk.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 8 },
     };
     const vertex_input = vk.VkPipelineVertexInputStateCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, .pNext = null, .flags = 0,
-        .vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &binding,
-        .vertexAttributeDescriptionCount = attributes.len, .pVertexAttributeDescriptions = &attributes,
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding,
+        .vertexAttributeDescriptionCount = attributes.len,
+        .pVertexAttributeDescriptions = &attributes,
     };
 
     const pipeline = try createGraphicsPipeline(device, &stages, &vertex_input, render_pass, layout, extent);
@@ -1523,9 +1584,13 @@ fn createTexturedPipeline(device: vk.VkDevice, render_pass: vk.VkRenderPass, ext
         .{ .location = 2, .binding = 0, .format = vk.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 16 },
     };
     const vertex_input = vk.VkPipelineVertexInputStateCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, .pNext = null, .flags = 0,
-        .vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &binding,
-        .vertexAttributeDescriptionCount = attributes.len, .pVertexAttributeDescriptions = &attributes,
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding,
+        .vertexAttributeDescriptionCount = attributes.len,
+        .pVertexAttributeDescriptions = &attributes,
     };
 
     const pipeline = try createGraphicsPipeline(device, &stages, &vertex_input, render_pass, layout, extent);
@@ -1576,9 +1641,13 @@ fn createImagePipeline(device: vk.VkDevice, render_pass: vk.VkRenderPass, extent
         .{ .location = 2, .binding = 0, .format = vk.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 16 },
     };
     const vertex_input = vk.VkPipelineVertexInputStateCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, .pNext = null, .flags = 0,
-        .vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &binding,
-        .vertexAttributeDescriptionCount = attributes.len, .pVertexAttributeDescriptions = &attributes,
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding,
+        .vertexAttributeDescriptionCount = attributes.len,
+        .pVertexAttributeDescriptions = &attributes,
     };
 
     const pipeline = try createGraphicsPipeline(device, &stages, &vertex_input, render_pass, layout, extent);
@@ -1606,29 +1675,51 @@ fn createShaderModule(device: vk.VkDevice, spv: []const u8) ?vk.VkShaderModule {
 
 fn createGraphicsPipeline(device: vk.VkDevice, stages: []const vk.VkPipelineShaderStageCreateInfo, vertex_input: *const vk.VkPipelineVertexInputStateCreateInfo, render_pass: vk.VkRenderPass, pipeline_layout: vk.VkPipelineLayout, extent: vk.VkExtent2D) !vk.VkPipeline {
     const input_assembly = vk.VkPipelineInputAssemblyStateCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .pNext = null, .flags = 0,
-        .topology = vk.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, .primitiveRestartEnable = vk.VK_FALSE,
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .topology = vk.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = vk.VK_FALSE,
     };
 
     const viewport = vk.VkViewport{ .x = 0, .y = 0, .width = @floatFromInt(extent.width), .height = @floatFromInt(extent.height), .minDepth = 0, .maxDepth = 1 };
     const scissor = vk.VkRect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = extent };
     const viewport_state = vk.VkPipelineViewportStateCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .pNext = null, .flags = 0,
-        .viewportCount = 1, .pViewports = &viewport, .scissorCount = 1, .pScissors = &scissor,
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor,
     };
 
     const rasterizer = vk.VkPipelineRasterizationStateCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .pNext = null, .flags = 0,
-        .depthClampEnable = vk.VK_FALSE, .rasterizerDiscardEnable = vk.VK_FALSE,
-        .polygonMode = vk.VK_POLYGON_MODE_FILL, .cullMode = vk.VK_CULL_MODE_NONE,
-        .frontFace = vk.VK_FRONT_FACE_CLOCKWISE, .depthBiasEnable = vk.VK_FALSE,
-        .depthBiasConstantFactor = 0, .depthBiasClamp = 0, .depthBiasSlopeFactor = 0, .lineWidth = 1.0,
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .depthClampEnable = vk.VK_FALSE,
+        .rasterizerDiscardEnable = vk.VK_FALSE,
+        .polygonMode = vk.VK_POLYGON_MODE_FILL,
+        .cullMode = vk.VK_CULL_MODE_NONE,
+        .frontFace = vk.VK_FRONT_FACE_CLOCKWISE,
+        .depthBiasEnable = vk.VK_FALSE,
+        .depthBiasConstantFactor = 0,
+        .depthBiasClamp = 0,
+        .depthBiasSlopeFactor = 0,
+        .lineWidth = 1.0,
     };
 
     const multisampling = vk.VkPipelineMultisampleStateCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .pNext = null, .flags = 0,
-        .rasterizationSamples = vk.VK_SAMPLE_COUNT_1_BIT, .sampleShadingEnable = vk.VK_FALSE,
-        .minSampleShading = 1.0, .pSampleMask = null, .alphaToCoverageEnable = vk.VK_FALSE, .alphaToOneEnable = vk.VK_FALSE,
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .rasterizationSamples = vk.VK_SAMPLE_COUNT_1_BIT,
+        .sampleShadingEnable = vk.VK_FALSE,
+        .minSampleShading = 1.0,
+        .pSampleMask = null,
+        .alphaToCoverageEnable = vk.VK_FALSE,
+        .alphaToOneEnable = vk.VK_FALSE,
     };
 
     const color_blend_attachment = vk.VkPipelineColorBlendAttachmentState{
@@ -1642,9 +1733,13 @@ fn createGraphicsPipeline(device: vk.VkDevice, stages: []const vk.VkPipelineShad
         .colorWriteMask = vk.VK_COLOR_COMPONENT_R_BIT | vk.VK_COLOR_COMPONENT_G_BIT | vk.VK_COLOR_COMPONENT_B_BIT | vk.VK_COLOR_COMPONENT_A_BIT,
     };
     const color_blending = vk.VkPipelineColorBlendStateCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .pNext = null, .flags = 0,
-        .logicOpEnable = vk.VK_FALSE, .logicOp = vk.VK_LOGIC_OP_COPY,
-        .attachmentCount = 1, .pAttachments = &color_blend_attachment,
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .logicOpEnable = vk.VK_FALSE,
+        .logicOp = vk.VK_LOGIC_OP_COPY,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
         .blendConstants = .{ 0, 0, 0, 0 },
     };
 
@@ -1661,15 +1756,25 @@ fn createGraphicsPipeline(device: vk.VkDevice, stages: []const vk.VkPipelineShad
     };
 
     const pipeline_info = vk.VkGraphicsPipelineCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = null, .flags = 0,
-        .stageCount = @intCast(stages.len), .pStages = stages.ptr,
-        .pVertexInputState = vertex_input, .pInputAssemblyState = &input_assembly,
-        .pTessellationState = null, .pViewportState = &viewport_state,
-        .pRasterizationState = &rasterizer, .pMultisampleState = &multisampling,
-        .pDepthStencilState = null, .pColorBlendState = &color_blending,
-        .pDynamicState = &dynamic_state, .layout = pipeline_layout,
-        .renderPass = render_pass, .subpass = 0,
-        .basePipelineHandle = null, .basePipelineIndex = -1,
+        .sType = vk.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .stageCount = @intCast(stages.len),
+        .pStages = stages.ptr,
+        .pVertexInputState = vertex_input,
+        .pInputAssemblyState = &input_assembly,
+        .pTessellationState = null,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pDepthStencilState = null,
+        .pColorBlendState = &color_blending,
+        .pDynamicState = &dynamic_state,
+        .layout = pipeline_layout,
+        .renderPass = render_pass,
+        .subpass = 0,
+        .basePipelineHandle = null,
+        .basePipelineIndex = -1,
     };
 
     var pipeline: vk.VkPipeline = undefined;

@@ -101,7 +101,6 @@ pub const GlyphAtlas = struct {
 
     /// 获取或光栅化 glyph
     pub fn getOrRasterize(self: *GlyphAtlas, device: *vulkan.VulkanDevice, font: *const freetype.FtFont, glyph_id: u32, size: f32) !AtlasEntry {
-        _ = device;
         const key = GlyphKey.encode(font.fontId(), size, font.weight, glyph_id);
 
         // 缓存命中
@@ -146,8 +145,10 @@ pub const GlyphAtlas = struct {
         const gh: u32 = @intCast(metrics.height);
 
         // Shelf packing 分配空间
-        const pos = self.allocateShelf(gw, gh) orelse {
-            return error.AtlasFull;
+        const pos = self.allocateShelf(gw, gh) orelse blk: {
+            // Atlas 满了, 扩容后重试
+            try self.grow(device);
+            break :blk self.allocateShelf(gw, gh) orelse return error.AtlasFull;
         };
 
         // 复制像素到 atlas
@@ -265,4 +266,142 @@ pub const GlyphAtlas = struct {
 
         return ShelfPos{ .x = 0, .y = next_y };
     }
+
+    /// 扩容: 翻倍宽高 (上限 8192), 迁移像素, 重算缓存 UV, 重建 GPU 纹理
+    fn grow(self: *GlyphAtlas, device: *vulkan.VulkanDevice) !void {
+        const max_dim: u32 = 8192;
+        if (self.width >= max_dim and self.height >= max_dim) return error.AtlasFull;
+
+        const new_width = @min(self.width * 2, max_dim);
+        const new_height = @min(self.height * 2, max_dim);
+
+        // 分配新像素缓冲并迁移旧数据 (行复制, 因 stride 变化)
+        const new_pixels = try self.allocator.alloc(u8, new_width * new_height);
+        @memset(new_pixels, 0);
+        var row: usize = 0;
+        while (row < self.height) : (row += 1) {
+            const src = row * self.width;
+            const dst = row * new_width;
+            @memcpy(new_pixels[dst .. dst + self.width], self.pixels[src .. src + self.width]);
+        }
+        self.allocator.free(self.pixels);
+        self.pixels = new_pixels;
+
+        // 重算所有缓存 entry 的 UV (按旧/新尺寸比例缩放)
+        const scale_x = @as(f32, @floatFromInt(self.width)) / @as(f32, @floatFromInt(new_width));
+        const scale_y = @as(f32, @floatFromInt(self.height)) / @as(f32, @floatFromInt(new_height));
+        var it = self.cache.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.uv_rect.x *= scale_x;
+            entry.value_ptr.uv_rect.y *= scale_y;
+            entry.value_ptr.uv_rect.width *= scale_x;
+            entry.value_ptr.uv_rect.height *= scale_y;
+        }
+
+        self.width = new_width;
+        self.height = new_height;
+
+        // 重建 GPU 纹理 (销毁旧 -> 创建新 -> 上传 -> 转采样布局)
+        if (self.texture) |old_tex| device.destroyTexture(old_tex);
+        const new_tex = device.createTexture(new_width, new_height) orelse return error.TextureCreationFailed;
+        self.texture = new_tex;
+        device.updateTextureRegion(new_tex, 0, 0, new_width, new_height, self.pixels, new_width);
+        device.prepareTextureForSampling(new_tex);
+        self.texture_in_shader_mode = true;
+
+        self.dirty = false;
+        self.dirty_rects.clearRetainingCapacity();
+    }
 };
+
+// ── Tests (shelf packing 逻辑, 无需 GPU 设备) ──────────────────────────────
+
+test "allocateShelf places first glyph at origin" {
+    var atlas = try GlyphAtlas.init(std.testing.allocator, 64, 64);
+    defer atlas.deinit();
+
+    const pos = atlas.allocateShelf(10, 12).?;
+    try std.testing.expectEqual(@as(u32, 0), pos.x);
+    try std.testing.expectEqual(@as(u32, 0), pos.y);
+    try std.testing.expectEqual(@as(usize, 1), atlas.shelves.items.len);
+    // shelf height = glyph height + padding(1)
+    try std.testing.expectEqual(@as(u32, 13), atlas.shelves.items[0].height);
+    // x_cursor = glyph width + padding(1)
+    try std.testing.expectEqual(@as(u32, 11), atlas.shelves.items[0].x_cursor);
+}
+
+test "allocateShelf fills same row then creates new shelf" {
+    var atlas = try GlyphAtlas.init(std.testing.allocator, 32, 64);
+    defer atlas.deinit();
+
+    // 两个 10x12 glyph: 10+1+10+1 = 22 <= 32, 同一 shelf
+    _ = atlas.allocateShelf(10, 12).?;
+    const p2 = atlas.allocateShelf(10, 12).?;
+    try std.testing.expectEqual(@as(u32, 11), p2.x); // 0 + 10 + 1(padding)
+    try std.testing.expectEqual(@as(u32, 0), p2.y);
+    try std.testing.expectEqual(@as(usize, 1), atlas.shelves.items.len);
+
+    // 第三个放不下同一行 (22+1+10=33 > 32), 创建新 shelf
+    const p3 = atlas.allocateShelf(10, 12).?;
+    try std.testing.expectEqual(@as(u32, 0), p3.x);
+    // shelf0: y=0, height=12+1=13; 新 shelf y = 0 + 13 + 1(padding) = 14
+    try std.testing.expectEqual(@as(u32, 14), p3.y);
+    try std.testing.expectEqual(@as(usize, 2), atlas.shelves.items.len);
+}
+
+test "allocateShelf returns null when atlas full" {
+    var atlas = try GlyphAtlas.init(std.testing.allocator, 16, 16);
+    defer atlas.deinit();
+
+    // 填满: 16x16 atlas, 10x10 glyph (padding=1 -> 11x11 shelf)
+    _ = atlas.allocateShelf(10, 10).?; // shelf at y=0, height=11
+    // 下一 shelf 起始 y=11, 11+10+1=22 > 16 -> 返回 null
+    try std.testing.expectEqual(@as(?GlyphAtlas.ShelfPos, null), atlas.allocateShelf(10, 10));
+}
+
+test "allocateShelf rejects glyph wider than atlas" {
+    var atlas = try GlyphAtlas.init(std.testing.allocator, 8, 64);
+    defer atlas.deinit();
+
+    // glyph 宽 10 + padding 1 = 11 > 8 (atlas 宽度)
+    try std.testing.expectEqual(@as(?GlyphAtlas.ShelfPos, null), atlas.allocateShelf(10, 10));
+}
+
+test "grow UV scaling math: doubling dimensions halves UV coordinates" {
+    // 模拟 grow() 中的 UV 重算逻辑 (不涉及 GPU 纹理重建)
+    var atlas = try GlyphAtlas.init(std.testing.allocator, 64, 64);
+    defer atlas.deinit();
+
+    // 手动插入一个缓存 entry, 模拟已光栅化的 glyph
+    const key = GlyphAtlas.GlyphKey.encode(1, 16.0, 400, 65);
+    const entry = GlyphAtlas.AtlasEntry{
+        .uv_rect = .{ .x = 0.0, .y = 0.0, .width = 10.0 / 64.0, .height = 12.0 / 64.0 },
+        .width = 10,
+        .height = 12,
+        .bearing_x = 0,
+        .bearing_y = 0,
+        .advance = 10,
+    };
+    try atlas.cache.put(std.testing.allocator, key, entry);
+
+    // 模拟 grow 的 UV 缩放 (宽高各翻倍)
+    const new_width: u32 = 128;
+    const new_height: u32 = 128;
+    const scale_x = @as(f32, @floatFromInt(atlas.width)) / @as(f32, @floatFromInt(new_width));
+    const scale_y = @as(f32, @floatFromInt(atlas.height)) / @as(f32, @floatFromInt(new_height));
+
+    var it = atlas.cache.iterator();
+    while (it.next()) |e| {
+        e.value_ptr.uv_rect.x *= scale_x;
+        e.value_ptr.uv_rect.y *= scale_y;
+        e.value_ptr.uv_rect.width *= scale_x;
+        e.value_ptr.uv_rect.height *= scale_y;
+    }
+
+    // 验证: UV 应减半 (因尺寸翻倍)
+    const got = atlas.cache.get(key).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), got.uv_rect.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), got.uv_rect.y, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0 / 128.0), got.uv_rect.width, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 12.0 / 128.0), got.uv_rect.height, 0.001);
+}

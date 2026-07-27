@@ -34,6 +34,28 @@ pub const TextStyle = struct {
     max_width: ?f32 = null,
 };
 
+/// 获取字体的 ascent (从基线到字形顶部的距离)
+pub fn getFontAscent(allocator: std.mem.Allocator, font_size: f32, font_weight: u16) f32 {
+    if (comptime is_macos) {
+        var font = coretext.CtFont.create(null, font_size, font_weight) catch {
+            return font_size * 0.8;
+        };
+        defer font.destroy();
+        return font.getMetrics().ascent;
+    } else if (comptime is_linux) {
+        const font_path = findFont(allocator) orelse {
+            return font_size * 0.8;
+        };
+        var font = freetype.FtFont.createFromFile(allocator, font_path.ptr, font_size, font_weight) catch {
+            return font_size * 0.8;
+        };
+        defer font.destroy();
+        return font.getMetrics().ascent;
+    } else {
+        return font_size * 0.8;
+    }
+}
+
 /// 测量文本尺寸 (不生成 glyph 位置, 仅计算宽高)
 pub fn measureText(allocator: std.mem.Allocator, text: []const u8, style: TextStyle) math.Size(f32) {
     if (text.len == 0) return .{ .width = 0, .height = style.font_size * 1.2 };
@@ -54,6 +76,19 @@ pub fn measureText(allocator: std.mem.Allocator, text: []const u8, style: TextSt
             return .{ .width = 0, .height = style.font_size * 1.2 };
         };
         defer font.destroy();
+
+        // 如果指定了 max_width, 使用 TextLayout 计算多行高度
+        if (style.max_width) |max_w| {
+            return text_layout_ft.TextLayout.measureMultiline(
+                &font,
+                text,
+                .{
+                    .font_size = style.font_size,
+                    .max_width = max_w,
+                },
+            );
+        }
+
         const text_w = font.measureText(text);
         const metrics = font.getMetrics();
         return .{ .width = text_w, .height = metrics.line_height };

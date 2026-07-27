@@ -335,3 +335,52 @@ test "pinch gesture computes scale" {
     try std.testing.expect(e != null);
     try std.testing.expect(e.?.ended);
 }
+
+test "tap gesture cancelled resets tracking" {
+    var tap = TapGesture{};
+    const t0: u64 = 0;
+
+    _ = tap.onTouch(touch(1, .began, 100, 100), t0);
+    _ = tap.onTouch(touch(1, .cancelled, 100, 100), t0 + 10 * std.time.ns_per_ms);
+    const result = tap.onTouch(touch(1, .ended, 100, 100), t0 + 20 * std.time.ns_per_ms);
+    try std.testing.expect(result == null);
+}
+
+test "drag gesture ends without start if under threshold" {
+    var drag = DragGesture{ .min_distance = 10.0 };
+
+    _ = drag.onTouch(touch(1, .began, 0, 0));
+    _ = drag.onTouch(touch(1, .moved, 3, 0));
+    const end = drag.onTouch(touch(1, .ended, 3, 0));
+    try std.testing.expect(end == null);
+}
+
+test "tap gesture at max distance threshold still recognized" {
+    var tap = TapGesture{ .max_distance = 10.0 };
+    const t0: u64 = 0;
+
+    _ = tap.onTouch(touch(1, .began, 100, 100), t0);
+    _ = tap.onTouch(touch(1, .moved, 110, 100), t0 + 10 * std.time.ns_per_ms);
+    const result = tap.onTouch(touch(1, .ended, 110, 100), t0 + 50 * std.time.ns_per_ms);
+    try std.testing.expect(result != null);
+}
+
+test "pinch gesture single finger move returns null" {
+    var pinch = PinchGesture{};
+
+    _ = pinch.onTouch(touch(1, .began, 0, 0));
+    try std.testing.expect(pinch.onTouch(touch(1, .moved, 50, 50)) == null);
+}
+
+test "pinch gesture cancelled resets state" {
+    var pinch = PinchGesture{};
+
+    _ = pinch.onTouch(touch(1, .began, 0, 0));
+    _ = pinch.onTouch(touch(2, .began, 100, 0));
+    _ = pinch.onTouch(touch(1, .moved, -50, 0));
+    _ = pinch.onTouch(touch(2, .moved, 150, 0));
+    const e = pinch.onTouch(touch(1, .cancelled, -50, 0));
+    try std.testing.expect(e != null);
+    try std.testing.expect(e.?.ended);
+    try std.testing.expect(pinch.slots[0] == null or pinch.slots[1] == null);
+}

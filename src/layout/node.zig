@@ -26,6 +26,7 @@ pub const JustifyContent = enum { start, center, end, space_between, space_aroun
 pub const AlignItems = enum { start, center, end, stretch, baseline };
 pub const AlignContent = enum { start, center, end, stretch, space_between, space_around };
 pub const Position = enum { relative, absolute };
+pub const TextDirection = enum { ltr, rtl };
 
 pub const LayoutStyle = struct {
     // 尺寸
@@ -50,6 +51,10 @@ pub const LayoutStyle = struct {
     flex_basis: Dimension = .{ .auto = {} },
     align_self: ?AlignItems = null,
 
+    // GTK 风格扩展标记 (简化版 flex-grow: 等价于 flex_grow/flex_shrink 为 1)
+    hexpand: bool = false,
+    vexpand: bool = false,
+
     // 间距
     margin: math.EdgeInsets = .{},
     padding: math.EdgeInsets = .{},
@@ -60,6 +65,9 @@ pub const LayoutStyle = struct {
     left: ?f32 = null,
     right: ?f32 = null,
     bottom: ?f32 = null,
+
+    // 文本方向 (影响 row 方向的布局顺序)
+    text_direction: TextDirection = .ltr,
 };
 
 pub const LayoutResult = struct {

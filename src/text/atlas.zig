@@ -102,7 +102,6 @@ pub const GlyphAtlas = struct {
     /// native_font: 用于光栅化的原生 CTFontRef (run 实际字体, 可能是 CJK 回退字体)
     /// font_id: 该字体的稳定标识, 作缓存键区分不同字体
     pub fn getOrRasterize(self: *GlyphAtlas, device: *metal.MetalDevice, native_font: *anyopaque, font_id: u64, weight: u16, glyph_id: u32, size: f32) !AtlasEntry {
-        _ = device; // 纹理上传在 flush() 中执行
         const key = GlyphKey.encode(font_id, size, weight, glyph_id);
 
         // 缓存命中
@@ -149,9 +148,10 @@ pub const GlyphAtlas = struct {
         const gh: u32 = @intCast(metrics.height);
 
         // Shelf packing 分配空间
-        const pos = self.allocateShelf(gw, gh) orelse {
-            // Atlas 满了，TODO: 扩容或清理
-            return error.AtlasFull;
+        const pos = self.allocateShelf(gw, gh) orelse blk: {
+            // Atlas 满了, 扩容后重试
+            try self.grow(device);
+            break :blk self.allocateShelf(gw, gh) orelse return error.AtlasFull;
         };
 
         // 复制像素到 atlas
@@ -265,5 +265,49 @@ pub const GlyphAtlas = struct {
         }) catch return null;
 
         return ShelfPos{ .x = 0, .y = next_y };
+    }
+
+    /// 扩容: 翻倍宽高 (上限 8192), 迁移像素, 重算缓存 UV, 重建 GPU 纹理
+    fn grow(self: *GlyphAtlas, device: *metal.MetalDevice) !void {
+        const max_dim: u32 = 8192;
+        if (self.width >= max_dim and self.height >= max_dim) return error.AtlasFull;
+
+        const new_width = @min(self.width * 2, max_dim);
+        const new_height = @min(self.height * 2, max_dim);
+
+        // 分配新像素缓冲并迁移旧数据 (行复制, 因 stride 变化)
+        const new_pixels = try self.allocator.alloc(u8, new_width * new_height);
+        @memset(new_pixels, 0);
+        var row: usize = 0;
+        while (row < self.height) : (row += 1) {
+            const src = row * self.width;
+            const dst = row * new_width;
+            @memcpy(new_pixels[dst .. dst + self.width], self.pixels[src .. src + self.width]);
+        }
+        self.allocator.free(self.pixels);
+        self.pixels = new_pixels;
+
+        // 重算所有缓存 entry 的 UV (按旧/新尺寸比例缩放)
+        const scale_x = @as(f32, @floatFromInt(self.width)) / @as(f32, @floatFromInt(new_width));
+        const scale_y = @as(f32, @floatFromInt(self.height)) / @as(f32, @floatFromInt(new_height));
+        var it = self.cache.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.uv_rect.x *= scale_x;
+            entry.value_ptr.uv_rect.y *= scale_y;
+            entry.value_ptr.uv_rect.width *= scale_x;
+            entry.value_ptr.uv_rect.height *= scale_y;
+        }
+
+        self.width = new_width;
+        self.height = new_height;
+
+        // 重建 GPU 纹理
+        if (self.texture) |old_tex| device.destroyTexture(old_tex);
+        const new_tex = device.createTexture(new_width, new_height) orelse return error.TextureCreationFailed;
+        self.texture = new_tex;
+        device.updateTextureRegion(new_tex, 0, 0, new_width, new_height, self.pixels, new_width);
+
+        self.dirty = false;
+        self.dirty_rects.clearRetainingCapacity();
     }
 };

@@ -308,3 +308,52 @@ test "background style deinit clears image" {
     try std.testing.expect(std.meta.activeTag(style.bg) == .none);
     try std.testing.expectEqual(@as(f32, 8), style.corner_radius); // 圆角保留
 }
+
+test "background placement cover exact fit returns full uv" {
+    const p = placement(100, 100, .{ .x = 0, .y = 0, .width = 100, .height = 100 }, .cover).?;
+    try expectNear(0, p.src.x);
+    try expectNear(0, p.src.y);
+    try expectNear(1, p.src.width);
+    try expectNear(1, p.src.height);
+}
+
+test "background placement contain exact fit returns full dst" {
+    const p = placement(100, 100, .{ .x = 10, .y = 20, .width = 100, .height = 100 }, .contain).?;
+    try expectNear(10, p.dst.x);
+    try expectNear(20, p.dst.y);
+    try expectNear(100, p.dst.width);
+    try expectNear(100, p.dst.height);
+}
+
+test "background style default values" {
+    const style = BackgroundStyle{};
+    try std.testing.expect(std.meta.activeTag(style.bg) == .none);
+    try std.testing.expectEqual(@as(f32, 0), style.corner_radius);
+    try std.testing.expect(style.shadow_color == null);
+    try std.testing.expectEqual(@as(f32, 16.0), style.shadow_blur);
+    try std.testing.expectEqual(@as(f32, 0.0), style.shadow_offset_x);
+    try std.testing.expectEqual(@as(f32, 6.0), style.shadow_offset_y);
+}
+
+test "background image fromTexture sets fields correctly" {
+    var fake_tex: u8 = 0;
+    const tex_ptr: *anyopaque = @ptrCast(&fake_tex);
+    const img = BackgroundImage.fromTexture(tex_ptr, 256, 128, .contain);
+    try std.testing.expect(img.texture != null);
+    try std.testing.expectEqual(@as(u32, 256), img.tex_width);
+    try std.testing.expectEqual(@as(u32, 128), img.tex_height);
+    try std.testing.expectEqual(BackgroundSizing.contain, img.sizing);
+    try std.testing.expectEqual(@as(f32, 1.0), img.opacity);
+}
+
+test "background placement center with equal sizes" {
+    const p = placement(50, 50, .{ .x = 0, .y = 0, .width = 50, .height = 50 }, .center).?;
+    try expectNear(0, p.dst.x);
+    try expectNear(0, p.dst.y);
+    try expectNear(50, p.dst.width);
+    try expectNear(50, p.dst.height);
+    try expectNear(0, p.src.x);
+    try expectNear(0, p.src.y);
+    try expectNear(1, p.src.width);
+    try expectNear(1, p.src.height);
+}

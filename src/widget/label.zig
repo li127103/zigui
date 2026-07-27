@@ -64,6 +64,8 @@ pub const Label = struct {
     const vtable = Widget.VTable{
         .type_name = "label",
         .measure = measure,
+        .measure_height_for_width = measureHeightForWidth,
+        .get_baseline = getBaseline,
         .paint = paint,
         .on_event = null,
         .focusable = false,
@@ -77,12 +79,31 @@ pub const Label = struct {
 
     fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
         const self: *Label = @fieldParentPtr("base", w);
-        _ = constraints;
 
         return styled_text.measureText(ctx.allocator, self.text, .{
             .font_size = self.font_size,
             .font_weight = self.font_weight,
+            .max_width = if (constraints.max_width < std.math.inf(f32)) constraints.max_width else null,
+            .text_align = self.text_align,
         });
+    }
+
+    fn measureHeightForWidth(w: *Widget, ctx: *PaintContext, width: f32) f32 {
+        const self: *Label = @fieldParentPtr("base", w);
+
+        const size = styled_text.measureText(ctx.allocator, self.text, .{
+            .font_size = self.font_size,
+            .font_weight = self.font_weight,
+            .max_width = width,
+            .text_align = self.text_align,
+        });
+        return size.height;
+    }
+
+    fn getBaseline(w: *Widget, ctx: *PaintContext, height: f32) f32 {
+        const self: *Label = @fieldParentPtr("base", w);
+        _ = height;
+        return styled_text.getFontAscent(ctx.allocator, self.font_size, self.font_weight);
     }
 
     fn paint(w: *Widget, ctx: *PaintContext) void {

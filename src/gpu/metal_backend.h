@@ -35,6 +35,10 @@ bool zigui_metal_begin_frame_dirty(ZiguiMetalDevice *dev,
 void zigui_metal_end_frame(ZiguiMetalDevice *dev);
 void zigui_metal_set_drawable_size(ZiguiMetalDevice *dev, uint32_t width, uint32_t height);
 
+/* Set scissor clip rect on the current render encoder (clamped to framebuffer).
+   Used by ScrollView to clip overflowing children. Coordinates in pixels. */
+void zigui_metal_set_scissor(ZiguiMetalDevice *dev, int32_t x, int32_t y, int32_t w, int32_t h);
+
 /* ── Solid-color drawing ──────────────────────────────────────────────────── */
 
 void zigui_metal_update_vertices(ZiguiMetalDevice *dev, const ZiguiVertex2D *vertices, uint32_t count);

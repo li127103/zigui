@@ -21,6 +21,8 @@ pub const Renderer2D = struct {
     image_vertices: std.ArrayListUnmanaged(TextVertex) = .{ .items = &.{}, .capacity = 0 },
     /// 连续同纹理的图片绘制段
     image_runs: std.ArrayListUnmanaged(ImageRun) = .{ .items = &.{}, .capacity = 0 },
+    /// 当前裁剪矩形 (null = 全屏; 由 pushClip/popClip 管理, 供 ScrollView 裁剪溢出子控件)
+    clip: ?math.Rect(f32) = null,
 
     pub const ImageRun = struct {
         texture: *anyopaque,
@@ -421,6 +423,24 @@ pub const Renderer2D = struct {
         self.image_runs.clearRetainingCapacity();
     }
 
+    /// 压入裁剪矩形 (先 flush 已累积几何以保持 z 序, 再设 scissor)。
+    /// 嵌套时与当前裁剪取交集。返回之前的裁剪供 popClip 恢复。
+    pub fn pushClip(self: *Renderer2D, rect: math.Rect(f32)) ?math.Rect(f32) {
+        self.flush();
+        const prev = self.clip;
+        const new_clip = if (prev) |p| (p.intersection(rect) orelse emptyRect(rect)) else rect;
+        self.clip = new_clip;
+        applyScissor(self.device, new_clip);
+        return prev;
+    }
+
+    /// 弹出裁剪 (恢复 prev; 先 flush 再设 scissor)
+    pub fn popClip(self: *Renderer2D, prev: ?math.Rect(f32)) void {
+        self.flush();
+        self.clip = prev;
+        applyScissor(self.device, prev);
+    }
+
     /// 提交所有绘制到 GPU
     pub fn submit(self: *Renderer2D) void {
         // 1. 纯色几何
@@ -482,3 +502,23 @@ pub const Renderer2D = struct {
         };
     }
 };
+
+/// 空裁剪矩形 (不相交时裁剪一切)
+fn emptyRect(ref: math.Rect(f32)) math.Rect(f32) {
+    return .{ .x = ref.x, .y = ref.y, .width = 0, .height = 0 };
+}
+
+/// 应用裁剪矩形到 Metal encoder (null = 全屏)
+fn applyScissor(device: *metal.MetalDevice, rect: ?math.Rect(f32)) void {
+    if (rect) |r| {
+        device.setScissor(
+            @intFromFloat(@floor(r.x)),
+            @intFromFloat(@floor(r.y)),
+            @intFromFloat(@ceil(r.width)),
+            @intFromFloat(@ceil(r.height)),
+        );
+    } else {
+        // 全屏: 使用超大矩形 (C 层会夹紧到 framebuffer)
+        device.setScissor(0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
+    }
+}

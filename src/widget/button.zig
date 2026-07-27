@@ -54,6 +54,7 @@ pub const Button = struct {
             .padding_h = opts.padding_h,
             .padding_v = opts.padding_v,
         };
+        self.base.accessibility = .{ .role = .button, .label = label_text };
         return self;
     }
 

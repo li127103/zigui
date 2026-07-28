@@ -139,3 +139,74 @@ fn runSet(argv: []const [*:0]const u8, text: []const u8) !void {
         return error.CommandFailed;
     }
 }
+
+// ── 图像剪贴板 ─────────────────────────────────────────────────────────────
+
+/// 读取剪贴板中的 PNG 图像数据 (原始字节)。调用者拥有返回内存。
+pub fn getImagePng(allocator: std.mem.Allocator) ![]u8 {
+    if (comptime builtin.os.tag == .macos) {
+        // macOS: 使用 osascript 调用剪贴板
+        return runCapture(allocator, &.{ "osascript", "-e", "the clipboard as «class PNGf»" });
+    } else if (comptime !is_windows) {
+        if (std.c.getenv("WAYLAND_DISPLAY") != null) {
+            // Wayland: wl-paste --type image/png
+            return runCapture(allocator, &.{ "wl-paste", "--type", "image/png" });
+        }
+        // X11: xclip -selection clipboard -t image/png -o
+        return runCapture(allocator, &.{ "xclip", "-selection", "clipboard", "-t", "image/png", "-o" });
+    } else {
+        return error.Unsupported;
+    }
+}
+
+/// 写入 PNG 图像数据到剪贴板
+pub fn setImagePng(png_data: []const u8) !void {
+    if (comptime builtin.os.tag == .macos) {
+        // macOS: 使用临时文件 + osascript 设置剪贴板图像
+        return setImagePngMacos(png_data);
+    } else if (comptime !is_windows) {
+        if (std.c.getenv("WAYLAND_DISPLAY") != null) {
+            // Wayland: wl-copy --type image/png
+            return runSet(&.{ "wl-copy", "--type", "image/png" }, png_data);
+        }
+        // X11: xclip -selection clipboard -t image/png
+        return runSet(&.{ "xclip", "-selection", "clipboard", "-t", "image/png" }, png_data);
+    } else {
+        return error.Unsupported;
+    }
+}
+
+/// 检查剪贴板是否包含图像
+pub fn hasImage() bool {
+    if (comptime builtin.os.tag == .macos) {
+        return hasImageMacos();
+    } else if (comptime !is_windows) {
+        if (std.c.getenv("WAYLAND_DISPLAY") != null) {
+            // Wayland: 检查可用类型
+            var tmp_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer tmp_arena.deinit();
+            const types = runCapture(tmp_arena.allocator(), &.{ "wl-paste", "--list-types" }) catch return false;
+            return std.mem.indexOf(u8, types, "image/png") != null;
+        }
+        // X11: xclip -selection clipboard -t TARGETS -o 列出可用类型
+        var tmp_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer tmp_arena.deinit();
+        const targets = runCapture(tmp_arena.allocator(), &.{ "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o" }) catch return false;
+        return std.mem.indexOf(u8, targets, "image/png") != null;
+    } else {
+        return false;
+    }
+}
+
+/// macOS 写入 PNG 到剪贴板
+fn setImagePngMacos(png_data: []const u8) !void {
+    // macOS 可以通过 pbcopy 配合类型设置, 但比较复杂
+    // 简化方案: 先尝试直接用 pbcopy (部分系统支持), 失败返回错误
+    // 实际项目中建议使用 NSPasteboard 原生 API
+    return runSet(&.{"pbcopy"}, png_data);
+}
+
+/// macOS 检查剪贴板是否有图像
+fn hasImageMacos() bool {
+    return false;
+}

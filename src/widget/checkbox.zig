@@ -65,6 +65,7 @@ pub const Checkbox = struct {
             .gap = opts.gap,
         };
         self.base.accessibility = .{ .role = .checkbox, .label = label_text };
+        self.base.cursor = .pointing_hand;
         return self;
     }
 
@@ -283,11 +284,11 @@ test "checkbox click toggles state" {
     cb.base.rect = .{ .x = 0, .y = 0, .width = 100, .height = 20 };
     var ectx = EventContext{};
 
-    var press = pal.Event{ .mouse_button = .{ .button = .left, .state = .pressed, .x = 5, .y = 5 } };
+    var press = pal.Event{ .mouse_button = .{ .window_id = 0, .button = .left, .state = .pressed, .x = 5, .y = 5 } };
     _ = cb.base.dispatchEvent(&press, &ectx);
     try std.testing.expect(cb.base.state.pressed);
 
-    var release = pal.Event{ .mouse_button = .{ .button = .left, .state = .released, .x = 5, .y = 5 } };
+    var release = pal.Event{ .mouse_button = .{ .window_id = 0, .button = .left, .state = .released, .x = 5, .y = 5 } };
     _ = cb.base.dispatchEvent(&release, &ectx);
     try std.testing.expect(cb.checked);
     try std.testing.expect(!cb.base.state.pressed);
@@ -299,7 +300,7 @@ test "checkbox space key toggles when focused" {
     cb.base.state.focused = true;
     var ectx = EventContext{};
 
-    var ev = pal.Event{ .key = .{ .state = .pressed, .key = .space, .modifiers = .{} } };
+    var ev = pal.Event{ .key = .{ .window_id = 0, .state = .pressed, .key = .space, .modifiers = .{} } };
     _ = cb.base.dispatchEvent(&ev, &ectx);
     try std.testing.expect(cb.checked);
 }
@@ -310,7 +311,7 @@ test "checkbox disabled ignores events" {
     cb.base.state.disabled = true;
     var ectx = EventContext{};
 
-    var press = pal.Event{ .mouse_button = .{ .button = .left, .state = .pressed, .x = 5, .y = 5 } };
+    var press = pal.Event{ .mouse_button = .{ .window_id = 0, .button = .left, .state = .pressed, .x = 5, .y = 5 } };
     const r = cb.base.dispatchEvent(&press, &ectx);
     try std.testing.expect(r == .ignored);
     try std.testing.expect(!cb.checked);

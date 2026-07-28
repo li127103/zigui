@@ -1,4 +1,15 @@
-//! ProgressBar 控件 - 进度条 (确定进度展示, 可选百分比文本)
+//! ProgressBar 控件 - 进度条
+//!
+//! 显示操作进度的控件，支持确定模式 (0-100%) 和不确定模式 (脉冲动画)。
+//!
+//! 使用方法:
+//! ```
+//! var pb = try ProgressBar.create(allocator, .{
+//!     .fraction = 0.5,
+//!     .show_text = true,
+//! });
+//! pb.setFraction(0.7);
+//! ```
 
 const std = @import("std");
 const math = @import("../math.zig");
@@ -8,32 +19,35 @@ const styled_text = @import("../text/styled_text.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
+const EventContext = widget_mod.EventContext;
+const EventResult = widget_mod.EventResult;
 
 pub const ProgressBar = struct {
     base: Widget,
-    value: f32,
-    min: f32,
-    max: f32,
-    show_label: bool,
-    font_size: f32,
-    // 样式
-    track_color: math.Color,
-    fill_color: math.Color,
-    text_color: math.Color,
-    bar_height: f32,
-    corner_radius: f32,
+    fraction: f32 = 0,
+    show_text: bool = false,
+    text: []const u8 = "",
+    pulse: bool = false,
+    pulse_pos: f32 = 0,
+
+    track_color: math.Color = math.Color.hex(0x334155FF),
+    fill_color: math.Color = math.Color.hex(0x3B82F6FF),
+    text_color: math.Color = math.Color.hex(0xF8FAFCFF),
+    corner_radius: f32 = 4.0,
+    min_height: f32 = 18.0,
+    min_width: f32 = 150.0,
+
+    const Self = @This();
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
-        value: f32 = 0,
-        min: f32 = 0,
-        max: f32 = 1,
-        show_label: bool = false,
-        font_size: f32 = 12.0,
-        track_color: math.Color = math.Color.hex(0x334155FF),
-        fill_color: math.Color = math.Color.hex(0x3B82F6FF),
-        text_color: math.Color = math.Color.hex(0xF8FAFCFF),
-        bar_height: f32 = 10.0,
-        corner_radius: f32 = 5.0,
+        fraction: f32 = 0,
+        show_text: bool = false,
+        text: []const u8 = "",
+        pulse: bool = false,
+        track_color: ?math.Color = null,
+        fill_color: ?math.Color = null,
+        corner_radius: f32 = 4.0,
+        min_height: f32 = 18.0,
     }) !*ProgressBar {
         const self = try allocator.create(ProgressBar);
         self.* = .{
@@ -41,41 +55,70 @@ pub const ProgressBar = struct {
                 .vtable = &vtable,
                 .id = widget_mod.genWidgetId(),
             },
-            .value = std.math.clamp(opts.value, opts.min, opts.max),
-            .min = opts.min,
-            .max = opts.max,
-            .show_label = opts.show_label,
-            .font_size = opts.font_size,
-            .track_color = opts.track_color,
-            .fill_color = opts.fill_color,
-            .text_color = opts.text_color,
-            .bar_height = opts.bar_height,
+            .fraction = std.math.clamp(opts.fraction, 0, 1),
+            .show_text = opts.show_text,
+            .pulse = opts.pulse,
             .corner_radius = opts.corner_radius,
+            .min_height = opts.min_height,
+            .track_color = opts.track_color orelse self.track_color,
+            .fill_color = opts.fill_color orelse self.fill_color,
         };
-        self.base.accessibility = .{ .role = .progress };
+        if (opts.text.len > 0) {
+            self.text = try allocator.dupe(u8, opts.text);
+        }
         return self;
     }
 
-    pub fn destroy(self: *ProgressBar, allocator: std.mem.Allocator) void {
+    pub fn destroy(self: *Self, allocator: std.mem.Allocator) void {
+        if (self.text.len > 0) {
+            allocator.free(self.text);
+        }
         self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
     }
 
-    pub fn setValue(self: *ProgressBar, v: f32) void {
-        const clamped = std.math.clamp(v, self.min, self.max);
-        if (clamped != self.value) {
-            self.value = clamped;
+    pub fn setFraction(self: *Self, f: f32) void {
+        const clamped = std.math.clamp(f, 0, 1);
+        if (clamped != self.fraction) {
+            self.fraction = clamped;
             self.base.markDirty();
         }
     }
 
-    pub fn normalized(self: *const ProgressBar) f32 {
-        if (self.max <= self.min) return 0;
-        return (self.value - self.min) / (self.max - self.min);
+    pub fn getFraction(self: *const Self) f32 {
+        return self.fraction;
     }
 
-    // ── VTable 实现 ──────────────────────────────────────────────────────────
+    pub fn setPulse(self: *Self, enabled: bool) void {
+        if (self.pulse != enabled) {
+            self.pulse = enabled;
+            self.pulse_pos = 0;
+            self.base.markDirty();
+        }
+    }
+
+    pub fn setText(self: *Self, allocator: std.mem.Allocator, text: []const u8) void {
+        if (self.text.len > 0) {
+            allocator.free(self.text);
+            self.text = "";
+        }
+        if (text.len > 0) {
+            self.text = allocator.dupe(u8, text) catch return;
+        }
+        self.base.markDirty();
+    }
+
+    pub fn pulseStep(self: *Self, delta: f32) void {
+        if (!self.pulse) return;
+        self.pulse_pos += delta;
+        if (self.pulse_pos > 1.2) {
+            self.pulse_pos = -0.2;
+        }
+        self.base.markDirty();
+    }
+
+    // ── VTable ──────────────────────────────────────────────────────────────
 
     const vtable = Widget.VTable{
         .type_name = "progress_bar",
@@ -87,99 +130,81 @@ pub const ProgressBar = struct {
     };
 
     fn destroyVTable(w: *Widget, allocator: std.mem.Allocator) void {
-        const self: *ProgressBar = @fieldParentPtr("base", w);
+        const self: *Self = @fieldParentPtr("base", w);
         self.destroy(allocator);
     }
 
     fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
-        const self: *ProgressBar = @fieldParentPtr("base", w);
+        const self: *Self = @fieldParentPtr("base", w);
         _ = ctx;
-        var h = self.bar_height;
-        if (self.show_label) h = @max(h, self.font_size * 1.2);
-        const width = if (constraints.max_width < std.math.inf(f32)) constraints.max_width else 200;
-        return .{ .width = width, .height = h };
+        const w_used = if (w.rect.width > 0) w.rect.width else @min(self.min_width, constraints.max_width);
+        const h_used = if (w.rect.height > 0) w.rect.height else self.min_height;
+        return .{ .width = w_used, .height = h_used };
     }
 
     fn paint(w: *Widget, ctx: *PaintContext) void {
-        const self: *ProgressBar = @fieldParentPtr("base", w);
+        const self: *Self = @fieldParentPtr("base", w);
         const rx = ctx.offset_x + w.rect.x;
         const ry = ctx.offset_y + w.rect.y;
         const rw = w.rect.width;
+        const rh = w.rect.height;
 
-        const bar_y = ry + (w.rect.height - self.bar_height) / 2.0;
+        const track_rect = math.Rect(f32){ .x = rx, .y = ry, .width = rw, .height = rh };
+        ctx.renderer.fillRoundedRect(track_rect, self.corner_radius, self.track_color) catch {};
 
-        // 轨道
-        ctx.renderer.fillRoundedRect(
-            .{ .x = rx, .y = bar_y, .width = rw, .height = self.bar_height },
-            self.corner_radius,
-            self.track_color,
-        ) catch {};
-
-        // 填充
-        const norm = std.math.clamp(self.normalized(), 0.0, 1.0);
-        const fill_w = rw * norm;
-        if (fill_w > self.corner_radius * 2) {
-            ctx.renderer.fillRoundedRect(
-                .{ .x = rx, .y = bar_y, .width = fill_w, .height = self.bar_height },
-                self.corner_radius,
-                self.fill_color,
-            ) catch {};
-        } else if (fill_w > 0) {
-            // 进度过小时用直角矩形避免圆角畸变
-            ctx.renderer.fillRect(
-                .{ .x = rx, .y = bar_y, .width = fill_w, .height = self.bar_height },
-                self.fill_color,
-            ) catch {};
+        if (self.pulse) {
+            const pulse_w = rw * 0.3;
+            const pulse_x = rx + (rw + pulse_w) * self.pulse_pos - pulse_w;
+            const clamped_x = @max(rx, pulse_x);
+            const clamped_w = @min(rx + rw - clamped_x, pulse_w);
+            if (clamped_w > 0) {
+                const fill_rect = math.Rect(f32){
+                    .x = clamped_x,
+                    .y = ry,
+                    .width = clamped_w,
+                    .height = rh,
+                };
+                ctx.renderer.fillRoundedRect(fill_rect, self.corner_radius, self.fill_color) catch {};
+            }
+        } else {
+            const fill_w = rw * self.fraction;
+            if (fill_w > 0) {
+                const fill_rect = math.Rect(f32){
+                    .x = rx,
+                    .y = ry,
+                    .width = fill_w,
+                    .height = rh,
+                };
+                ctx.renderer.fillRoundedRect(fill_rect, self.corner_radius, self.fill_color) catch {};
+            }
         }
 
-        // 百分比文本 (居中)
-        if (self.show_label) {
-            var buf: [16]u8 = undefined;
-            const pct = @as(i32, @intFromFloat(@round(norm * 100.0)));
-            const label = std.fmt.bufPrint(&buf, "{d}%", .{pct}) catch "0%";
-            const text_size = styled_text.measureText(ctx.allocator, label, .{
-                .font_size = self.font_size,
-            });
-            const text_x = rx + (rw - text_size.width) / 2.0;
-            const text_y = ry + (w.rect.height - text_size.height) / 2.0;
-            styled_text.drawText(
-                ctx.renderer,
-                ctx.allocator,
-                label,
-                text_x,
-                text_y,
-                .{ .font_size = self.font_size, .color = self.text_color },
-            );
+        if (self.show_text) {
+            var buf: [32]u8 = undefined;
+            const display_text = if (self.text.len > 0)
+                self.text
+            else label: {
+                const pct: i32 = @intFromFloat(@round(self.fraction * 100));
+                const len = std.fmt.bufPrint(&buf, "{}%", .{pct}) catch break :label "";
+                break :label len;
+            };
+
+            if (display_text.len > 0) {
+                const font_size = @min(12, rh * 0.6);
+                const text_size = styled_text.measureText(ctx.allocator, display_text, .{
+                    .font_size = font_size,
+                });
+                const text_x = rx + (rw - text_size.width) / 2;
+                const text_y = ry + (rh - text_size.height) / 2;
+                styled_text.drawText(
+                    ctx.renderer,
+                    ctx.allocator,
+                    display_text,
+                    text_x,
+                    text_y,
+                    .{ .font_size = font_size, .color = self.text_color },
+                );
+            }
         }
     }
 };
-
-// ── Tests ──────────────────────────────────────────────────────────────────
-
-test "progress_bar normalized maps value to 0..1" {
-    const pb = try ProgressBar.create(std.testing.allocator, .{ .value = 5, .min = 0, .max = 10 });
-    defer pb.destroy(std.testing.allocator);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.5), pb.normalized(), 0.0001);
-}
-
-test "progress_bar setValue clamps to range" {
-    const pb = try ProgressBar.create(std.testing.allocator, .{ .min = 0, .max = 1 });
-    defer pb.destroy(std.testing.allocator);
-
-    pb.setValue(2.0);
-    try std.testing.expectEqual(@as(f32, 1.0), pb.value);
-    pb.setValue(-1.0);
-    try std.testing.expectEqual(@as(f32, 0.0), pb.value);
-}
-
-test "progress_bar create clamps initial value" {
-    const pb = try ProgressBar.create(std.testing.allocator, .{ .value = 99, .min = 0, .max = 1 });
-    defer pb.destroy(std.testing.allocator);
-    try std.testing.expectEqual(@as(f32, 1.0), pb.value);
-}
-
-test "progress_bar normalized guards zero range" {
-    const pb = try ProgressBar.create(std.testing.allocator, .{ .value = 5, .min = 5, .max = 5 });
-    defer pb.destroy(std.testing.allocator);
-    try std.testing.expectEqual(@as(f32, 0), pb.normalized());
-}

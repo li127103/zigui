@@ -78,6 +78,7 @@ pub const ToggleButton = struct {
         };
         self.base.accessibility = .{ .role = .toggle, .label = label_text };
         self.base.accessibility.value = if (self.active) "开" else "关";
+        self.base.cursor = .pointing_hand;
         return self;
     }
 

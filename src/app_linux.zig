@@ -11,6 +11,9 @@ const atlas_mod = @import("text/atlas_vulkan.zig");
 const freetype = @import("text/freetype.zig");
 const clipboard = @import("pal/clipboard.zig");
 const perf_mod = @import("perf.zig");
+const shortcut_mod = @import("shortcut.zig");
+const dnd_mod = @import("dnd.zig");
+const window_mod = @import("window.zig");
 
 // 编译期后端选择
 const enable_wayland = build_options.enable_wayland;
@@ -99,6 +102,17 @@ const PlatformBackend = union(BackendKind) {
             },
         }
     }
+
+    fn setCursor(self: *PlatformBackend, cursor_type: pal.CursorType) void {
+        switch (self.*) {
+            .wayland => {
+                // Wayland 后端光标暂未实现
+            },
+            .x11 => |*b| {
+                if (comptime enable_x11) b.setCursor(cursor_type);
+            },
+        }
+    }
 };
 
 pub const App = struct {
@@ -112,12 +126,17 @@ pub const App = struct {
     event_queue: pal.EventQueue = .{},
     running: bool = false,
     maximized: bool = false,
+    main_window_id: u32 = 0,
     fb_width: u32,
     fb_height: u32,
     /// 高 DPI 缩放因子 (逻辑坐标 → 物理像素; 来自后端输出检测)
     scale_factor: f32 = 1.0,
     /// 性能监控 (帧时间/FPS 统计)
     frame_stats: perf_mod.FrameStats = .{},
+    /// 全局快捷键控制器
+    shortcuts: shortcut_mod.ShortcutController = undefined,
+    /// 拖拽状态
+    drag_state: dnd_mod.DragState = .{},
 
     // 脏矩形驱动重绘
     dirty: dirty_mod.DirtyRegion,
@@ -128,6 +147,8 @@ pub const App = struct {
     mouse_y: f32 = 0,
     mouse_down: bool = false,
     mouse_clicked: bool = false,
+    right_clicked: bool = false,
+    current_cursor: pal.CursorType = .arrow,
 
     // 每帧输入状态
     scroll_delta: f32 = 0,
@@ -148,6 +169,9 @@ pub const App = struct {
     preedit_cursor_begin: i32 = 0,
     preedit_cursor_end: i32 = 0,
     pending_ime_delete: ?struct { before_length: u32, after_length: u32 } = null,
+
+    // 子窗口 (额外的顶层窗口)
+    sub_windows: std.AutoHashMapUnmanaged(u32, *window_mod.Window) = .{},
 
     pub fn typedCodepoints(self: *App) []const u21 {
         return self.typed_cps[0..self.typed_cp_count];
@@ -332,6 +356,7 @@ pub const App = struct {
             },
         }
 
+        self.shortcuts = shortcut_mod.ShortcutController.init(allocator);
         return self;
     }
 
@@ -364,6 +389,7 @@ pub const App = struct {
             .renderer = renderer,
             .glyph_atlas = glyph_atlas,
             .running = false,
+            .main_window_id = window_id,
             .fb_width = config.width,
             .fb_height = config.height,
             .dirty = dirty_mod.DirtyRegion.init(allocator),
@@ -374,7 +400,264 @@ pub const App = struct {
         self.vk_device.setContentScale(self.scale_factor);
     }
 
+    /// 创建一个额外的顶层窗口
+    pub fn createSubWindow(self: *App, title: []const u8, width: u32, height: u32) !u32 {
+        switch (self.backend) {
+            .x11 => |*b| {
+                if (comptime enable_x11) {
+                    const wid = try b.createSubWindow(title, width, height);
+                    const conn_ptr: *anyopaque = @ptrCast(b.conn);
+                    const win = try window_mod.Window.init(
+                        self.allocator,
+                        conn_ptr,
+                        wid,
+                        title,
+                        width,
+                        height,
+                        self.scale_factor,
+                    );
+                    try self.sub_windows.put(self.allocator, wid, win);
+                    return wid;
+                }
+            },
+            .wayland => |*b| {
+                if (comptime enable_wayland) {
+                    const wid = try b.createSubWindow(title, width, height);
+                    const surface = b.getSubWindowSurface(wid) orelse return error.SurfaceFailed;
+                    const display_ptr: *anyopaque = @ptrCast(b.display);
+                    const surface_ptr: *anyopaque = @ptrCast(surface);
+                    const win = try window_mod.Window.initWayland(
+                        self.allocator,
+                        display_ptr,
+                        surface_ptr,
+                        wid,
+                        title,
+                        width,
+                        height,
+                        self.scale_factor,
+                    );
+                    try self.sub_windows.put(self.allocator, wid, win);
+                    return wid;
+                }
+            },
+        }
+        return error.NotImplemented;
+    }
+
+    /// 销毁子窗口
+    pub fn destroySubWindow(self: *App, wid: u32) void {
+        if (self.sub_windows.fetchRemove(wid)) |entry| {
+            entry.value.deinit();
+        }
+        switch (self.backend) {
+            .x11 => |*b| {
+                if (comptime enable_x11) {
+                    b.destroySubWindow(wid);
+                }
+            },
+            .wayland => |*b| {
+                if (comptime enable_wayland) {
+                    b.destroySubWindow(wid);
+                }
+            },
+        }
+    }
+
+    /// 获取子窗口指针 (用于设置回调等)
+    pub fn getSubWindow(self: *App, wid: u32) ?*window_mod.Window {
+        return self.sub_windows.get(wid);
+    }
+
+    /// 显示子窗口
+    pub fn showSubWindow(self: *App, wid: u32) void {
+        if (self.sub_windows.get(wid)) |win| {
+            win.visible = true;
+        }
+        switch (self.backend) {
+            .x11 => |*b| {
+                if (comptime enable_x11) {
+                    b.showSubWindow(wid);
+                }
+            },
+            .wayland => |*b| {
+                if (comptime enable_wayland) {
+                    b.showSubWindow(wid);
+                }
+            },
+        }
+    }
+
+    /// 隐藏子窗口
+    pub fn hideSubWindow(self: *App, wid: u32) void {
+        if (self.sub_windows.get(wid)) |win| {
+            win.visible = false;
+        }
+        switch (self.backend) {
+            .x11 => |*b| {
+                if (comptime enable_x11) {
+                    b.hideSubWindow(wid);
+                }
+            },
+            .wayland => |*b| {
+                if (comptime enable_wayland) {
+                    b.hideSubWindow(wid);
+                }
+            },
+        }
+    }
+
+    /// 设置子窗口标题
+    pub fn setSubWindowTitle(self: *App, wid: u32, title: []const u8) void {
+        if (self.sub_windows.get(wid)) |win| {
+            win.setTitle(title);
+        }
+        switch (self.backend) {
+            .x11 => |*b| {
+                if (comptime enable_x11) {
+                    b.setSubWindowTitle(wid, title);
+                }
+            },
+            .wayland => |*b| {
+                if (comptime enable_wayland) {
+                    b.setSubWindowTitle(wid, title);
+                }
+            },
+        }
+    }
+
+    /// 调整子窗口大小
+    pub fn resizeSubWindow(self: *App, wid: u32, width: u32, height: u32) void {
+        switch (self.backend) {
+            .x11 => |*b| {
+                if (comptime enable_x11) {
+                    b.resizeSubWindow(wid, width, height);
+                }
+            },
+            .wayland => {},
+        }
+    }
+
+    /// 移动子窗口
+    pub fn moveSubWindow(self: *App, wid: u32, x: i32, y: i32) void {
+        switch (self.backend) {
+            .x11 => |*b| {
+                if (comptime enable_x11) {
+                    b.moveSubWindow(wid, x, y);
+                }
+            },
+            .wayland => {},
+        }
+    }
+
+    /// 最小化子窗口
+    pub fn iconifySubWindow(self: *App, wid: u32) void {
+        switch (self.backend) {
+            .x11 => |*b| {
+                if (comptime enable_x11) {
+                    b.iconifySubWindow(wid);
+                }
+            },
+            .wayland => {},
+        }
+    }
+
+    /// 设置子窗口为 transient (对话框样式，父窗口之上)
+    pub fn setSubWindowTransientFor(self: *App, wid: u32, parent_wid: u32) void {
+        switch (self.backend) {
+            .x11 => |*b| {
+                if (comptime enable_x11) {
+                    b.setSubWindowTransientFor(wid, parent_wid);
+                }
+            },
+            .wayland => {},
+        }
+    }
+
+    /// 最大化子窗口
+    pub fn maximizeSubWindow(self: *App, wid: u32) void {
+        switch (self.backend) {
+            .x11 => |*b| {
+                if (comptime enable_x11) {
+                    b.maximizeSubWindow(wid);
+                }
+            },
+            .wayland => {},
+        }
+    }
+
+    /// 还原子窗口 (取消最大化)
+    pub fn unmaximizeSubWindow(self: *App, wid: u32) void {
+        switch (self.backend) {
+            .x11 => |*b| {
+                if (comptime enable_x11) {
+                    b.unmaximizeSubWindow(wid);
+                }
+            },
+            .wayland => {},
+        }
+    }
+
+    /// 处理所有子窗口的事件，关闭那些 should_close 的窗口
+    fn processSubWindowEvents(self: *App) void {
+        // 收集需要关闭的窗口 ID
+        var to_close: [64]u32 = undefined;
+        var close_count: usize = 0;
+
+        var it = self.sub_windows.valueIterator();
+        while (it.next()) |win_ptr| {
+            const win = win_ptr.*;
+            win.processEvents();
+            if (win.should_close) {
+                if (close_count < to_close.len) {
+                    to_close[close_count] = win.platform_window_id;
+                    close_count += 1;
+                }
+            }
+        }
+
+        // 关闭标记为 should_close 的窗口
+        for (to_close[0..close_count]) |wid| {
+            self.destroySubWindow(wid);
+        }
+    }
+
+    /// 渲染所有可见的子窗口
+    fn renderSubWindows(self: *App) void {
+        var it = self.sub_windows.valueIterator();
+        while (it.next()) |win_ptr| {
+            const win = win_ptr.*;
+            if (!win.visible) continue;
+            // 开始帧
+            const size = win.vk_device.beginFrame() orelse continue;
+            win.width = size[0];
+            win.height = size[1];
+
+            // 开始渲染
+            win.renderer.beginFrame();
+            win.frame_stats.beginFrame();
+
+            // 调用用户绘制回调
+            if (win.on_draw) |draw_fn| {
+                draw_fn(win);
+            }
+
+            // 提交渲染
+            win.renderer.submit();
+            win.frame_stats.endFrame();
+
+            // 结束帧
+            win.vk_device.endFrame();
+        }
+    }
+
     pub fn deinit(self: *App) void {
+        // 清理子窗口
+        var it = self.sub_windows.valueIterator();
+        while (it.next()) |win_ptr| {
+            win_ptr.*.deinit();
+        }
+        self.sub_windows.deinit(self.allocator);
+        self.shortcuts.deinit();
         self.event_queue.deinit(self.allocator);
         self.dirty.deinit();
         self.renderer.deinit();
@@ -407,6 +690,14 @@ pub const App = struct {
             // 2. 处理事件
             const events = self.event_queue.drain();
             for (events) |ev| {
+                // 事件路由: 子窗口的事件推送到对应窗口的队列
+                const ev_window_id = getEventWindowId(ev);
+                if (ev_window_id != self.main_window_id) {
+                    if (self.sub_windows.get(ev_window_id)) |win| {
+                        win.event_queue.push(self.allocator, ev) catch {};
+                        continue;
+                    }
+                }
                 switch (ev) {
                     .close_requested => self.running = false,
                     .resize => |r| {
@@ -421,7 +712,23 @@ pub const App = struct {
                     },
                     .key => |k| {
                         self.key_mods = k.modifiers;
+                        // 显式追踪修饰键 press/release
+                        // (X11 state 字段为事件前状态, Wayland keyboardModifiers 可能滞后于 keyboardKey;
+                        //  直接依赖 k.modifiers 会导致 Ctrl 释放后 key_mods.ctrl 卡在 true,
+                        //  进而使所有 text_input 被 if(key_mods.ctrl) continue 跳过 → 无法输入)
+                        switch (k.key) {
+                            .left_shift, .right_shift => self.key_mods.shift = (k.state == .pressed),
+                            .left_ctrl, .right_ctrl => self.key_mods.ctrl = (k.state == .pressed),
+                            .left_alt, .right_alt => self.key_mods.alt = (k.state == .pressed),
+                            .left_super, .right_super => self.key_mods.super_key = (k.state == .pressed),
+                            else => {},
+                        }
                         if (k.state == .pressed) {
+                            // 先检查全局快捷键
+                            if (self.shortcuts.handle(k.key, k.modifiers)) {
+                                self.invalidate();
+                                continue;
+                            }
                             self.key_hit = k.key;
                             self.invalidate();
                             if (k.key == .escape) {
@@ -471,6 +778,10 @@ pub const App = struct {
                             self.mouse_x = @floatFromInt(m.x);
                             self.mouse_y = @floatFromInt(m.y);
                         }
+                        // 拖拽位置更新
+                        if (self.drag_state.active) {
+                            _ = self.drag_state.update(@floatFromInt(m.x), @floatFromInt(m.y));
+                        }
                         self.invalidate();
                     },
                     .mouse_button => |mb| {
@@ -480,14 +791,24 @@ pub const App = struct {
                             if (mb.state == .pressed) {
                                 self.mouse_down = true;
                                 self.mouse_clicked = true;
+                                // 开始潜在拖拽
+                                self.drag_state.begin(@floatFromInt(mb.x), @floatFromInt(mb.y), null);
                             } else {
                                 self.mouse_down = false;
+                                // 结束拖拽 (如果有)
+                                if (self.drag_state.isActive()) {
+                                    _ = self.drag_state.end();
+                                } else {
+                                    self.drag_state.cancel();
+                                }
                             }
+                        } else if (mb.button == .right and mb.state == .pressed) {
+                            self.right_clicked = true;
                         }
                         self.invalidate();
                     },
                     .file_drop => |fd| {
-                        self.file_drop = fd;
+                        self.file_drop = fd.file_drop;
                         self.invalidate();
                     },
                     else => {},
@@ -495,6 +816,9 @@ pub const App = struct {
             }
 
             if (!self.running) break;
+
+            // 2b. 处理子窗口事件
+            self.processSubWindowEvents();
 
             // 3. 重绘决策
             if (!self.config.continuous and !self.needs_redraw) {
@@ -515,6 +839,7 @@ pub const App = struct {
 
             // 消费本帧输入
             self.mouse_clicked = false;
+            self.right_clicked = false;
             self.scroll_delta = 0;
             self.typed_cp_count = 0;
             self.ime_commit_len = 0;
@@ -526,11 +851,56 @@ pub const App = struct {
 
             // 6. 提交帧
             self.vk_device.endFrame();
+
+            // 7. 渲染子窗口
+            self.renderSubWindows();
         }
     }
 
     pub fn getRenderer(self: *App) *renderer2d.Renderer2D {
         return &self.renderer;
+    }
+
+    /// 获取主窗口 ID
+    pub fn getMainWindowId(self: *const App) u32 {
+        return self.main_window_id;
+    }
+
+    /// 添加全局快捷键
+    pub fn addShortcut(
+        self: *App,
+        key: pal.KeyCode,
+        mods: pal.event.Modifiers,
+        callback: *const fn (ctx: ?*anyopaque) void,
+        ctx: ?*anyopaque,
+    ) !void {
+        try self.shortcuts.add(key, mods, callback, ctx);
+    }
+
+    /// 移除快捷键 (按回调指针)
+    pub fn removeShortcut(self: *App, callback: *const fn (ctx: ?*anyopaque) void) void {
+        self.shortcuts.remove(callback);
+    }
+
+    /// 获取快捷键控制器 (直接操作)
+    pub fn getShortcuts(self: *App) *shortcut_mod.ShortcutController {
+        return &self.shortcuts;
+    }
+
+    /// 开始拖拽 (由控件在 mouse_down 时调用, 设置数据后正式启动)
+    pub fn startDrag(self: *App, data: dnd_mod.DragData) void {
+        self.drag_state.setData(data);
+        self.invalidate();
+    }
+
+    /// 获取拖拽状态
+    pub fn getDragState(self: *App) *dnd_mod.DragState {
+        return &self.drag_state;
+    }
+
+    /// 拖拽是否正在进行
+    pub fn isDragging(self: *App) bool {
+        return self.drag_state.isActive();
     }
 
     pub fn getFramebufferSize(self: *App) math.Size(u32) {
@@ -583,7 +953,39 @@ pub const App = struct {
     pub fn isMaximized(self: *const App) bool {
         return self.maximized;
     }
+
+    /// 设置鼠标光标样式
+    pub fn setCursor(self: *App, cursor_type: pal.CursorType) void {
+        if (self.current_cursor == cursor_type) return;
+        self.current_cursor = cursor_type;
+        self.backend.setCursor(cursor_type);
+    }
 };
+
+/// 从事件中提取 window_id
+fn getEventWindowId(ev: pal.Event) u32 {
+    return switch (ev) {
+        .resize => |e| e.window_id,
+        .move => |e| e.window_id,
+        .close_requested => |e| e.window_id,
+        .focus_change => |e| e.window_id,
+        .scale_change => |e| e.window_id,
+        .minimize => |e| e.window_id,
+        .maximize => |e| e.window_id,
+        .mouse_move => |e| e.window_id,
+        .mouse_button => |e| e.window_id,
+        .scroll => |e| e.window_id,
+        .mouse_enter => |e| e.window_id,
+        .mouse_leave => |e| e.window_id,
+        .key => |e| e.window_id,
+        .text_input => |e| e.window_id,
+        .ime_commit => |e| e.window_id,
+        .ime_preedit => |e| e.window_id,
+        .ime_delete => |e| e.window_id,
+        .touch => |e| e.window_id,
+        .file_drop => |e| e.window_id,
+    };
+}
 
 /// 自动检测显示后端 (尊重编译期选项)
 /// 优先级: WAYLAND_DISPLAY > DISPLAY

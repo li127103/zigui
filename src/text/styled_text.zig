@@ -30,9 +30,206 @@ pub const TextStyle = struct {
     font_weight: u16 = 400,
     color: math.Color = math.Color.hex(0xF8FAFCFF),
     text_align: TextAlign = .left,
+    /// 斜体 (fake italic: 水平错切合成)
+    italic: bool = false,
     /// 最大宽度 (传入时启用自动换行 + 对齐; null 为单行)
     max_width: ?f32 = null,
 };
+
+// ── 富文本 Span 支持 ──────────────────────────────────────────────────────
+
+/// 带独立样式的文本片段
+pub const TextSpan = struct {
+    text: []const u8,
+    font_size: f32 = 14.0,
+    font_weight: u16 = 400,
+    color: math.Color = math.Color.hex(0xF8FAFCFF),
+    /// 斜体 (fake italic: 水平错切合成)
+    italic: bool = false,
+    /// 下划线
+    underline: bool = false,
+    /// 删除线
+    strikethrough: bool = false,
+};
+
+/// 解析标记文本为 TextSpan 数组
+/// 支持的标记:
+///   <b>粗体</b>
+///   <i>斜体</i>
+///   <u>下划线</u>
+///   <s>删除线</s>
+///   <color=0xRRGGBBAA>彩色</color>
+///   <size=18>大字</size>
+pub fn parseMarkup(allocator: std.mem.Allocator, text: []const u8, base: TextStyle) ![]TextSpan {
+    var spans = std.ArrayListUnmanaged(TextSpan){ .items = &.{}, .capacity = 0 };
+    defer spans.deinit(allocator);
+
+    var i: usize = 0;
+    var cur_size = base.font_size;
+    var cur_weight = base.font_weight;
+    var cur_color = base.color;
+    var cur_italic: bool = false;
+    var cur_underline: bool = false;
+    var cur_strikethrough: bool = false;
+
+    while (i < text.len) {
+        if (text[i] == '<') {
+            const tag_end = std.mem.indexOfScalarPos(u8, text, i, '>') orelse {
+                try spans.append(allocator, .{
+                    .text = text[i..],
+                    .font_size = cur_size,
+                    .font_weight = cur_weight,
+                    .color = cur_color,
+                    .italic = cur_italic,
+                    .underline = cur_underline,
+                    .strikethrough = cur_strikethrough,
+                });
+                break;
+            };
+            const tag = text[i + 1 .. tag_end];
+
+            if (std.mem.eql(u8, tag, "b")) {
+                cur_weight = 700;
+            } else if (std.mem.eql(u8, tag, "/b")) {
+                cur_weight = base.font_weight;
+            } else if (std.mem.eql(u8, tag, "i")) {
+                cur_italic = true;
+            } else if (std.mem.eql(u8, tag, "/i")) {
+                cur_italic = false;
+            } else if (std.mem.eql(u8, tag, "u")) {
+                cur_underline = true;
+            } else if (std.mem.eql(u8, tag, "/u")) {
+                cur_underline = false;
+            } else if (std.mem.eql(u8, tag, "s")) {
+                cur_strikethrough = true;
+            } else if (std.mem.eql(u8, tag, "/s")) {
+                cur_strikethrough = false;
+            } else if (std.mem.startsWith(u8, tag, "color=")) {
+                const hex_str = tag[6..];
+                if (hex_str.len >= 8) {
+                    cur_color = parseHexColor(hex_str[0..8]) orelse cur_color;
+                } else if (hex_str.len >= 6) {
+                    var buf: [8]u8 = undefined;
+                    @memcpy(buf[0..6], hex_str[0..6]);
+                    buf[6] = 'F';
+                    buf[7] = 'F';
+                    cur_color = parseHexColor(buf[0..8]) orelse cur_color;
+                }
+            } else if (std.mem.eql(u8, tag, "/color")) {
+                cur_color = base.color;
+            } else if (std.mem.startsWith(u8, tag, "size=")) {
+                const size_str = tag[5..];
+                cur_size = std.fmt.parseFloat(f32, size_str) catch cur_size;
+            } else if (std.mem.eql(u8, tag, "/size")) {
+                cur_size = base.font_size;
+            } else {
+                try spans.append(allocator, .{
+                    .text = text[i .. tag_end + 1],
+                    .font_size = cur_size,
+                    .font_weight = cur_weight,
+                    .color = cur_color,
+                    .italic = cur_italic,
+                    .underline = cur_underline,
+                    .strikethrough = cur_strikethrough,
+                });
+                i = tag_end + 1;
+                continue;
+            }
+            i = tag_end + 1;
+        } else {
+            const next_tag = std.mem.indexOfScalarPos(u8, text, i, '<') orelse text.len;
+            if (next_tag > i) {
+                try spans.append(allocator, .{
+                    .text = text[i..next_tag],
+                    .font_size = cur_size,
+                    .font_weight = cur_weight,
+                    .color = cur_color,
+                    .italic = cur_italic,
+                    .underline = cur_underline,
+                    .strikethrough = cur_strikethrough,
+                });
+            }
+            i = next_tag;
+        }
+    }
+
+    return try spans.toOwnedSlice(allocator);
+}
+
+fn parseHexColor(hex: []const u8) ?math.Color {
+    if (hex.len < 6) return null;
+    const r = std.fmt.parseInt(u8, hex[0..2], 16) catch return null;
+    const g = std.fmt.parseInt(u8, hex[2..4], 16) catch return null;
+    const b = std.fmt.parseInt(u8, hex[4..6], 16) catch return null;
+    const a: u8 = if (hex.len >= 8) (std.fmt.parseInt(u8, hex[6..8], 16) catch 0xFF) else 0xFF;
+    return math.Color{ .r = r, .g = g, .b = b, .a = a };
+}
+
+/// 测量 Span 数组的总宽高
+pub fn measureSpans(allocator: std.mem.Allocator, spans: []const TextSpan) math.Size(f32) {
+    if (spans.len == 0) return .{ .width = 0, .height = 14.0 * 1.2 };
+    var total_w: f32 = 0;
+    var max_h: f32 = 0;
+    for (spans) |span| {
+        const size = measureText(allocator, span.text, .{
+            .font_size = span.font_size,
+            .font_weight = span.font_weight,
+        });
+        total_w += size.width;
+        if (size.height > max_h) max_h = size.height;
+    }
+    return .{ .width = total_w, .height = max_h };
+}
+
+/// 绘制 Span 数组 (从左到右, 统一基线)
+pub fn drawSpans(
+    renderer: *r2d.Renderer2D,
+    allocator: std.mem.Allocator,
+    spans: []const TextSpan,
+    x: f32,
+    y: f32,
+) void {
+    var cur_x = x;
+    for (spans) |span| {
+        const span_w = measureTextWidth(allocator, span.text, .{
+            .font_size = span.font_size,
+            .font_weight = span.font_weight,
+        });
+
+        drawText(renderer, allocator, span.text, cur_x, y, .{
+            .font_size = span.font_size,
+            .font_weight = span.font_weight,
+            .color = span.color,
+            .italic = span.italic,
+        });
+
+        // 下划线 (基线下方约 1px)
+        if (span.underline and span_w > 0) {
+            const line_thickness = @max(1.0, span.font_size * 0.08);
+            const underline_y = y + line_thickness;
+            renderer.fillRect(.{
+                .x = cur_x,
+                .y = underline_y,
+                .width = span_w,
+                .height = line_thickness,
+            }, span.color) catch {};
+        }
+
+        // 删除线 (中线位置, 约 x-height 中部)
+        if (span.strikethrough and span_w > 0) {
+            const line_thickness = @max(1.0, span.font_size * 0.08);
+            const strike_y = y - span.font_size * 0.35;
+            renderer.fillRect(.{
+                .x = cur_x,
+                .y = strike_y,
+                .width = span_w,
+                .height = line_thickness,
+            }, span.color) catch {};
+        }
+
+        cur_x += span_w;
+    }
+}
 
 /// 获取字体的 ascent (从基线到字形顶部的距离)
 pub fn getFontAscent(allocator: std.mem.Allocator, font_size: f32, font_weight: u16) f32 {
@@ -132,7 +329,7 @@ pub fn drawText(
             renderer.glyph_atlas.?,
             renderer.device,
             text,
-            .{ .font = &font, .font_size = style.font_size, .max_width = style.max_width, .text_align = style.text_align },
+            .{ .font = &font, .font_size = style.font_size, .max_width = style.max_width, .text_align = style.text_align, .italic = style.italic },
         ) catch return;
         defer tl.deinit();
 
@@ -195,7 +392,7 @@ pub fn drawTextClipped(
         for (0..glyph_count) |i| {
             const sg = shaped[i];
             if (pen_x + sg.x_advance > max_width) break;
-            const entry = atlas.getOrRasterize(device, &font, sg.glyph_id, style.font_size) catch continue;
+            const entry = atlas.getOrRasterizeItalic(device, &font, sg.glyph_id, style.font_size, style.italic) catch continue;
             placed[placed_count] = .{
                 .glyph_id = sg.glyph_id,
                 .x = pen_x,

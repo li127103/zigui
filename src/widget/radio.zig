@@ -79,6 +79,7 @@ pub const Radio = struct {
             .gap = opts.gap,
         };
         self.base.accessibility = .{ .role = .radio, .label = label_text };
+        self.base.cursor = .pointing_hand;
         return self;
     }
 
@@ -283,9 +284,9 @@ test "radio click selects its index" {
     r1.base.rect = .{ .x = 0, .y = 0, .width = 100, .height = 20 };
     var ectx = EventContext{};
 
-    var press = pal.Event{ .mouse_button = .{ .button = .left, .state = .pressed, .x = 5, .y = 5 } };
+    var press = pal.Event{ .mouse_button = .{ .window_id = 0, .button = .left, .state = .pressed, .x = 5, .y = 5 } };
     _ = r1.base.dispatchEvent(&press, &ectx);
-    var release = pal.Event{ .mouse_button = .{ .button = .left, .state = .released, .x = 5, .y = 5 } };
+    var release = pal.Event{ .mouse_button = .{ .window_id = 0, .button = .left, .state = .released, .x = 5, .y = 5 } };
     _ = r1.base.dispatchEvent(&release, &ectx);
 
     try std.testing.expectEqual(@as(usize, 1), group.selected_index);

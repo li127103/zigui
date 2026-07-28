@@ -11,11 +11,19 @@ const styled_text = @import("../text/styled_text.zig");
 const r2d = @import("../render2d/r2d.zig");
 const align_mod = @import("../text/align.zig");
 const clipboard = @import("../pal/clipboard.zig");
+const context_menu_mod = @import("context_menu.zig");
+const ContextMenu = context_menu_mod.ContextMenu;
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
+
+const TextInputUndoItem = struct {
+    text: []u8,
+    cursor: usize,
+    selection_start: ?usize,
+};
 
 pub const TextInput = struct {
     base: Widget,
@@ -26,6 +34,12 @@ pub const TextInput = struct {
     dragging: bool = false, // 鼠标拖拽选择中
     font_size: f32,
     placeholder: []const u8,
+    /// 是否可见文本 (false=密码模式, 显示圆点)
+    visibility: bool = true,
+    /// 密码模式下的遮罩字符
+    password_char: u8 = '*',
+    /// 最大输入长度 (字节; 0=无限)
+    max_length: u32 = 0,
     on_change: ?*const fn (self: *TextInput, text: []const u8) void,
     on_submit: ?*const fn (self: *TextInput, text: []const u8) void,
     // 样式
@@ -46,10 +60,21 @@ pub const TextInput = struct {
     // IME preedit 状态 (由外部通过 setPreedit 设置, 或经 onEvent .ime_preedit 事件)
     preedit_buf: [256]u8 = undefined,
     preedit_len: usize = 0,
+    // 撤销/重做
+    undo_stack: std.ArrayListUnmanaged(TextInputUndoItem) = .{ .items = &.{}, .capacity = 0 },
+    redo_stack: std.ArrayListUnmanaged(TextInputUndoItem) = .{ .items = &.{}, .capacity = 0 },
+    /// 最近一次操作是否是字符插入（用于合并连续输入）
+    last_was_char_insert: bool = false,
+    /// 撤销栈最大长度
+    max_undo: usize = 100,
+    /// 右键上下文菜单
+    context_menu_owned: ?*ContextMenu = null,
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         placeholder: []const u8 = "",
         font_size: f32 = 14.0,
+        visibility: bool = true,
+        max_length: u32 = 0,
         on_change: ?*const fn (self: *TextInput, text: []const u8) void = null,
         on_submit: ?*const fn (self: *TextInput, text: []const u8) void = null,
         text_align: align_mod.TextAlign = .left,
@@ -64,10 +89,28 @@ pub const TextInput = struct {
             .text = .{ .items = &.{}, .capacity = 0 },
             .font_size = opts.font_size,
             .placeholder = opts.placeholder,
+            .visibility = opts.visibility,
+            .max_length = opts.max_length,
             .on_change = opts.on_change,
             .on_submit = opts.on_submit,
             .text_align = opts.text_align,
         };
+        self.base.cursor = .ibeam;
+
+        const menu = try ContextMenu.create(allocator, &.{
+            .{ .label = "撤销", .on_click = undoCallback, .ctx = self },
+            .{ .label = "重做", .on_click = redoCallback, .ctx = self },
+            .{ .is_separator = true },
+            .{ .label = "剪切", .on_click = cutCallback, .ctx = self },
+            .{ .label = "复制", .on_click = copyCallback, .ctx = self },
+            .{ .label = "粘贴", .on_click = pasteCallback, .ctx = self },
+            .{ .is_separator = true },
+            .{ .label = "全选", .on_click = selectAllCallback, .ctx = self },
+        });
+        menu.on_before_show = beforeShowCallback;
+        self.context_menu_owned = menu;
+        self.base.context_menu = menu;
+
         return self;
     }
 
@@ -75,7 +118,106 @@ pub const TextInput = struct {
         self.base.background.deinit(allocator);
         self.text.deinit(allocator);
         self.base.children.deinit(allocator);
+        self.clearUndoStack();
+        self.clearRedoStack();
+        self.undo_stack.deinit(allocator);
+        self.redo_stack.deinit(allocator);
+        if (self.context_menu_owned) |menu| {
+            menu.destroy(allocator);
+        }
         allocator.destroy(self);
+    }
+
+    fn clearUndoStack(self: *TextInput) void {
+        for (self.undo_stack.items) |item| {
+            self.allocator.free(item.text);
+        }
+        self.undo_stack.clearRetainingCapacity();
+    }
+
+    fn clearRedoStack(self: *TextInput) void {
+        for (self.redo_stack.items) |item| {
+            self.allocator.free(item.text);
+        }
+        self.redo_stack.clearRetainingCapacity();
+    }
+
+    fn pushUndoState(self: *TextInput, merge_with_last_insert: bool) void {
+        if (merge_with_last_insert and self.last_was_char_insert and self.undo_stack.items.len > 0) {
+            const last = &self.undo_stack.items[self.undo_stack.items.len - 1];
+            self.allocator.free(last.text);
+            last.* = .{
+                .text = self.allocator.dupe(u8, self.text.items) catch return,
+                .cursor = self.cursor,
+                .selection_start = self.selection_start,
+            };
+            return;
+        }
+
+        const item = TextInputUndoItem{
+            .text = self.allocator.dupe(u8, self.text.items) catch return,
+            .cursor = self.cursor,
+            .selection_start = self.selection_start,
+        };
+
+        if (self.undo_stack.items.len >= self.max_undo) {
+            const oldest = self.undo_stack.orderedRemove(0);
+            self.allocator.free(oldest.text);
+        }
+
+        self.undo_stack.append(self.allocator, item) catch {
+            self.allocator.free(item.text);
+        };
+
+        self.clearRedoStack();
+    }
+
+    pub fn undo(self: *TextInput) void {
+        if (self.undo_stack.items.len == 0) return;
+
+        const current = TextInputUndoItem{
+            .text = self.allocator.dupe(u8, self.text.items) catch return,
+            .cursor = self.cursor,
+            .selection_start = self.selection_start,
+        };
+        self.redo_stack.append(self.allocator, current) catch {
+            self.allocator.free(current.text);
+            return;
+        };
+
+        const prev = self.undo_stack.pop().?;
+        self.text.clearRetainingCapacity();
+        self.text.appendSlice(self.allocator, prev.text) catch {};
+        self.cursor = prev.cursor;
+        self.selection_start = prev.selection_start;
+        self.allocator.free(prev.text);
+        self.last_was_char_insert = false;
+        self.base.markDirty();
+        self.notifyChange();
+    }
+
+    pub fn redo(self: *TextInput) void {
+        if (self.redo_stack.items.len == 0) return;
+
+        const current = TextInputUndoItem{
+            .text = self.allocator.dupe(u8, self.text.items) catch return,
+            .cursor = self.cursor,
+            .selection_start = self.selection_start,
+        };
+        self.undo_stack.append(self.allocator, current) catch {
+            self.allocator.free(current.text);
+            return;
+        };
+
+        const next = self.redo_stack.pop().?;
+        self.text.clearRetainingCapacity();
+        self.text.appendSlice(self.allocator, next.text) catch {};
+        self.cursor = next.cursor;
+        self.selection_start = next.selection_start;
+        self.allocator.free(next.text);
+        self.last_was_char_insert = false;
+        self.base.markDirty();
+        self.notifyChange();
     }
 
     pub fn getText(self: *const TextInput) []const u8 {
@@ -120,10 +262,20 @@ pub const TextInput = struct {
 
     /// 在光标处插入 UTF-8 字节 (IME 提交或外部调用)
     pub fn insertBytes(self: *TextInput, bytes: []const u8) void {
-        if (self.hasSelection()) self.deleteSelection();
-        self.text.insertSlice(self.allocator, self.cursor, bytes) catch return;
-        self.cursor += bytes.len;
+        self.pushUndoState(bytes.len == 1);
+        if (self.hasSelection()) self.deleteSelectionNoUndo();
+        // max_length 限制 (字节级)
+        if (self.max_length > 0 and self.text.items.len + bytes.len > self.max_length) {
+            const allowed = self.max_length - self.text.items.len;
+            if (allowed == 0) return;
+            self.text.insertSlice(self.allocator, self.cursor, bytes[0..allowed]) catch return;
+            self.cursor += allowed;
+        } else {
+            self.text.insertSlice(self.allocator, self.cursor, bytes) catch return;
+            self.cursor += bytes.len;
+        }
         self.selection_start = null;
+        self.last_was_char_insert = bytes.len == 1;
         self.notifyChange();
         self.base.markDirty();
     }
@@ -137,6 +289,7 @@ pub const TextInput = struct {
 
     /// 删除光标前 n 个 codepoint (IME delete_surrounding_text)
     pub fn deleteBeforeCursor(self: *TextInput, n_codepoints: usize) void {
+        self.pushUndoState(false);
         var i: usize = 0;
         while (i < n_codepoints and self.cursor > 0) : (i += 1) {
             // 回退一个 UTF-8 codepoint
@@ -150,6 +303,7 @@ pub const TextInput = struct {
             self.cursor = start;
         }
         self.selection_start = null;
+        self.last_was_char_insert = false;
         self.notifyChange();
         self.base.markDirty();
     }
@@ -212,17 +366,26 @@ pub const TextInput = struct {
         } else {
             // 对齐偏移
             const style = styled_text.TextStyle{ .font_size = self.font_size, .font_weight = 400 };
-            const text_w = styled_text.measureTextWidth(ctx.allocator, self.text.items, style);
+
+            // 密码模式: 构建遮罩字符串
+            var mask_buf: [256]u8 = undefined;
+            const display_text = if (!self.visibility) blk: {
+                const len = @min(self.text.items.len, mask_buf.len);
+                @memset(mask_buf[0..len], self.password_char);
+                break :blk mask_buf[0..len];
+            } else self.text.items;
+
+            const text_w = styled_text.measureTextWidth(ctx.allocator, display_text, style);
             const offset = self.alignOffset(text_w, max_w);
 
             // 选区高亮 (精确文本测量)
             if (self.hasSelection()) {
                 const sel_start = @min(self.selection_start.?, self.cursor);
                 const sel_end = @max(self.selection_start.?, self.cursor);
-                const s0 = @min(sel_start, self.text.items.len);
-                const s1 = @min(sel_end, self.text.items.len);
-                const w0 = styled_text.measureTextWidth(ctx.allocator, self.text.items[0..s0], style);
-                const w1 = styled_text.measureTextWidth(ctx.allocator, self.text.items[0..s1], style);
+                const s0 = @min(sel_start, display_text.len);
+                const s1 = @min(sel_end, display_text.len);
+                const w0 = styled_text.measureTextWidth(ctx.allocator, display_text[0..s0], style);
+                const w1 = styled_text.measureTextWidth(ctx.allocator, display_text[0..s1], style);
                 const hx0 = @max(text_x + offset + w0, rx);
                 const hx1 = @min(text_x + offset + w1, rx + rw);
                 if (hx1 > hx0) {
@@ -237,7 +400,7 @@ pub const TextInput = struct {
             const committed_w = styled_text.drawTextClipped(
                 ctx.renderer,
                 ctx.allocator,
-                self.text.items,
+                display_text,
                 text_x + offset,
                 text_y,
                 .{ .font_size = self.font_size, .font_weight = 400, .color = self.text_color },
@@ -339,6 +502,7 @@ pub const TextInput = struct {
                         if (self.hasSelection()) {
                             self.deleteSelection();
                         } else if (self.cursor > 0) {
+                            self.pushUndoState(false);
                             // 回退一个 UTF-8 codepoint
                             var pos = self.cursor - 1;
                             while (pos > 0 and (self.text.items[pos] & 0xC0) == 0x80) : (pos -= 1) {}
@@ -348,6 +512,7 @@ pub const TextInput = struct {
                                 _ = self.text.orderedRemove(j - 1);
                             }
                             self.cursor = start;
+                            self.last_was_char_insert = false;
                             self.notifyChange();
                         }
                         self.selection_start = null;
@@ -358,7 +523,9 @@ pub const TextInput = struct {
                         if (self.hasSelection()) {
                             self.deleteSelection();
                         } else if (self.cursor < self.text.items.len) {
+                            self.pushUndoState(false);
                             _ = self.text.orderedRemove(self.cursor);
+                            self.last_was_char_insert = false;
                             self.notifyChange();
                         }
                         self.selection_start = null;
@@ -411,6 +578,24 @@ pub const TextInput = struct {
                                 defer self.allocator.free(pasted);
                                 if (pasted.len > 0) self.insertBytes(pasted);
                             } else |_| {}
+                            return .handled;
+                        }
+                    },
+                    // Cmd/Ctrl+Z 撤销
+                    .z => {
+                        if (k.modifiers.super_key or k.modifiers.ctrl) {
+                            if (k.modifiers.shift) {
+                                self.redo();
+                            } else {
+                                self.undo();
+                            }
+                            return .handled;
+                        }
+                    },
+                    // Ctrl+Y 重做
+                    .y => {
+                        if (k.modifiers.ctrl) {
+                            self.redo();
                             return .handled;
                         }
                     },
@@ -480,6 +665,13 @@ pub const TextInput = struct {
 
     fn deleteSelection(self: *TextInput) void {
         if (!self.hasSelection()) return;
+        self.pushUndoState(false);
+        self.deleteSelectionNoUndo();
+        self.last_was_char_insert = false;
+    }
+
+    fn deleteSelectionNoUndo(self: *TextInput) void {
+        if (!self.hasSelection()) return;
         const start = @min(self.selection_start.?, self.cursor);
         const end = @max(self.selection_start.?, self.cursor);
         var i: usize = end;
@@ -518,3 +710,116 @@ pub const TextInput = struct {
         }
     }
 };
+
+// ── Context Menu Callbacks ─────────────────────────────────────────────────
+
+fn undoCallback(ctx: ?*anyopaque) void {
+    const self: *TextInput = @ptrCast(@alignCast(ctx orelse return));
+    self.undo();
+}
+
+fn redoCallback(ctx: ?*anyopaque) void {
+    const self: *TextInput = @ptrCast(@alignCast(ctx orelse return));
+    self.redo();
+}
+
+fn cutCallback(ctx: ?*anyopaque) void {
+    const self: *TextInput = @ptrCast(@alignCast(ctx orelse return));
+    if (self.hasSelection()) {
+        const s = @min(self.selection_start.?, self.cursor);
+        const e = @max(self.selection_start.?, self.cursor);
+        clipboard.setText(self.text.items[s..e]) catch {};
+        self.deleteSelection();
+        self.base.markDirty();
+    }
+}
+
+fn copyCallback(ctx: ?*anyopaque) void {
+    const self: *TextInput = @ptrCast(@alignCast(ctx orelse return));
+    if (self.hasSelection()) {
+        const s = @min(self.selection_start.?, self.cursor);
+        const e = @max(self.selection_start.?, self.cursor);
+        clipboard.setText(self.text.items[s..e]) catch {};
+    }
+}
+
+fn pasteCallback(ctx: ?*anyopaque) void {
+    const self: *TextInput = @ptrCast(@alignCast(ctx orelse return));
+    if (clipboard.getText(self.allocator)) |pasted| {
+        defer self.allocator.free(pasted);
+        if (pasted.len > 0) self.insertBytes(pasted);
+    } else |_| {}
+}
+
+fn selectAllCallback(ctx: ?*anyopaque) void {
+    const self: *TextInput = @ptrCast(@alignCast(ctx orelse return));
+    self.selection_start = 0;
+    self.cursor = self.text.items.len;
+    self.base.markDirty();
+}
+
+fn beforeShowCallback(menu: *ContextMenu) void {
+    const self: *TextInput = blk: {
+        if (menu.items.items.len == 0) return;
+        const first = menu.items.items[0];
+        const ctx = first.ctx orelse return;
+        break :blk @ptrCast(@alignCast(ctx));
+    };
+
+    const has_undo = self.undo_stack.items.len > 0;
+    const has_redo = self.redo_stack.items.len > 0;
+    const has_sel = self.hasSelection();
+    const has_paste = clipboard.getText(self.allocator) catch null != null;
+
+    menu.setItemDisabled(0, !has_undo);
+    menu.setItemDisabled(1, !has_redo);
+    menu.setItemDisabled(3, !has_sel);
+    menu.setItemDisabled(4, !has_sel);
+    menu.setItemDisabled(5, !has_paste);
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+test "password input in ScrollView receives focus on click and accepts text" {
+    const alloc = std.testing.allocator;
+    const Container = @import("container.zig").Container;
+    const ScrollView = @import("scroll_view.zig").ScrollView;
+
+    const root = try Container.create(alloc, .{});
+    defer root.destroy(alloc);
+    root.base.rect = .{ .x = 0, .y = 0, .width = 400, .height = 400 };
+
+    const sv = try ScrollView.create(alloc, .{ .width = 400, .height = 400 });
+    try root.base.addChild(alloc, &sv.base);
+    sv.base.rect = .{ .x = 0, .y = 0, .width = 400, .height = 400 };
+
+    const content = try Container.create(alloc, .{ .direction = .column });
+    try sv.base.addChild(alloc, &content.base);
+    content.base.rect = .{ .x = 0, .y = 0, .width = 400, .height = 800 };
+
+    // 密码输入框 (visibility=false)
+    const pwd = try TextInput.create(alloc, .{
+        .placeholder = "password",
+        .visibility = false,
+        .max_length = 16,
+    });
+    try content.base.addChild(alloc, &pwd.base);
+    pwd.base.rect = .{ .x = 16, .y = 16, .width = 250, .height = 38 };
+
+    var ectx = EventContext{ .mouse_x = 50, .mouse_y = 50 };
+
+    // 1. 点击密码框 → 应自动聚焦
+    var click = pal.Event{ .mouse_button = .{ .window_id = 0, .button = .left, .state = .pressed, .x = 50, .y = 50 } };
+    _ = root.base.dispatchEvent(&click, &ectx);
+    try std.testing.expect(pwd.base.state.focused);
+
+    // 2. 输入字符 → 应插入文本
+    var ti = pal.Event{ .text_input = .{ .window_id = 0, .codepoint = 'a' } };
+    _ = root.base.dispatchEvent(&ti, &ectx);
+    try std.testing.expectEqualStrings("a", pwd.getText());
+
+    // 3. 再输入一个字符
+    var ti2 = pal.Event{ .text_input = .{ .window_id = 0, .codepoint = 'b' } };
+    _ = root.base.dispatchEvent(&ti2, &ectx);
+    try std.testing.expectEqualStrings("ab", pwd.getText());
+}

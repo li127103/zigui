@@ -21,6 +21,10 @@ pub const math = @import("math.zig");
 
 // 性能监控 (帧时间统计)
 pub const perf = @import("perf.zig");
+pub const shortcut = @import("shortcut.zig");
+pub const dnd = @import("dnd.zig");
+pub const builder = @import("builder.zig");
+pub const window = @import("window.zig");
 
 // 平台特定 App
 pub const app = if (is_windows) @import("app_windows.zig") else if (is_linux) @import("app_linux.zig") else @import("app.zig");
@@ -66,15 +70,20 @@ pub const image = @import("image/png.zig");
 // 控件
 pub const label = @import("widget/label.zig");
 pub const button = @import("widget/button.zig");
+pub const icons = @import("widget/icons.zig");
 pub const container = @import("widget/container.zig");
 pub const canvas = @import("widget/canvas.zig");
 pub const slider = @import("widget/slider.zig");
+pub const scale = @import("widget/scale.zig");
 pub const text_input = @import("widget/text_input.zig");
 pub const combo_box = @import("widget/combo_box.zig");
 pub const list_view = @import("widget/list_view.zig");
 pub const tab_view = @import("widget/tab_view.zig");
 pub const dialog = @import("widget/dialog.zig");
+pub const assistant = @import("widget/assistant.zig");
 pub const tooltip = @import("widget/tooltip.zig");
+pub const tooltip_controller = @import("widget/tooltip_controller.zig");
+pub const context_menu = @import("widget/context_menu.zig");
 pub const text_area = @import("widget/text_area.zig");
 pub const menu = @import("widget/menu.zig");
 pub const split_view = @import("widget/split_view.zig");
@@ -101,6 +110,11 @@ pub const grid = @import("widget/grid.zig");
 pub const menu_bar = @import("widget/menu_bar.zig");
 pub const stack = @import("widget/stack.zig");
 pub const frame = @import("widget/frame.zig");
+pub const file_chooser = @import("widget/file_chooser.zig");
+pub const color_button = @import("widget/color_button.zig");
+pub const color_chooser = @import("widget/color_chooser.zig");
+pub const font_button = @import("widget/font_button.zig");
+pub const font_chooser = @import("widget/font_chooser.zig");
 pub const center_box = @import("widget/center_box.zig");
 pub const flow_box = @import("widget/flow_box.zig");
 pub const overlay = @import("widget/overlay.zig");
@@ -112,6 +126,20 @@ pub const popover = @import("widget/popover.zig");
 pub const action_bar = @import("widget/action_bar.zig");
 pub const header_bar = @import("widget/header_bar.zig");
 pub const fixed = @import("widget/fixed.zig");
+pub const info_bar = @import("widget/info_bar.zig");
+pub const search_entry = @import("widget/search_entry.zig");
+pub const search_bar = @import("widget/search_bar.zig");
+pub const menu_button = @import("widget/menu_button.zig");
+pub const drop_down = @import("widget/drop_down.zig");
+pub const level_bar = @import("widget/level_bar.zig");
+pub const calendar = @import("widget/calendar.zig");
+pub const list_box = @import("widget/list_box.zig");
+pub const about_dialog = @import("widget/about_dialog.zig");
+pub const volume_button = @import("widget/volume_button.zig");
+pub const app_chooser_button = @import("widget/app_chooser_button.zig");
+pub const shortcut_label = @import("widget/shortcut_label.zig");
+pub const emoji_chooser = @import("widget/emoji_chooser.zig");
+pub const file_chooser_button = @import("widget/file_chooser_button.zig");
 
 // 控件背景 (颜色/图片, 框架自主绘制)
 pub const background = @import("widget/background.zig");
@@ -126,6 +154,7 @@ test {
     _ = animation;
     _ = widget;
     _ = dirty;
+    _ = builder;
     _ = split_view;
     _ = tree_view;
     _ = table;
@@ -163,6 +192,13 @@ test {
     _ = action_bar;
     _ = header_bar;
     _ = fixed;
+    _ = list_box;
+    _ = about_dialog;
+    _ = volume_button;
+    _ = app_chooser_button;
+    _ = shortcut_label;
+    _ = emoji_chooser;
+    _ = file_chooser_button;
     _ = perf;
     if (is_linux) {
         _ = x11;

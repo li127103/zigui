@@ -18,6 +18,21 @@ const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
 });
 
+const SubWindowData = struct {
+    window_id: u32,
+    title: []u8,
+    width: u32,
+    height: u32,
+    visible: bool,
+    configured: bool = false,
+    maximized: bool = false,
+    surface: ?*wl.struct_wl_surface = null,
+    xdg_surface: ?*wl.struct_xdg_surface = null,
+    toplevel: ?*wl.struct_xdg_toplevel = null,
+    decoration: ?*wl.struct_zxdg_toplevel_decoration_v1 = null,
+    backend: *WaylandBackend,
+};
+
 pub const WaylandBackend = struct {
     allocator: std.mem.Allocator,
     display: *wl.struct_wl_display,
@@ -28,7 +43,13 @@ pub const WaylandBackend = struct {
     seat: ?*wl.struct_wl_seat = null,
     keyboard: ?*wl.struct_wl_keyboard = null,
     pointer: ?*wl.struct_wl_pointer = null,
-    // 窗口
+    next_window_id: u32 = 1,
+    sub_windows: std.AutoHashMapUnmanaged(u32, *SubWindowData) = .{},
+    /// 当前键盘焦点窗口 ID (0 = 主窗口)
+    keyboard_focus_window_id: u32 = 0,
+    /// 当前指针焦点窗口 ID (0 = 主窗口)
+    pointer_focus_window_id: u32 = 0,
+    // 主窗口
     surface: ?*wl.struct_wl_surface = null,
     xdg_surface: ?*wl.struct_xdg_surface = null,
     toplevel: ?*wl.struct_xdg_toplevel = null,
@@ -119,6 +140,14 @@ pub const WaylandBackend = struct {
         if (self.data_device_manager) |ddm| _ = wl.wl_data_device_manager_destroy(ddm);
         if (self.keyboard) |kb| _ = wl.wl_keyboard_destroy(kb);
         if (self.pointer) |p| _ = wl.wl_pointer_destroy(p);
+
+        // 清理子窗口
+        var sub_it = self.sub_windows.valueIterator();
+        while (sub_it.next()) |sw| {
+            self.destroySubWindowData(sw.*);
+        }
+        self.sub_windows.deinit(self.allocator);
+
         if (self.toplevel) |t| _ = wl.xdg_toplevel_destroy(t);
         if (self.xdg_surface) |xs| _ = wl.xdg_surface_destroy(xs);
         if (self.surface) |s| _ = wl.wl_surface_destroy(s);
@@ -128,6 +157,15 @@ pub const WaylandBackend = struct {
         if (self.compositor) |c| _ = wl.wl_compositor_destroy(c);
         _ = wl.wl_registry_destroy(self.registry);
         wl.wl_display_disconnect(self.display);
+    }
+
+    fn destroySubWindowData(self: *WaylandBackend, sw: *SubWindowData) void {
+        if (sw.decoration) |d| _ = wl.zxdg_toplevel_decoration_v1_destroy(d);
+        if (sw.toplevel) |t| _ = wl.xdg_toplevel_destroy(t);
+        if (sw.xdg_surface) |xs| _ = wl.xdg_surface_destroy(xs);
+        if (sw.surface) |s| _ = wl.wl_surface_destroy(s);
+        self.allocator.free(sw.title);
+        self.allocator.destroy(sw);
     }
 
     /// 创建窗口
@@ -199,6 +237,129 @@ pub const WaylandBackend = struct {
                 }
             }
         }
+    }
+
+    /// 创建子窗口
+    pub fn createSubWindow(self: *WaylandBackend, title: []const u8, width: u32, height: u32) !u32 {
+        const compositor = self.compositor orelse return error.NoCompositor;
+        const xdg_wm = self.xdg_wm_base orelse return error.NoXdgShell;
+
+        const wid = self.next_window_id;
+        self.next_window_id += 1;
+
+        const sw = try self.allocator.create(SubWindowData);
+        sw.* = .{
+            .window_id = wid,
+            .title = try self.allocator.dupe(u8, title),
+            .width = width,
+            .height = height,
+            .visible = true,
+            .backend = self,
+        };
+
+        const surface = wl.wl_compositor_create_surface(compositor) orelse {
+            self.allocator.free(sw.title);
+            self.allocator.destroy(sw);
+            return error.SurfaceFailed;
+        };
+        const xdg_surface = wl.xdg_wm_base_get_xdg_surface(xdg_wm, surface) orelse {
+            wl.wl_surface_destroy(surface);
+            self.allocator.free(sw.title);
+            self.allocator.destroy(sw);
+            return error.XdgSurfaceFailed;
+        };
+        const toplevel = wl.xdg_surface_get_toplevel(xdg_surface) orelse {
+            wl.xdg_surface_destroy(xdg_surface);
+            wl.wl_surface_destroy(surface);
+            self.allocator.free(sw.title);
+            self.allocator.destroy(sw);
+            return error.ToplevelFailed;
+        };
+
+        _ = wl.xdg_toplevel_set_title(toplevel, sw.title.ptr);
+        _ = wl.xdg_toplevel_set_app_id(toplevel, "zigui");
+
+        if (self.decoration_manager) |dm| {
+            const decoration = wl.zxdg_decoration_manager_v1_get_toplevel_decoration(dm, toplevel);
+            if (decoration) |d| {
+                _ = wl.zxdg_toplevel_decoration_v1_set_mode(d, wl.ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+                sw.decoration = d;
+            }
+        }
+
+        _ = wl.xdg_surface_add_listener(xdg_surface, &sub_xdg_surface_listener, sw);
+        _ = wl.xdg_toplevel_add_listener(toplevel, &sub_xdg_toplevel_listener, sw);
+
+        wl.wl_surface_commit(surface);
+        _ = wl.wl_display_roundtrip(self.display);
+
+        wl.xdg_toplevel_set_min_size(toplevel, @intCast(width), @intCast(height));
+        wl.xdg_toplevel_set_max_size(toplevel, @intCast(width), @intCast(height));
+        wl.wl_surface_commit(surface);
+
+        sw.surface = surface;
+        sw.xdg_surface = xdg_surface;
+        sw.toplevel = toplevel;
+
+        try self.sub_windows.put(self.allocator, wid, sw);
+        return wid;
+    }
+
+    /// 销毁子窗口
+    pub fn destroySubWindow(self: *WaylandBackend, wid: u32) void {
+        if (self.sub_windows.get(wid)) |sw| {
+            self.destroySubWindowData(sw);
+            _ = self.sub_windows.remove(wid);
+        }
+    }
+
+    /// 显示子窗口
+    pub fn showSubWindow(self: *WaylandBackend, wid: u32) void {
+        if (self.sub_windows.get(wid)) |sw| {
+            sw.visible = true;
+            if (sw.surface) |s| {
+                wl.wl_surface_commit(s);
+            }
+        }
+    }
+
+    /// 隐藏子窗口
+    pub fn hideSubWindow(self: *WaylandBackend, wid: u32) void {
+        if (self.sub_windows.get(wid)) |sw| {
+            sw.visible = false;
+        }
+    }
+
+    /// 设置子窗口标题
+    pub fn setSubWindowTitle(self: *WaylandBackend, wid: u32, title: []const u8) void {
+        if (self.sub_windows.get(wid)) |sw| {
+            self.allocator.free(sw.title);
+            sw.title = self.allocator.dupe(u8, title) catch return;
+            if (sw.toplevel) |t| {
+                _ = wl.xdg_toplevel_set_title(t, sw.title.ptr);
+            }
+        }
+    }
+
+    /// 获取子窗口表面 (用于 Vulkan swapchain 创建)
+    pub fn getSubWindowSurface(self: *WaylandBackend, wid: u32) ?*wl.struct_wl_surface {
+        const sw = self.sub_windows.get(wid) orelse return null;
+        return sw.surface;
+    }
+
+    /// 根据 surface 指针查找对应的 window_id (0 = 主窗口)
+    pub fn getWindowIdFromSurface(self: *WaylandBackend, surface: ?*wl.struct_wl_surface) u32 {
+        const s = surface orelse return 0;
+        if (self.surface) |main_s| {
+            if (main_s == s) return 0;
+        }
+        var it = self.sub_windows.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.*.surface == s) {
+                return entry.key_ptr.*;
+            }
+        }
+        return 0;
     }
 
     /// 轮询事件
@@ -521,7 +682,7 @@ fn xdgToplevelConfigure(
     if (width > 0 and height > 0) {
         self.width = @intCast(width);
         self.height = @intCast(height);
-        self.pushEvent(.{ .resize = .{ .width = self.width, .height = self.height } });
+        self.pushEvent(.{ .resize = .{ .window_id = 0, .width = self.width, .height = self.height } });
     }
     // 解析 states 数组检测最大化状态
     if (states) |arr| {
@@ -538,7 +699,7 @@ fn xdgToplevelConfigure(
             }
             if (is_maximized != self.maximized) {
                 self.maximized = is_maximized;
-                self.pushEvent(.{ .maximize = .{ .maximized = is_maximized } });
+                self.pushEvent(.{ .maximize = .{ .window_id = 0, .maximized = is_maximized } });
             }
         }
     }
@@ -626,19 +787,25 @@ fn keyboardKeymap(
 }
 
 fn keyboardEnter(
-    _: ?*anyopaque,
+    data: ?*anyopaque,
     _: ?*wl.struct_wl_keyboard,
     _: u32,
-    _: ?*wl.struct_wl_surface,
+    surface: ?*wl.struct_wl_surface,
     _: ?*wl.struct_wl_array,
-) callconv(.c) void {}
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    self.keyboard_focus_window_id = self.getWindowIdFromSurface(surface);
+}
 
 fn keyboardLeave(
-    _: ?*anyopaque,
+    data: ?*anyopaque,
     _: ?*wl.struct_wl_keyboard,
     _: u32,
     _: ?*wl.struct_wl_surface,
-) callconv(.c) void {}
+) callconv(.c) void {
+    const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    self.keyboard_focus_window_id = 0;
+}
 
 fn keyboardKey(
     data: ?*anyopaque,
@@ -666,7 +833,9 @@ fn keyboardKey(
         if (keysym != xkb.XKB_KEY_NoSymbol) {
             const btn_state: event_mod.ButtonState = if (pressed) .pressed else .released;
             const key_code = keysymToKeyCode(keysym);
+            const wid = self.keyboard_focus_window_id;
             self.pushEvent(.{ .key = .{
+                .window_id = wid,
                 .state = btn_state,
                 .key = key_code,
                 .modifiers = self.mods,
@@ -681,7 +850,7 @@ fn keyboardKey(
                     const ulen: usize = @intCast(len);
                     const cp = std.unicode.utf8Decode(buf[0 .. ulen - 1]) catch 0;
                     if (cp >= 0x20) { // 排除控制字符
-                        self.pushEvent(.{ .text_input = .{ .codepoint = cp } });
+                        self.pushEvent(.{ .text_input = .{ .window_id = wid, .codepoint = cp } });
                     }
                 }
             }
@@ -770,7 +939,8 @@ fn textInputLeave(
     wl.zwp_text_input_v3_disable(t);
     wl.zwp_text_input_v3_commit(t);
     // 组合结束: 推送空 preedit
-    self.pushEvent(.{ .ime_preedit = .{ .text = undefined, .len = 0, .cursor_begin = 0, .cursor_end = 0 } });
+    const wid = self.keyboard_focus_window_id;
+    self.pushEvent(.{ .ime_preedit = .{ .window_id = wid, .text = undefined, .len = 0, .cursor_begin = 0, .cursor_end = 0 } });
 }
 
 fn textInputPreeditString(
@@ -783,7 +953,8 @@ fn textInputPreeditString(
     const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
     var buf: [event_mod.max_ime_text]u8 = undefined;
     const len = copyImeText(text, &buf);
-    self.pushEvent(.{ .ime_preedit = .{ .text = buf, .len = len, .cursor_begin = cursor_begin, .cursor_end = cursor_end } });
+    const wid = self.keyboard_focus_window_id;
+    self.pushEvent(.{ .ime_preedit = .{ .window_id = wid, .text = buf, .len = len, .cursor_begin = cursor_begin, .cursor_end = cursor_end } });
 }
 
 fn textInputCommitString(
@@ -794,8 +965,9 @@ fn textInputCommitString(
     const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
     var buf: [event_mod.max_ime_text]u8 = undefined;
     const len = copyImeText(text, &buf);
+    const wid = self.keyboard_focus_window_id;
     if (len > 0) {
-        self.pushEvent(.{ .ime_commit = .{ .text = buf, .len = len } });
+        self.pushEvent(.{ .ime_commit = .{ .window_id = wid, .text = buf, .len = len } });
     }
 }
 
@@ -806,7 +978,8 @@ fn textInputDeleteSurroundingText(
     after_length: u32,
 ) callconv(.c) void {
     const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
-    self.pushEvent(.{ .ime_delete = .{ .before_length = before_length, .after_length = after_length } });
+    const wid = self.keyboard_focus_window_id;
+    self.pushEvent(.{ .ime_delete = .{ .window_id = wid, .before_length = before_length, .after_length = after_length } });
 }
 
 fn textInputDone(
@@ -859,14 +1032,17 @@ fn pointerEnter(
     data: ?*anyopaque,
     _: ?*wl.struct_wl_pointer,
     _: u32,
-    _: ?*wl.struct_wl_surface,
+    surface: ?*wl.struct_wl_surface,
     sx: wl.wl_fixed_t,
     sy: wl.wl_fixed_t,
 ) callconv(.c) void {
     const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
+    self.pointer_focus_window_id = self.getWindowIdFromSurface(surface);
     self.pointer_x = wl.wl_fixed_to_double(sx);
     self.pointer_y = wl.wl_fixed_to_double(sy);
+    const wid = self.pointer_focus_window_id;
     self.pushEvent(.{ .mouse_move = .{
+        .window_id = wid,
         .x = @intFromFloat(@round(self.pointer_x)),
         .y = @intFromFloat(@round(self.pointer_y)),
     } });
@@ -879,7 +1055,9 @@ fn pointerLeave(
     _: ?*wl.struct_wl_surface,
 ) callconv(.c) void {
     const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
-    self.pushEvent(.mouse_leave);
+    const wid = self.pointer_focus_window_id;
+    self.pointer_focus_window_id = 0;
+    self.pushEvent(.{ .mouse_leave = .{ .window_id = wid } });
 }
 
 fn pointerMotion(
@@ -892,7 +1070,9 @@ fn pointerMotion(
     const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
     self.pointer_x = wl.wl_fixed_to_double(sx);
     self.pointer_y = wl.wl_fixed_to_double(sy);
+    const wid = self.pointer_focus_window_id;
     self.pushEvent(.{ .mouse_move = .{
+        .window_id = wid,
         .x = @intFromFloat(@round(self.pointer_x)),
         .y = @intFromFloat(@round(self.pointer_y)),
     } });
@@ -915,7 +1095,9 @@ fn pointerButton(
         0x112 => .middle, // BTN_MIDDLE
         else => .left,
     };
+    const wid = self.pointer_focus_window_id;
     self.pushEvent(.{ .mouse_button = .{
+        .window_id = wid,
         .button = btn,
         .state = btn_state,
         .x = @intFromFloat(@round(self.pointer_x)),
@@ -933,7 +1115,8 @@ fn pointerAxis(
     const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
     const delta: f32 = @floatCast(-wl.wl_fixed_to_double(value) / 10.0);
     const scroll_axis: event_mod.ScrollAxis = if (axis == wl.WL_POINTER_AXIS_VERTICAL_SCROLL) .vertical else .horizontal;
-    self.pushEvent(.{ .scroll = .{ .axis = scroll_axis, .delta = delta } });
+    const wid = self.pointer_focus_window_id;
+    self.pushEvent(.{ .scroll = .{ .window_id = wid, .axis = scroll_axis, .delta = delta } });
 }
 
 fn pointerFrame(
@@ -1209,7 +1392,8 @@ fn dataDeviceDrop(
     const n = @min(path.len, fd.path.len);
     @memcpy(fd.path[0..n], path[0..n]);
     fd.path_len = @intCast(n);
-    self.pushEvent(.{ .file_drop = fd });
+    const wid = self.pointer_focus_window_id;
+    self.pushEvent(.{ .file_drop = .{ .window_id = wid, .file_drop = fd } });
 }
 
 /// wl_fixed_t (24.8 定点) 转整数像素
@@ -1267,6 +1451,95 @@ fn percentDecode(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     }
     return allocator.realloc(out, j) catch out[0..j];
 }
+
+// ── Sub-window XDG Surface Listener ────────────────────────────────────────
+
+fn subXdgSurfaceConfigure(
+    data: ?*anyopaque,
+    _: ?*wl.struct_xdg_surface,
+    serial: u32,
+) callconv(.c) void {
+    const sw: *SubWindowData = @ptrCast(@alignCast(data.?));
+    const self = sw.backend;
+    const s = sw.surface orelse return;
+    const xdg_surface = sw.xdg_surface orelse return;
+
+    if (!sw.configured) {
+        const scale: i32 = @intFromFloat(self.scale_factor);
+        if (scale >= 1) wl.wl_surface_set_buffer_scale(s, scale);
+    }
+    wl.xdg_surface_ack_configure(xdg_surface, serial);
+    sw.configured = true;
+}
+
+const sub_xdg_surface_listener = wl.xdg_surface_listener{
+    .configure = subXdgSurfaceConfigure,
+};
+
+// ── Sub-window XDG Toplevel Listener ───────────────────────────────────────
+
+fn subXdgToplevelConfigure(
+    data: ?*anyopaque,
+    _: ?*wl.struct_xdg_toplevel,
+    width: i32,
+    height: i32,
+    states: ?*wl.struct_wl_array,
+) callconv(.c) void {
+    const sw: *SubWindowData = @ptrCast(@alignCast(data.?));
+    const self = sw.backend;
+    if (width > 0 and height > 0) {
+        sw.width = @intCast(width);
+        sw.height = @intCast(height);
+        self.pushEvent(.{ .resize = .{ .window_id = sw.window_id, .width = sw.width, .height = sw.height } });
+    }
+    if (states) |arr| {
+        const count = arr.size / @sizeOf(u32);
+        if (count > 0) {
+            const data_ptr: [*]const u32 = @ptrCast(@alignCast(arr.data));
+            const slice = data_ptr[0..count];
+            var is_maximized = false;
+            for (slice) |s| {
+                if (s == wl.XDG_TOPLEVEL_STATE_MAXIMIZED) {
+                    is_maximized = true;
+                    break;
+                }
+            }
+            if (is_maximized != sw.maximized) {
+                sw.maximized = is_maximized;
+                self.pushEvent(.{ .maximize = .{ .window_id = sw.window_id, .maximized = is_maximized } });
+            }
+        }
+    }
+}
+
+fn subXdgToplevelClose(
+    data: ?*anyopaque,
+    _: ?*wl.struct_xdg_toplevel,
+) callconv(.c) void {
+    const sw: *SubWindowData = @ptrCast(@alignCast(data.?));
+    const self = sw.backend;
+    self.pushEvent(.{ .close_requested = .{ .window_id = sw.window_id } });
+}
+
+fn subXdgToplevelConfigureBounds(
+    _: ?*anyopaque,
+    _: ?*wl.struct_xdg_toplevel,
+    _: i32,
+    _: i32,
+) callconv(.c) void {}
+
+fn subXdgToplevelWmCapabilities(
+    _: ?*anyopaque,
+    _: ?*wl.struct_xdg_toplevel,
+    _: ?*wl.struct_wl_array,
+) callconv(.c) void {}
+
+const sub_xdg_toplevel_listener = wl.xdg_toplevel_listener{
+    .configure = subXdgToplevelConfigure,
+    .close = subXdgToplevelClose,
+    .configure_bounds = subXdgToplevelConfigureBounds,
+    .wm_capabilities = subXdgToplevelWmCapabilities,
+};
 
 // ── Tests (文件拖放 URI 解析) ──────────────────────────────────────
 

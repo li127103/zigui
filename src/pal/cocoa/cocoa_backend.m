@@ -22,6 +22,49 @@ enum {
 
 static bool g_should_quit = false;
 
+/* ── 子窗口管理 ──────────────────────────────────────────────────────────── */
+
+#define ZG_MAX_SUB_WINDOWS 32
+
+typedef struct {
+    uint32_t window_id;
+    void *ns_window;       // __bridge NSWindow *
+    void *content_view;    // __bridge ZiguiContentView *
+    void *metal_layer;     // __bridge CAMetalLayer *
+    uint32_t width;
+    uint32_t height;
+    float scale_factor;
+    bool visible;
+} ZgSubWindow;
+
+static ZgSubWindow g_sub_windows[ZG_MAX_SUB_WINDOWS];
+static int g_sub_window_count = 0;
+static uint32_t g_next_sub_window_id = 1; // 0 保留给主窗口
+
+static ZgSubWindow *zgFindSubWindow(uint32_t window_id) {
+    for (int i = 0; i < g_sub_window_count; i++) {
+        if (g_sub_windows[i].window_id == window_id) {
+            return &g_sub_windows[i];
+        }
+    }
+    return NULL;
+}
+
+static ZgSubWindow *zgFindSubWindowByNSWindow(void *ns_window) {
+    for (int i = 0; i < g_sub_window_count; i++) {
+        if (g_sub_windows[i].ns_window == ns_window) {
+            return &g_sub_windows[i];
+        }
+    }
+    return NULL;
+}
+
+static uint32_t zgGetWindowIdForNSWindow(void *ns_window) {
+    ZgSubWindow *sw = zgFindSubWindowByNSWindow(ns_window);
+    if (sw) return sw->window_id;
+    return 0; // 主窗口
+}
+
 /* ── IME 事件队列 ─────────────────────────────────────────────────────────── */
 /* NSTextInputClient 回调在事件分发期间同步触发, 产生的事件先入此队列,
    再由 zigui_cocoa_poll_events 排出, 汇入统一事件流。 */
@@ -77,10 +120,11 @@ static void zgTouchRelease(const void *identity) {
     }
 }
 
-static void zgPushKeyEvent(NSEvent *event, int pressed) {
+static void zgPushKeyEvent(NSEvent *event, int pressed, uint32_t window_id) {
     ZiguiEvent ev;
     memset(&ev, 0, sizeof(ev));
     ev.type = ZIGUI_EVENT_KEY;
+    ev.window_id = window_id;
     ev.key.keycode = [event keyCode];
     ev.key.pressed = pressed;
     NSUInteger flags = [event modifierFlags];
@@ -119,8 +163,19 @@ static void zgPushKeyEvent(NSEvent *event, int pressed) {
 @implementation ZiguiWindowDelegate
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
-    g_should_quit = true;
-    [sender orderOut:nil];
+    uint32_t wid = zgGetWindowIdForNSWindow((__bridge void *)sender);
+    if (wid == 0) {
+        /* 主窗口关闭 → 退出 */
+        g_should_quit = true;
+        [sender orderOut:nil];
+    } else {
+        /* 子窗口关闭 → 推送 close_requested 事件 */
+        ZiguiEvent ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.type = ZIGUI_EVENT_CLOSE_REQUESTED;
+        ev.window_id = wid;
+        zgPushImeEvent(ev);
+    }
     return NO;
 }
 
@@ -136,8 +191,10 @@ static ZiguiContentView *g_content_view = nil;
     NSMutableString *_markedText;
     NSRange _selectedRange;
     BOOL _hasMarkedText;
+    uint32_t _window_id;
 }
 - (NSString *)ziguiMarkedText;
+- (void)setZiguiWindowId:(uint32_t)window_id;
 @end
 
 @implementation ZiguiContentView
@@ -148,12 +205,17 @@ static ZiguiContentView *g_content_view = nil;
         _markedText = [[NSMutableString alloc] init];
         _selectedRange = NSMakeRange(0, 0);
         _hasMarkedText = NO;
+        _window_id = 0;
         /* 注册文件拖放 */
         [self registerForDraggedTypes:@[ NSPasteboardTypeFileURL ]];
         /* 触摸: 只报告活动触点 ( resting 静止点不上报 ) */
         [self setWantsRestingTouches:NO];
     }
     return self;
+}
+
+- (void)setZiguiWindowId:(uint32_t)window_id {
+    _window_id = window_id;
 }
 
 - (BOOL)acceptsFirstResponder { return YES; }
@@ -175,14 +237,14 @@ static ZiguiContentView *g_content_view = nil;
     /* 组字期间按键交给输入法处理, 不向应用层发送原始 KEY 事件,
        避免拼音阶段的退格/方向键被应用误消费。 */
     if (!_hasMarkedText) {
-        zgPushKeyEvent(event, 1);
+        zgPushKeyEvent(event, 1, _window_id);
     }
     [self interpretKeyEvents:@[event]];
 }
 
 - (void)keyUp:(NSEvent *)event {
     if (!_hasMarkedText) {
-        zgPushKeyEvent(event, 0);
+        zgPushKeyEvent(event, 0, _window_id);
     }
 }
 
@@ -209,6 +271,7 @@ static ZiguiContentView *g_content_view = nil;
         ZiguiEvent ev;
         memset(&ev, 0, sizeof(ev));
         ev.type = ZIGUI_EVENT_TEXT_INPUT;
+        ev.window_id = _window_id;
         ev.text_input.codepoint = cp;
         zgPushImeEvent(ev);
     }
@@ -220,6 +283,7 @@ static ZiguiContentView *g_content_view = nil;
         ZiguiEvent cev;
         memset(&cev, 0, sizeof(cev));
         cev.type = ZIGUI_EVENT_IME_COMMIT;
+        cev.window_id = _window_id;
         zgPushImeEvent(cev);
     }
 }
@@ -234,6 +298,7 @@ static ZiguiContentView *g_content_view = nil;
     ZiguiEvent ev;
     memset(&ev, 0, sizeof(ev));
     ev.type = ZIGUI_EVENT_IME_COMPOSITION;
+    ev.window_id = _window_id;
     ev.ime_composition.cursor_start = (uint32_t)selectedRange.location;
     ev.ime_composition.cursor_end = (uint32_t)(selectedRange.location + selectedRange.length);
     zgPushImeEvent(ev);
@@ -245,6 +310,7 @@ static ZiguiContentView *g_content_view = nil;
     ZiguiEvent ev;
     memset(&ev, 0, sizeof(ev));
     ev.type = ZIGUI_EVENT_IME_CANCEL;
+    ev.window_id = _window_id;
     zgPushImeEvent(ev);
 }
 
@@ -319,6 +385,7 @@ static ZiguiContentView *g_content_view = nil;
         ZiguiEvent ev;
         memset(&ev, 0, sizeof(ev));
         ev.type = ZIGUI_EVENT_FILE_DROP;
+        ev.window_id = _window_id;
         ev.file_drop.x = dx;
         ev.file_drop.y = dy;
         memcpy(ev.file_drop.path, utf8, n);
@@ -359,6 +426,7 @@ static ZiguiContentView *g_content_view = nil;
         ZiguiEvent ev;
         memset(&ev, 0, sizeof(ev));
         ev.type = ZIGUI_EVENT_TOUCH;
+        ev.window_id = _window_id;
         ev.touch.id = tid;
         ev.touch.phase = zgPhase;
         ev.touch.x = (float)(np.x * self.bounds.size.width * scale);
@@ -470,7 +538,9 @@ int zigui_cocoa_poll_events(ZiguiEvent *events, int max_events) {
             NSWindow *w = [event window];
             if (w) {
                 NSRect cr = [[w contentView] bounds];
+                uint32_t wid = zgGetWindowIdForNSWindow((__bridge void *)w);
                 ev.type = ZIGUI_EVENT_RESIZE;
+                ev.window_id = wid;
                 ev.resize.width  = (uint32_t)cr.size.width;
                 ev.resize.height = (uint32_t)cr.size.height;
                 count++;
@@ -493,7 +563,9 @@ int zigui_cocoa_poll_events(ZiguiEvent *events, int max_events) {
             /* locationInWindow 为 points; 渲染器 viewport 为设备像素 (drawableSize),
                Retina 下须乘 backingScaleFactor 才能与绘制坐标对齐 (否则命中检测错位)。 */
             CGFloat scale = [w backingScaleFactor];
+            uint32_t wid = zgGetWindowIdForNSWindow((__bridge void *)w);
             ev.type = ZIGUI_EVENT_MOUSE_BUTTON;
+            ev.window_id = wid;
             ev.mouse_button.x = (float)(loc.x * scale);
             ev.mouse_button.y = (float)((cr.size.height - loc.y) * scale);
             ev.mouse_button.pressed = (et == ZG_NSEventTypeLeftMouseDown ||
@@ -518,7 +590,9 @@ int zigui_cocoa_poll_events(ZiguiEvent *events, int max_events) {
             if (!w) break;
             NSRect cr = [[w contentView] bounds];
             CGFloat scale = [w backingScaleFactor];
+            uint32_t wid = zgGetWindowIdForNSWindow((__bridge void *)w);
             ev.type = ZIGUI_EVENT_MOUSE_MOVE;
+            ev.window_id = wid;
             ev.mouse_move.x = (float)(loc.x * scale);
             ev.mouse_move.y = (float)((cr.size.height - loc.y) * scale);
             count++;
@@ -527,7 +601,10 @@ int zigui_cocoa_poll_events(ZiguiEvent *events, int max_events) {
         }
 
         case ZG_NSEventTypeScrollWheel: {
+            NSWindow *w = [event window];
+            uint32_t wid = w ? zgGetWindowIdForNSWindow((__bridge void *)w) : 0;
             ev.type = ZIGUI_EVENT_SCROLL;
+            ev.window_id = wid;
             ev.scroll.dx = (float)[event scrollingDeltaX];
             ev.scroll.dy = (float)[event scrollingDeltaY];
             if ([event hasPreciseScrollingDeltas]) {
@@ -620,4 +697,141 @@ void zigui_cocoa_set_cursor(int cursor_type) {
         default: cursor = [NSCursor arrowCursor];       break;
     }
     [cursor set];
+}
+
+/* ── Sub-windows ─────────────────────────────────────────────────────────── */
+
+uint32_t zigui_cocoa_create_sub_window(const char *title, int width, int height) {
+    if (g_sub_window_count >= ZG_MAX_SUB_WINDOWS) return 0;
+
+    @autoreleasepool {
+        uint32_t window_id = g_next_sub_window_id++;
+
+        NSUInteger styleMask = NSWindowStyleMaskTitled
+                             | NSWindowStyleMaskClosable
+                             | NSWindowStyleMaskMiniaturizable
+                             | NSWindowStyleMaskResizable;
+
+        NSRect frame = NSMakeRect(0, 0, width, height);
+        NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
+                                                       styleMask:styleMask
+                                                         backing:NSBackingStoreBuffered
+                                                           defer:NO];
+
+        /* Content view with CAMetalLayer */
+        ZiguiContentView *contentView = [[ZiguiContentView alloc] initWithFrame:frame];
+        [contentView setZiguiWindowId:window_id];
+        [contentView setWantsLayer:YES];
+        [contentView setLayerContentsRedrawPolicy:NSViewLayerContentsRedrawOnSetNeedsDisplay];
+
+        CAMetalLayer *metalLayer = [CAMetalLayer layer];
+        metalLayer.frame = contentView.bounds;
+        metalLayer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+        metalLayer.contentsScale = [[NSScreen mainScreen] backingScaleFactor];
+        [contentView setLayer:metalLayer];
+
+        [window setContentView:contentView];
+
+        /* Title */
+        NSString *nsTitle = [NSString stringWithUTF8String:title];
+        [window setTitle:nsTitle];
+
+        /* Min size */
+        [window setContentMinSize:NSMakeSize(200, 150)];
+
+        /* Delegate */
+        if (!g_window_delegate) {
+            g_window_delegate = [[ZiguiWindowDelegate alloc] init];
+        }
+        [window setDelegate:g_window_delegate];
+
+        /* Accept mouse-moved events */
+        [window setAcceptsMouseMovedEvents:YES];
+
+        /* Store */
+        int idx = g_sub_window_count++;
+        g_sub_windows[idx].window_id = window_id;
+        g_sub_windows[idx].ns_window = (__bridge void *)window;
+        g_sub_windows[idx].content_view = (__bridge void *)contentView;
+        g_sub_windows[idx].metal_layer = (__bridge void *)metalLayer;
+        g_sub_windows[idx].width = (uint32_t)width;
+        g_sub_windows[idx].height = (uint32_t)height;
+        g_sub_windows[idx].scale_factor = (float)[[NSScreen mainScreen] backingScaleFactor];
+        g_sub_windows[idx].visible = false;
+
+        return window_id;
+    }
+}
+
+void zigui_cocoa_destroy_sub_window(uint32_t window_id) {
+    ZgSubWindow *sw = zgFindSubWindow(window_id);
+    if (!sw) return;
+
+    @autoreleasepool {
+        NSWindow *window = (__bridge NSWindow *)sw->ns_window;
+        [window orderOut:nil];
+        [window setDelegate:nil];
+        [window setContentView:nil];
+    }
+
+    /* 从数组中移除 */
+    for (int i = 0; i < g_sub_window_count; i++) {
+        if (g_sub_windows[i].window_id == window_id) {
+            for (int j = i; j < g_sub_window_count - 1; j++) {
+                g_sub_windows[j] = g_sub_windows[j + 1];
+            }
+            g_sub_window_count--;
+            break;
+        }
+    }
+}
+
+void zigui_cocoa_show_sub_window(uint32_t window_id) {
+    ZgSubWindow *sw = zgFindSubWindow(window_id);
+    if (!sw) return;
+
+    @autoreleasepool {
+        NSWindow *window = (__bridge NSWindow *)sw->ns_window;
+        ZiguiContentView *contentView = (__bridge ZiguiContentView *)sw->content_view;
+        [window makeKeyAndOrderFront:nil];
+        [window makeFirstResponder:contentView];
+        sw->visible = true;
+    }
+}
+
+void zigui_cocoa_hide_sub_window(uint32_t window_id) {
+    ZgSubWindow *sw = zgFindSubWindow(window_id);
+    if (!sw) return;
+
+    @autoreleasepool {
+        NSWindow *window = (__bridge NSWindow *)sw->ns_window;
+        [window orderOut:nil];
+        sw->visible = false;
+    }
+}
+
+void zigui_cocoa_set_sub_window_title(uint32_t window_id, const char *title) {
+    ZgSubWindow *sw = zgFindSubWindow(window_id);
+    if (!sw) return;
+
+    @autoreleasepool {
+        NSWindow *window = (__bridge NSWindow *)sw->ns_window;
+        NSString *nsTitle = [NSString stringWithUTF8String:title];
+        [window setTitle:nsTitle];
+    }
+}
+
+ZiguiWindowHandle zigui_cocoa_get_sub_window_handle(uint32_t window_id) {
+    ZiguiWindowHandle handle = {0};
+    ZgSubWindow *sw = zgFindSubWindow(window_id);
+    if (!sw) return handle;
+
+    handle.ns_window    = sw->ns_window;
+    handle.content_view = sw->content_view;
+    handle.metal_layer  = sw->metal_layer;
+    handle.width        = sw->width;
+    handle.height       = sw->height;
+    handle.scale_factor = sw->scale_factor;
+
+    return handle;
 }

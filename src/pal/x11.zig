@@ -48,9 +48,33 @@ pub const X11Backend = struct {
     xkb_ctx: *xkb.xkb_context,
     xkb_keymap: ?*xkb.xkb_keymap = null,
     xkb_state: ?*xkb.xkb_state = null,
+    /// 当前修饰键状态 (由 xkb_state 跟踪, 每次按键事件后更新)
+    mods: event_mod.Modifiers = .{},
+    // 事件队列引用 (pollEvents 时设置, 供 pushEvent 使用)
+    event_queue: ?*pal.EventQueue = null,
     // 鼠标状态
     mouse_x: i32 = 0,
     mouse_y: i32 = 0,
+    // 光标
+    cursor_font: u32 = 0,
+    cursors: [@typeInfo(pal.CursorType).@"enum".fields.len]u32 = .{0} ** @typeInfo(pal.CursorType).@"enum".fields.len,
+    current_cursor: pal.CursorType = .arrow,
+    // 子窗口 (额外的顶层窗口, 不含主窗口)
+    sub_windows: std.AutoHashMapUnmanaged(u32, SubWindowData) = .{},
+
+    /// 子窗口数据
+    const SubWindowData = struct {
+        window_id: u32,
+        title: []const u8,
+        width: u32,
+        height: u32,
+        visible: bool,
+        // 子窗口的鼠标状态
+        mouse_x: i32 = 0,
+        mouse_y: i32 = 0,
+        // 子窗口的修饰键状态 (共享 xkb_state, 但记录当前窗口的)
+        focused: bool = false,
+    };
 
     pub fn init(allocator: std.mem.Allocator) !X11Backend {
         const conn = xcb.xcb_connect(null, null) orelse return error.ConnectionFailed;
@@ -89,13 +113,25 @@ pub const X11Backend = struct {
             .xkb_state = xkb_state,
         };
         backend.scale_factor = backend.detectScaleFactor();
+        backend.initCursors();
         return backend;
     }
 
     pub fn deinit(self: *X11Backend) void {
+        for (0..self.cursors.len) |i| {
+            if (self.cursors[i] != 0) _ = xcb.xcb_free_cursor(self.conn, self.cursors[i]);
+        }
+        if (self.cursor_font != 0) _ = xcb.xcb_close_font(self.conn, self.cursor_font);
         if (self.xkb_state) |s| xkb.xkb_state_unref(s);
         if (self.xkb_keymap) |km| xkb.xkb_keymap_unref(km);
         xkb.xkb_context_unref(self.xkb_ctx);
+        // 清理子窗口
+        var it = self.sub_windows.valueIterator();
+        while (it.next()) |sw| {
+            self.allocator.free(sw.title);
+            _ = xcb.xcb_destroy_window(self.conn, sw.window_id);
+        }
+        self.sub_windows.deinit(self.allocator);
         if (self.window_id != 0) {
             _ = xcb.xcb_destroy_window(self.conn, self.window_id);
         }
@@ -210,9 +246,276 @@ pub const X11Backend = struct {
         };
     }
 
+    /// 创建一个额外的顶层子窗口
+    pub fn createSubWindow(self: *X11Backend, title: []const u8, width: u32, height: u32) !u32 {
+        const wid = xcb.xcb_generate_id(self.conn);
+        const mask = xcb.XCB_CW_EVENT_MASK | xcb.XCB_CW_BACK_PIXEL;
+        const values = [_]u32{
+            xcb.XCB_EVENT_MASK_EXPOSURE |
+                xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY |
+                xcb.XCB_EVENT_MASK_KEY_PRESS |
+                xcb.XCB_EVENT_MASK_KEY_RELEASE |
+                xcb.XCB_EVENT_MASK_BUTTON_PRESS |
+                xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
+                xcb.XCB_EVENT_MASK_POINTER_MOTION |
+                xcb.XCB_EVENT_MASK_ENTER_WINDOW |
+                xcb.XCB_EVENT_MASK_LEAVE_WINDOW |
+                xcb.XCB_EVENT_MASK_FOCUS_CHANGE |
+                xcb.XCB_EVENT_MASK_PROPERTY_CHANGE,
+            self.screen.*.white_pixel,
+        };
+
+        _ = xcb.xcb_create_window(
+            self.conn,
+            xcb.XCB_COPY_FROM_PARENT,
+            wid,
+            self.screen.*.root,
+            100,
+            100,
+            @intCast(width),
+            @intCast(height),
+            0,
+            xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT,
+            self.screen.*.root_visual,
+            @intCast(mask),
+            &values,
+        );
+
+        // 设置 WM_DELETE_WINDOW
+        const protocols_cookie = xcb.xcb_intern_atom(self.conn, 0, 12, "WM_PROTOCOLS");
+        const protocols_reply = xcb.xcb_intern_atom_reply(self.conn, protocols_cookie, null);
+        const delete_cookie = xcb.xcb_intern_atom(self.conn, 0, 16, "WM_DELETE_WINDOW");
+        const delete_reply = xcb.xcb_intern_atom_reply(self.conn, delete_cookie, null);
+
+        if (protocols_reply != null and delete_reply != null) {
+            const wm_protocols = protocols_reply.*.atom;
+            const wm_delete_window = delete_reply.*.atom;
+            _ = xcb.xcb_change_property(
+                self.conn,
+                xcb.XCB_PROP_MODE_REPLACE,
+                wid,
+                wm_protocols,
+                xcb.XCB_ATOM_ATOM,
+                32,
+                1,
+                &wm_delete_window,
+            );
+        }
+
+        // 设置窗口标题
+        _ = xcb.xcb_change_property(
+            self.conn,
+            xcb.XCB_PROP_MODE_REPLACE,
+            wid,
+            xcb.XCB_ATOM_WM_NAME,
+            xcb.XCB_ATOM_STRING,
+            8,
+            @intCast(title.len),
+            title.ptr,
+        );
+
+        // 显示窗口
+        _ = xcb.xcb_map_window(self.conn, wid);
+        _ = xcb.xcb_flush(self.conn);
+
+        // 记录子窗口
+        const title_dup = try self.allocator.dupe(u8, title);
+        try self.sub_windows.put(self.allocator, wid, .{
+            .window_id = wid,
+            .title = title_dup,
+            .width = width,
+            .height = height,
+            .visible = true,
+        });
+
+        return wid;
+    }
+
+    /// 销毁子窗口
+    pub fn destroySubWindow(self: *X11Backend, wid: u32) void {
+        if (self.sub_windows.get(wid)) |sw| {
+            self.allocator.free(sw.title);
+            _ = self.sub_windows.remove(wid);
+        }
+        _ = xcb.xcb_destroy_window(self.conn, wid);
+        _ = xcb.xcb_flush(self.conn);
+    }
+
+    /// 显示子窗口
+    pub fn showSubWindow(self: *X11Backend, wid: u32) void {
+        if (self.sub_windows.getPtr(wid)) |sw| {
+            sw.visible = true;
+            _ = xcb.xcb_map_window(self.conn, wid);
+            _ = xcb.xcb_flush(self.conn);
+        }
+    }
+
+    /// 隐藏子窗口
+    pub fn hideSubWindow(self: *X11Backend, wid: u32) void {
+        if (self.sub_windows.getPtr(wid)) |sw| {
+            sw.visible = false;
+            _ = xcb.xcb_unmap_window(self.conn, wid);
+            _ = xcb.xcb_flush(self.conn);
+        }
+    }
+
+    /// 设置子窗口标题
+    pub fn setSubWindowTitle(self: *X11Backend, wid: u32, title: []const u8) void {
+        if (self.sub_windows.getPtr(wid)) |sw| {
+            self.allocator.free(sw.title);
+            const title_dup = self.allocator.dupe(u8, title) catch return;
+            sw.title = title_dup;
+            _ = xcb.xcb_change_property(
+                self.conn,
+                xcb.XCB_PROP_MODE_REPLACE,
+                wid,
+                xcb.XCB_ATOM_WM_NAME,
+                xcb.XCB_ATOM_STRING,
+                8,
+                @intCast(title.len),
+                title.ptr,
+            );
+            _ = xcb.xcb_flush(self.conn);
+        }
+    }
+
+    /// 调整子窗口大小
+    pub fn resizeSubWindow(self: *X11Backend, wid: u32, width: u32, height: u32) void {
+        if (self.sub_windows.getPtr(wid)) |sw| {
+            sw.width = width;
+            sw.height = height;
+            const values = [_]u32{ width, height };
+            _ = xcb.xcb_configure_window(
+                self.conn,
+                wid,
+                xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
+                &values,
+            );
+            _ = xcb.xcb_flush(self.conn);
+        }
+    }
+
+    /// 移动子窗口
+    pub fn moveSubWindow(self: *X11Backend, wid: u32, x: i32, y: i32) void {
+        if (self.sub_windows.getPtr(wid)) |sw| {
+            _ = sw;
+            const values = [_]i32{ x, y };
+            _ = xcb.xcb_configure_window(
+                self.conn,
+                wid,
+                xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
+                &values,
+            );
+            _ = xcb.xcb_flush(self.conn);
+        }
+    }
+
+    /// 最小化子窗口 (iconify)
+    pub fn iconifySubWindow(self: *X11Backend, wid: u32) void {
+        const wm_change_state_cookie = xcb.xcb_intern_atom(self.conn, 0, 15, "WM_CHANGE_STATE");
+        const wm_change_state_reply = xcb.xcb_intern_atom_reply(self.conn, wm_change_state_cookie, null) orelse return;
+        const wm_change_state = wm_change_state_reply.*.atom;
+
+        const data: [5]u32 = .{ 3, 0, 0, 0, 0 }; // data[0] = 3 = IconicState (ICCCM)
+        _ = xcb.xcb_send_event(
+            self.conn,
+            0,
+            wid,
+            xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY,
+            @ptrCast(&xcb.xcb_client_message_event_t{
+                .response_type = xcb.XCB_CLIENT_MESSAGE,
+                .format = 32,
+                .window = wid,
+                .type = wm_change_state,
+                .data = .{ .data32 = data },
+            }),
+        );
+        _ = xcb.xcb_flush(self.conn);
+    }
+
+    /// 设置子窗口为 transient (父窗口之上，无任务栏图标)
+    pub fn setSubWindowTransientFor(self: *X11Backend, wid: u32, parent_wid: u32) void {
+        const wm_transient_for_cookie = xcb.xcb_intern_atom(self.conn, 0, 17, "WM_TRANSIENT_FOR");
+        const wm_transient_for_reply = xcb.xcb_intern_atom_reply(self.conn, wm_transient_for_cookie, null) orelse return;
+        const wm_transient_for = wm_transient_for_reply.*.atom;
+
+        _ = xcb.xcb_change_property(
+            self.conn,
+            xcb.XCB_PROP_MODE_REPLACE,
+            wid,
+            wm_transient_for,
+            xcb.XCB_ATOM_WINDOW,
+            32,
+            1,
+            &parent_wid,
+        );
+        _ = xcb.xcb_flush(self.conn);
+    }
+
     /// 当前高 DPI 缩放因子
     pub fn getScaleFactor(self: *const X11Backend) f32 {
         return self.scale_factor;
+    }
+
+    /// 初始化光标 (使用 X11 标准 cursor font)
+    fn initCursors(self: *X11Backend) void {
+        const font_name = "cursor";
+        const font = xcb.xcb_generate_id(self.conn);
+        _ = xcb.xcb_open_font(self.conn, font, @intCast(font_name.len), font_name);
+        self.cursor_font = font;
+
+        const glyph_map = .{
+            .arrow = @as(u16, 68), // XC_left_ptr
+            .ibeam = @as(u16, 152), // XC_xterm
+            .crosshair = @as(u16, 34), // XC_crosshair
+            .pointing_hand = @as(u16, 60), // XC_hand2
+            .resize_ew = @as(u16, 108), // XC_sb_h_double_arrow
+            .resize_ns = @as(u16, 116), // XC_sb_v_double_arrow
+            .resize_nwse = @as(u16, 134), // XC_top_left_corner
+            .resize_nesw = @as(u16, 136), // XC_top_right_corner
+            .not_allowed = @as(u16, 0), // XC_X_cursor
+            .wait = @as(u16, 150), // XC_watch
+        };
+
+        inline for (@typeInfo(pal.CursorType).@"enum".fields) |field| {
+            const cursor_id = xcb.xcb_generate_id(self.conn);
+            const glyph: u16 = @field(glyph_map, field.name);
+            _ = xcb.xcb_create_glyph_cursor(
+                self.conn,
+                cursor_id,
+                font,
+                font,
+                glyph,
+                glyph + 1,
+                0,
+                0,
+                0,
+                0xFFFF,
+                0xFFFF,
+                0xFFFF,
+            );
+            self.cursors[field.value] = cursor_id;
+        }
+    }
+
+    /// 设置鼠标光标
+    pub fn setCursor(self: *X11Backend, cursor_type: pal.CursorType) void {
+        if (self.window_id == 0) return;
+        const idx = @intFromEnum(cursor_type);
+        if (idx >= self.cursors.len or self.cursors[idx] == 0) return;
+        if (self.current_cursor == cursor_type) return;
+
+        const cursor = self.cursors[idx];
+        const mask = xcb.XCB_CW_CURSOR;
+        const values = [_]u32{cursor};
+        _ = xcb.xcb_change_window_attributes(
+            self.conn,
+            self.window_id,
+            mask,
+            &values,
+        );
+        _ = xcb.xcb_flush(self.conn);
+        self.current_cursor = cursor_type;
     }
 
     /// 检测缩放因子: 优先读取根窗口 RESOURCE_MANAGER 中的 Xft.dpi (基准 96),
@@ -262,12 +565,21 @@ pub const X11Backend = struct {
     }
 
     pub fn pollEvents(self: *X11Backend, queue: *pal.EventQueue, allocator: std.mem.Allocator) !void {
+        _ = allocator;
+        self.event_queue = queue;
         _ = xcb.xcb_flush(self.conn);
         while (xcb.xcb_poll_for_event(self.conn)) |ev| {
             defer std.c.free(ev);
             if (try self.translateEvent(ev)) |translated| {
-                try queue.push(allocator, translated);
+                try queue.push(self.allocator, translated);
             }
+        }
+    }
+
+    /// 推送事件到队列 (供需要产生多个事件的翻译函数使用, 如按键→key+text_input)
+    fn pushEvent(self: *X11Backend, ev: event_mod.Event) void {
+        if (self.event_queue) |q| {
+            q.push(self.allocator, ev) catch {};
         }
     }
 
@@ -321,51 +633,83 @@ pub const X11Backend = struct {
     /// 转换 X11 事件为统一事件
     fn translateEvent(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t) !?event_mod.Event {
         const response_type = ev.*.response_type & 0x7f;
+        // 从事件中提取事件窗口 ID (使用 key_press_event 结构, 大多数事件 event 字段位置相同)
+        const key_ev = @as([*c]xcb.xcb_key_press_event_t, @ptrCast(ev));
+        const wid: u32 = key_ev.*.event;
         return switch (response_type) {
-            xcb.XCB_KEY_PRESS, xcb.XCB_KEY_RELEASE => self.translateKeyEvent(ev),
-            xcb.XCB_BUTTON_PRESS, xcb.XCB_BUTTON_RELEASE => self.translateButtonEvent(ev),
-            xcb.XCB_MOTION_NOTIFY => self.translateMotionEvent(ev),
-            xcb.XCB_CONFIGURE_NOTIFY => self.translateConfigureEvent(ev),
-            xcb.XCB_PROPERTY_NOTIFY => self.translatePropertyNotify(ev),
-            xcb.XCB_CLIENT_MESSAGE => self.translateClientMessage(ev),
-            xcb.XCB_FOCUS_IN => .{ .focus_change = .{ .focused = true } },
-            xcb.XCB_FOCUS_OUT => .{ .focus_change = .{ .focused = false } },
-            xcb.XCB_ENTER_NOTIFY => .mouse_enter,
-            xcb.XCB_LEAVE_NOTIFY => .mouse_leave,
-            xcb.XCB_DESTROY_NOTIFY => .{ .close_requested = .{ .window_id = self.window_id } },
+            xcb.XCB_KEY_PRESS, xcb.XCB_KEY_RELEASE => self.translateKeyEvent(ev, wid),
+            xcb.XCB_BUTTON_PRESS, xcb.XCB_BUTTON_RELEASE => self.translateButtonEvent(ev, wid),
+            xcb.XCB_MOTION_NOTIFY => self.translateMotionEvent(ev, wid),
+            xcb.XCB_CONFIGURE_NOTIFY => self.translateConfigureEvent(ev, wid),
+            xcb.XCB_PROPERTY_NOTIFY => self.translatePropertyNotify(ev, wid),
+            xcb.XCB_CLIENT_MESSAGE => self.translateClientMessage(ev, wid),
+            xcb.XCB_FOCUS_IN => .{ .focus_change = .{ .window_id = wid, .focused = true } },
+            xcb.XCB_FOCUS_OUT => .{ .focus_change = .{ .window_id = wid, .focused = false } },
+            xcb.XCB_ENTER_NOTIFY => .{ .mouse_enter = .{ .window_id = wid } },
+            xcb.XCB_LEAVE_NOTIFY => .{ .mouse_leave = .{ .window_id = wid } },
+            xcb.XCB_DESTROY_NOTIFY => .{ .close_requested = .{ .window_id = wid } },
             else => null,
         };
     }
 
-    fn translateKeyEvent(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t) ?event_mod.Event {
+    fn translateKeyEvent(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t, wid: u32) ?event_mod.Event {
         const key_ev = @as([*c]xcb.xcb_key_press_event_t, @ptrCast(ev));
         const pressed = (ev.*.response_type & 0x7f) == xcb.XCB_KEY_PRESS;
-        // X11 keycode 比 evdev keycode 大 8
+        // X11 keycode 比 evdev keycode 大 8 (xkbcommon 期望 xkb keycode = evdev + 8 = X11 keycode)
         const keycode: u32 = key_ev.*.detail;
-
-        const modifiers = self.getModifiers(key_ev.*.state);
         const key_code = xkbKeycodeToKeyCode(keycode);
 
-        // 文本输入 (仅按下时, 使用 xkbcommon 获取 Unicode)
-        if (pressed) {
-            if (self.xkb_state) |state| {
-                const sym = xkb.xkb_state_key_get_one_sym(state, keycode);
-                const cp = xkb.xkb_keysym_to_utf32(sym);
-                if (cp >= 32 and cp != 127) {
-                    // 可打印字符 → text_input 事件
-                    return .{ .text_input = .{ .codepoint = @intCast(cp) } };
+        if (self.xkb_state) |state| {
+            // 先更新 xkb_state (按下→KEY_DOWN, 释放→KEY_UP), 再读取修饰键状态
+            // 必须在读取 mods 之前更新: 否则释放事件中 mods 仍反映按下状态 (Ctrl 释放后 ctrl 卡 true)
+            _ = xkb.xkb_state_update_key(state, keycode, if (pressed) xkb.XKB_KEY_DOWN else xkb.XKB_KEY_UP);
+
+            // 从 xkb_state 获取当前修饰键状态 (更新后, 反映本次按键后的真实状态)
+            // (X11 state 字段为事件前状态, 不可靠; xkb_state 由我们手动维护, 准确)
+            self.mods = .{
+                .shift = xkb.xkb_state_mod_name_is_active(state, xkb.XKB_MOD_NAME_SHIFT, xkb.XKB_STATE_MODS_EFFECTIVE) > 0,
+                .ctrl = xkb.xkb_state_mod_name_is_active(state, xkb.XKB_MOD_NAME_CTRL, xkb.XKB_STATE_MODS_EFFECTIVE) > 0,
+                .alt = xkb.xkb_state_mod_name_is_active(state, xkb.XKB_MOD_NAME_ALT, xkb.XKB_STATE_MODS_EFFECTIVE) > 0,
+                .super_key = xkb.xkb_state_mod_name_is_active(state, xkb.XKB_MOD_NAME_LOGO, xkb.XKB_STATE_MODS_EFFECTIVE) > 0,
+            };
+
+            const sym = xkb.xkb_state_key_get_one_sym(state, keycode);
+
+            // 始终推送 key 事件 (使 Ctrl+字母等快捷键能被控件接收, 与 Wayland 行为一致)
+            self.pushEvent(.{ .key = .{
+                .window_id = wid,
+                .state = if (pressed) .pressed else .released,
+                .key = key_code,
+                .modifiers = self.mods,
+            } });
+
+            // 文本输入 (仅按下时, 且无 Ctrl/Alt/Super 修饰 — 这些修饰下字符作为快捷键而非文本)
+            if (pressed and !self.mods.ctrl and !self.mods.alt and !self.mods.super_key) {
+                var buf: [8]u8 = undefined;
+                const len = xkb.xkb_keysym_to_utf8(sym, &buf, buf.len);
+                if (len > 1) {
+                    const ulen: usize = @intCast(len);
+                    const cp = std.unicode.utf8Decode(buf[0 .. ulen - 1]) catch 0;
+                    if (cp >= 0x20) { // 排除控制字符
+                        self.pushEvent(.{ .text_input = .{ .window_id = wid, .codepoint = cp } });
+                    }
                 }
             }
+        } else {
+            // xkb_state 不可用时的回退: 仅推送 key 事件 (使用 X11 state 字段)
+            self.pushEvent(.{ .key = .{
+                .window_id = wid,
+                .state = if (pressed) .pressed else .released,
+                .key = key_code,
+                .modifiers = self.getModifiers(key_ev.*.state),
+            } });
         }
 
-        return .{ .key = .{
-            .state = if (pressed) .pressed else .released,
-            .key = key_code,
-            .modifiers = modifiers,
-        } };
+        // 事件已通过 pushEvent 直接推送
+        return null;
     }
 
-    fn translateButtonEvent(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t) ?event_mod.Event {
+    fn translateButtonEvent(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t, wid: u32) ?event_mod.Event {
         const btn_ev = @as([*c]xcb.xcb_button_press_event_t, @ptrCast(ev));
         const pressed = (ev.*.response_type & 0x7f) == xcb.XCB_BUTTON_PRESS;
         const button = btn_ev.*.detail;
@@ -389,6 +733,7 @@ pub const X11Backend = struct {
                 else => 0.0,
             };
             return .{ .scroll = .{
+                .window_id = wid,
                 .axis = axis,
                 .delta = if (axis == .vertical) delta else h_delta,
             } };
@@ -404,6 +749,7 @@ pub const X11Backend = struct {
         };
 
         return .{ .mouse_button = .{
+            .window_id = wid,
             .button = mouse_button,
             .state = if (pressed) .pressed else .released,
             .x = x,
@@ -411,32 +757,33 @@ pub const X11Backend = struct {
         } };
     }
 
-    fn translateMotionEvent(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t) ?event_mod.Event {
+    fn translateMotionEvent(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t, wid: u32) ?event_mod.Event {
         const motion_ev = @as([*c]xcb.xcb_motion_notify_event_t, @ptrCast(ev));
         const x: i32 = @intCast(motion_ev.*.event_x);
         const y: i32 = @intCast(motion_ev.*.event_y);
         self.mouse_x = x;
         self.mouse_y = y;
-        return .{ .mouse_move = .{ .x = x, .y = y } };
+        return .{ .mouse_move = .{ .window_id = wid, .x = x, .y = y } };
     }
 
-    fn translateConfigureEvent(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t) ?event_mod.Event {
+    fn translateConfigureEvent(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t, wid: u32) ?event_mod.Event {
         _ = self;
         const cfg_ev = @as([*c]xcb.xcb_configure_notify_event_t, @ptrCast(ev));
         return .{ .resize = .{
+            .window_id = wid,
             .width = @intCast(cfg_ev.*.width),
             .height = @intCast(cfg_ev.*.height),
         } };
     }
 
-    fn translatePropertyNotify(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t) ?event_mod.Event {
+    fn translatePropertyNotify(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t, wid: u32) ?event_mod.Event {
         const prop_ev = @as([*c]xcb.xcb_property_notify_event_t, @ptrCast(ev));
         if (prop_ev.*.atom != self.net_wm_state) return null;
         // 查询当前 _NET_WM_STATE 属性
         const is_max = self.queryMaximizedState();
         if (is_max != self.maximized) {
             self.maximized = is_max;
-            return .{ .maximize = .{ .maximized = is_max } };
+            return .{ .maximize = .{ .window_id = wid, .maximized = is_max } };
         }
         return null;
     }
@@ -471,21 +818,31 @@ pub const X11Backend = struct {
 
     /// 请求最大化窗口 (发送 _NET_WM_STATE client message)
     pub fn setMaximized(self: *X11Backend) void {
-        self.sendWmStateChange(1); // _NET_WM_STATE_ADD
+        self.sendWmStateChange(self.window_id, 1); // _NET_WM_STATE_ADD
     }
 
     /// 取消最大化
     pub fn unsetMaximized(self: *X11Backend) void {
-        self.sendWmStateChange(0); // _NET_WM_STATE_REMOVE
+        self.sendWmStateChange(self.window_id, 0); // _NET_WM_STATE_REMOVE
     }
 
-    fn sendWmStateChange(self: *X11Backend, action: u32) void {
+    /// 最大化子窗口
+    pub fn maximizeSubWindow(self: *X11Backend, wid: u32) void {
+        self.sendWmStateChange(wid, 1);
+    }
+
+    /// 还原子窗口 (取消最大化)
+    pub fn unmaximizeSubWindow(self: *X11Backend, wid: u32) void {
+        self.sendWmStateChange(wid, 0);
+    }
+
+    fn sendWmStateChange(self: *X11Backend, wid: u32, action: u32) void {
         if (self.net_wm_state == 0) return;
         var ev: xcb.xcb_client_message_event_t = undefined;
         ev.response_type = xcb.XCB_CLIENT_MESSAGE;
         ev.format = 32;
         ev.sequence = 0;
-        ev.window = self.window_id;
+        ev.window = wid;
         ev.type = self.net_wm_state;
         ev.data.data32[0] = action;
         ev.data.data32[1] = self.net_wm_state_maximized_vert;
@@ -502,16 +859,16 @@ pub const X11Backend = struct {
         _ = xcb.xcb_flush(self.conn);
     }
 
-    fn translateClientMessage(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t) ?event_mod.Event {
+    fn translateClientMessage(self: *X11Backend, ev: [*c]xcb.xcb_generic_event_t, wid: u32) ?event_mod.Event {
         const client_ev = @as([*c]xcb.xcb_client_message_event_t, @ptrCast(ev));
         if (client_ev.*.type == self.wm_protocols) {
             const data32: [*c]const u32 = @ptrCast(&client_ev.*.data);
             if (data32[0] == self.wm_delete_window) {
-                return .{ .close_requested = .{ .window_id = self.window_id } };
+                return .{ .close_requested = .{ .window_id = wid } };
             }
         }
         // Xdnd 文件拖放协议
-        return self.handleXdndClientMessage(client_ev);
+        return self.handleXdndClientMessage(client_ev, wid);
     }
 
     // ── Xdnd 文件拖放 (接收端) ──────────────────────────────────────
@@ -544,7 +901,7 @@ pub const X11Backend = struct {
     }
 
     /// 处理 Xdnd 客户端消息 (Enter/Position/Drop/Leave)
-    fn handleXdndClientMessage(self: *X11Backend, client_ev: [*c]xcb.xcb_client_message_event_t) ?event_mod.Event {
+    fn handleXdndClientMessage(self: *X11Backend, client_ev: [*c]xcb.xcb_client_message_event_t, wid: u32) ?event_mod.Event {
         const t = client_ev.*.type;
         const data32: [*c]const u32 = @ptrCast(&client_ev.*.data);
         if (t == self.xdnd_enter) {
@@ -590,7 +947,7 @@ pub const X11Backend = struct {
                 @memcpy(fd.path[0..n], path[0..n]);
                 fd.path_len = @intCast(n);
                 self.sendXdndFinished();
-                return .{ .file_drop = fd };
+                return .{ .file_drop = .{ .window_id = wid, .file_drop = fd } };
             }
             self.sendXdndFinished();
             return null;

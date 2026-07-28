@@ -28,10 +28,16 @@ pub const GlyphAtlas = struct {
         font_size_bits: u32,
         font_weight: u16,
         glyph_id: u32,
+        italic: bool = false,
 
         pub fn encode(font_id: u64, size: f32, weight: u16, glyph_id: u32) GlyphKey {
             const size_bits: u32 = @intFromFloat(@round(size * 64.0));
             return .{ .font_id = font_id, .font_size_bits = size_bits, .font_weight = weight, .glyph_id = glyph_id };
+        }
+
+        pub fn encodeItalic(font_id: u64, size: f32, weight: u16, glyph_id: u32) GlyphKey {
+            const size_bits: u32 = @intFromFloat(@round(size * 64.0));
+            return .{ .font_id = font_id, .font_size_bits = size_bits, .font_weight = weight, .glyph_id = glyph_id, .italic = true };
         }
     };
 
@@ -43,12 +49,13 @@ pub const GlyphAtlas = struct {
             std.hash.autoHash(&hasher, key.font_size_bits);
             std.hash.autoHash(&hasher, key.font_weight);
             std.hash.autoHash(&hasher, key.glyph_id);
+            std.hash.autoHash(&hasher, key.italic);
             return hasher.final();
         }
 
         pub fn eql(ctx: @This(), a: GlyphKey, b: GlyphKey) bool {
             _ = ctx;
-            return a.font_id == b.font_id and a.font_size_bits == b.font_size_bits and a.font_weight == b.font_weight and a.glyph_id == b.glyph_id;
+            return a.font_id == b.font_id and a.font_size_bits == b.font_size_bits and a.font_weight == b.font_weight and a.glyph_id == b.glyph_id and a.italic == b.italic;
         }
     };
 
@@ -101,7 +108,15 @@ pub const GlyphAtlas = struct {
 
     /// 获取或光栅化 glyph
     pub fn getOrRasterize(self: *GlyphAtlas, device: *vulkan.VulkanDevice, font: *const freetype.FtFont, glyph_id: u32, size: f32) !AtlasEntry {
-        const key = GlyphKey.encode(font.fontId(), size, font.weight, glyph_id);
+        return self.getOrRasterizeItalic(device, font, glyph_id, size, false);
+    }
+
+    /// 获取或光栅化 glyph (支持 fake italic)
+    pub fn getOrRasterizeItalic(self: *GlyphAtlas, device: *vulkan.VulkanDevice, font: *const freetype.FtFont, glyph_id: u32, size: f32, italic: bool) !AtlasEntry {
+        const key = if (italic)
+            GlyphKey.encodeItalic(font.fontId(), size, font.weight, glyph_id)
+        else
+            GlyphKey.encode(font.fontId(), size, font.weight, glyph_id);
 
         // 缓存命中
         if (self.cache.get(key)) |entry| {
@@ -109,12 +124,17 @@ pub const GlyphAtlas = struct {
         }
 
         // 光栅化 glyph
-        const max_dim: u32 = @intFromFloat(@ceil(size * 2.0) + 8);
+        const max_dim: u32 = @intFromFloat(@ceil(size * 2.5) + 8); // italic 更宽
         const buf_size = max_dim * max_dim;
         const tmp_buf = try self.allocator.alloc(u8, buf_size);
         defer self.allocator.free(tmp_buf);
 
-        const metrics = font.rasterizeGlyph(glyph_id, tmp_buf) orelse {
+        const m_opt = if (italic)
+            font.rasterizeGlyphItalic(glyph_id, tmp_buf, max_dim)
+        else
+            font.rasterizeGlyph(glyph_id, tmp_buf);
+
+        const metrics = m_opt orelse {
             const empty = AtlasEntry{
                 .uv_rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
                 .width = 0,

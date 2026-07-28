@@ -82,6 +82,8 @@ pub const PaintContext = struct {
     offset_y: f32 = 0,
     // 脏矩形裁剪 (非空时跳过与脏区不相交的子树)
     dirty: ?*const dirty_mod.DirtyRegion = null,
+    // 是否已有祖先控件处于 disabled 状态 (避免重复叠加遮罩)
+    has_disabled_ancestor: bool = false,
 };
 
 /// 事件上下文
@@ -108,6 +110,16 @@ pub const Widget = struct {
     accessibility: Accessibility = .{},
     /// 透明度 (0.0 - 1.0, 影响整个子树)
     opacity: f32 = 1.0,
+    /// 拖拽 drop 目标 (非 null 时控件可接收拖拽数据)
+    drop_target: ?*@import("../dnd.zig").DropTarget = null,
+    /// 用户自定义数据指针 (供回调使用, 框架不管理其生命周期)
+    user_data: ?*anyopaque = null,
+    /// 鼠标光标样式 (null = 继承父控件; 根控件默认为 arrow)
+    cursor: ?pal.CursorType = null,
+    /// 工具提示文本 (null = 无 tooltip; 悬停延迟显示)
+    tooltip_text: ?[]const u8 = null,
+    /// 右键菜单 (null = 无右键菜单; 右键点击时自动弹出)
+    context_menu: ?*@import("context_menu.zig").ContextMenu = null,
     // 脏矩形跟踪器 (仅根控件设置, markDirty 时记录绝对脏区)
     dirty_tracker: ?*dirty_mod.DirtyRegion = null,
 
@@ -125,6 +137,8 @@ pub const Widget = struct {
         paint: *const fn (self: *Widget, ctx: *PaintContext) void,
         /// 事件处理
         on_event: ?*const fn (self: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult = null,
+        /// 自定义命中测试 (可选; 如弹出菜单等位置不受布局控制的控件覆盖)
+        hit_test: ?*const fn (self: *Widget, x: f32, y: f32) ?*Widget = null,
         /// 自定义布局 (可选; 容器如 ScrollView 覆盖默认 flexbox 以应用滚动偏移)
         perform_layout: ?*const fn (self: *Widget, ctx: *PaintContext) void = null,
         /// 帧动画 tick (可选; 动画控件实现, 每帧调用以推进动画)
@@ -739,10 +753,19 @@ pub const Widget = struct {
             var child_ctx = ctx.*;
             child_ctx.offset_x += self.rect.x;
             child_ctx.offset_y += self.rect.y;
+            child_ctx.has_disabled_ancestor = ctx.has_disabled_ancestor or self.state.disabled;
             child.paintTree(&child_ctx);
         }
 
         if (self.clip_children != null) ctx.renderer.popClip(prev_clip);
+
+        // disabled 视觉反馈: 半透明遮罩 (仅在没有 disabled 祖先时绘制, 避免重复叠加)
+        if (self.state.disabled and !ctx.has_disabled_ancestor) {
+            ctx.renderer.fillRect(
+                .{ .x = ctx.offset_x + self.rect.x, .y = ctx.offset_y + self.rect.y, .width = self.rect.width, .height = self.rect.height },
+                math.Color{ .r = 0, .g = 0, .b = 0, .a = 102 }, // ~40% 透明度
+            ) catch {};
+        }
 
         self.state.dirty = false;
     }
@@ -827,6 +850,11 @@ pub const Widget = struct {
     pub fn hitTest(self: *Widget, x: f32, y: f32) ?*Widget {
         if (!self.state.visible) return null;
 
+        // 自定义命中测试 (弹出菜单等位置不受布局控制的控件)
+        if (self.vtable.hit_test) |ht| {
+            return ht(self, x, y);
+        }
+
         // 转换到自身局部坐标并检查自身范围
         const lx = x - self.rect.x;
         const ly = y - self.rect.y;
@@ -846,6 +874,53 @@ pub const Widget = struct {
         return x >= 0 and y >= 0 and x < self.rect.width and y < self.rect.height;
     }
 
+    /// 解析控件的有效光标样式: 向上查找父级, 直到找到非 null 的 cursor; 根控件默认 arrow
+    pub fn resolveCursor(self: *const Widget) pal.CursorType {
+        var current: ?*const Widget = self;
+        var is_first = true;
+        while (current) |w| {
+            // disabled 的控件使用父级光标 (第一个 = 最深层的禁用控件跳过自己的 cursor)
+            if (is_first and w.state.disabled) {
+                current = w.parent;
+                is_first = false;
+                continue;
+            }
+            if (w.cursor) |c| return c;
+            current = w.parent;
+            is_first = false;
+        }
+        return .arrow;
+    }
+
+    /// 根据鼠标位置更新光标: hitTest 找到最深控件, 调用 setCursorFn 设置光标
+    pub fn updateCursorAt(self: *Widget, x: f32, y: f32, setCursorFn: *const fn (cursor: pal.CursorType) void) void {
+        const hit = self.hitTest(x, y) orelse {
+            setCursorFn(.arrow);
+            return;
+        };
+        setCursorFn(hit.resolveCursor());
+    }
+
+    /// 向上查找第一个有 tooltip_text 的控件 (含自己)
+    pub fn findTooltip(self: *const Widget) ?[]const u8 {
+        var current: ?*const Widget = self;
+        while (current) |w| {
+            if (w.tooltip_text) |t| return t;
+            current = w.parent;
+        }
+        return null;
+    }
+
+    /// 从指定控件开始向上查找第一个有 context_menu 的控件 (含自己), 返回菜单
+    pub fn findContextMenu(_: *const Widget, start: *const Widget) ?*@import("context_menu.zig").ContextMenu {
+        var current: ?*const Widget = start;
+        while (current) |w| {
+            if (w.context_menu) |m| return m;
+            current = w.parent;
+        }
+        return null;
+    }
+
     /// 分发事件到目标控件 (冒泡)
     pub fn dispatchEvent(self: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {
         // 找到目标
@@ -854,14 +929,32 @@ pub const Widget = struct {
             .mouse_move => |mm| self.hitTest(@floatFromInt(mm.x), @floatFromInt(mm.y)),
             // 滚轮事件命中鼠标下方的控件 (使 ScrollView 等在鼠标悬停于其范围内时随滚轮滚动)
             .scroll => self.hitTest(ectx.mouse_x, ectx.mouse_y),
-            // 键盘事件路由到焦点控件 (使聚焦的 ScrollView/TextInput 等接收方向键/编辑键), 无焦点时回退根控件
-            .key => self.findFocused() orelse self,
+            // 键盘 / 文本输入 / IME 事件路由到焦点控件 (聚焦的 TextInput 接收字符与输入法提交),
+            // 无焦点时回退根控件
+            .key, .text_input, .ime_commit, .ime_preedit, .ime_delete => self.findFocused() orelse self,
             else => self,
         } orelse return .ignored;
 
-        // 目标处理
-        if (target.vtable.on_event) |handler| {
-            if (handler(target, event, ectx) == .handled) return .handled;
+        // 鼠标按下命中可聚焦控件时自动聚焦 (GTK 行为: 点击输入框/按钮等获取焦点)
+        if (event.* == .mouse_button and event.mouse_button.state == .pressed and target.vtable.focusable and !target.state.disabled) {
+            self.setFocused(target);
+        }
+
+        // 右键菜单: 右键按下时向上查找第一个有 context_menu 的控件并弹出
+        // (disabled 控件自己的 context_menu 不弹出, 但父控件的可以)
+        if (event.* == .mouse_button and event.mouse_button.button == .right and event.mouse_button.state == .pressed) {
+            const start = if (target.state.disabled) target.parent orelse target else target;
+            if (self.findContextMenu(start)) |menu| {
+                menu.popupAt(@floatFromInt(event.mouse_button.x), @floatFromInt(event.mouse_button.y));
+                return .handled;
+            }
+        }
+
+        // 目标处理 (disabled 控件不处理事件, 但仍允许冒泡)
+        if (!target.state.disabled) {
+            if (target.vtable.on_event) |handler| {
+                if (handler(target, event, ectx) == .handled) return .handled;
+            }
         }
 
         // 冒泡到父级
@@ -1133,6 +1226,7 @@ test "widget dispatchEvent hits target and bubbles" {
 
     var ectx: EventContext = .{};
     const ev: pal.Event = .{ .mouse_button = .{
+        .window_id = 0,
         .button = .left,
         .state = .pressed,
         .x = 125,
@@ -1147,6 +1241,7 @@ test "widget dispatchEvent hits target and bubbles" {
 
     // 命中 panel (id=2) → ignored → 冒泡 root (id=1) → ignored
     const ev2: pal.Event = .{ .mouse_button = .{
+        .window_id = 0,
         .button = .left,
         .state = .pressed,
         .x = 110,
@@ -1160,6 +1255,7 @@ test "widget dispatchEvent hits target and bubbles" {
 
     // 范围外 → ignored 且无分发
     const ev3: pal.Event = .{ .mouse_button = .{
+        .window_id = 0,
         .button = .left,
         .state = .pressed,
         .x = 900,

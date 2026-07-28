@@ -458,7 +458,7 @@ test "scroll wheel routes to ScrollView under mouse" {
     sv.base.rect = .{ .x = 10, .y = 10, .width = 200, .height = 100 };
     sv.content_height = 500; // 内容溢出 → 可滚动
 
-    const ev = pal.Event{ .scroll = .{ .axis = .vertical, .delta = -1 } }; // 负 delta = 滚轮向下 (与 Wayland 约定一致)
+    const ev = pal.Event{ .scroll = .{ .window_id = 0, .axis = .vertical, .delta = -1 } }; // 负 delta = 滚轮向下 (与 Wayland 约定一致)
 
     // 鼠标在 ScrollView 范围内 (绝对坐标 50,50) → 滚轮生效
     var ectx_in = widget_mod.EventContext{ .mouse_x = 50, .mouse_y = 50 };
@@ -488,7 +488,7 @@ test "keyboard routes to focused ScrollView" {
     sv.base.state.focused = true; // 聚焦后才能接收键盘事件
 
     var ectx = widget_mod.EventContext{};
-    const ev = pal.Event{ .key = .{ .state = .pressed, .key = .down, .modifiers = .{} } };
+    const ev = pal.Event{ .key = .{ .window_id = 0, .state = .pressed, .key = .down, .modifiers = .{} } };
     const res = root.base.dispatchEvent(&ev, &ectx);
     try std.testing.expectEqual(widget_mod.EventResult.handled, res);
     try std.testing.expect(sv.scroll_y > 0); // 方向键下 → 向下滚动

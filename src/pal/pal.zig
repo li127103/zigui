@@ -131,17 +131,17 @@ test "EventQueue push/drain reuses capacity without losing events" {
     defer q.deinit(std.testing.allocator);
 
     // 第一批
-    try q.push(std.testing.allocator, .{ .text_input = .{ .codepoint = 'a' } });
-    try q.push(std.testing.allocator, .{ .text_input = .{ .codepoint = 'b' } });
+    try q.push(std.testing.allocator, .{ .text_input = .{ .window_id = 0, .codepoint = 'a' } });
+    try q.push(std.testing.allocator, .{ .text_input = .{ .window_id = 0, .codepoint = 'b' } });
     var batch = q.drain();
     try std.testing.expectEqual(@as(usize, 2), batch.len);
     try std.testing.expectEqual(@as(u21, 'a'), batch[0].text_input.codepoint);
     try std.testing.expectEqual(@as(u21, 'b'), batch[1].text_input.codepoint);
 
     // 第二批 (首次 drain 之后) — 旧实现从这里开始丢事件
-    try q.push(std.testing.allocator, .{ .text_input = .{ .codepoint = 'c' } });
-    try q.push(std.testing.allocator, .{ .text_input = .{ .codepoint = 'd' } });
-    try q.push(std.testing.allocator, .{ .text_input = .{ .codepoint = 'e' } });
+    try q.push(std.testing.allocator, .{ .text_input = .{ .window_id = 0, .codepoint = 'c' } });
+    try q.push(std.testing.allocator, .{ .text_input = .{ .window_id = 0, .codepoint = 'd' } });
+    try q.push(std.testing.allocator, .{ .text_input = .{ .window_id = 0, .codepoint = 'e' } });
     batch = q.drain();
     try std.testing.expectEqual(@as(usize, 3), batch.len);
     try std.testing.expectEqual(@as(u21, 'c'), batch[0].text_input.codepoint);
@@ -153,7 +153,7 @@ test "EventQueue push/drain reuses capacity without losing events" {
     try std.testing.expectEqual(@as(usize, 0), batch.len);
 
     // 第三批 (容量复用路径: count < items.len)
-    try q.push(std.testing.allocator, .{ .text_input = .{ .codepoint = 'f' } });
+    try q.push(std.testing.allocator, .{ .text_input = .{ .window_id = 0, .codepoint = 'f' } });
     batch = q.drain();
     try std.testing.expectEqual(@as(usize, 1), batch.len);
     try std.testing.expectEqual(@as(u21, 'f'), batch[0].text_input.codepoint);

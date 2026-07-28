@@ -7,11 +7,21 @@ const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
 const text_layout = @import("../text/layout.zig");
 const coretext = @import("../text/coretext.zig");
+const clipboard = @import("../pal/clipboard.zig");
+const context_menu_mod = @import("context_menu.zig");
+const ContextMenu = context_menu_mod.ContextMenu;
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
+
+const TextAreaUndoItem = struct {
+    text: []u8,
+    cursor: usize,
+    selection_start: ?usize,
+    scroll_y: f32,
+};
 
 pub const TextArea = struct {
     base: Widget,
@@ -37,12 +47,33 @@ pub const TextArea = struct {
     cursor_visible: bool = true,
     /// 文本水平对齐方式 (默认左对齐)
     text_align: text_layout.TextAlign = .left,
+    /// 是否显示行号
+    show_line_numbers: bool = false,
+    /// 是否高亮当前行
+    highlight_current_line: bool = false,
+    /// 行号区域宽度（自动计算时用此值）
+    line_number_width: f32 = 0,
+    /// 行号文字颜色
+    line_number_color: math.Color = math.Color.hex(0x64748BFF),
+    /// 行号区域背景色
+    line_number_bg: math.Color = math.Color.hex(0x1A2332FF),
+    /// 当前行高亮颜色
+    current_line_color: math.Color = math.Color.hex(0x33415533),
+    // 撤销/重做
+    undo_stack: std.ArrayListUnmanaged(TextAreaUndoItem) = .{ .items = &.{}, .capacity = 0 },
+    redo_stack: std.ArrayListUnmanaged(TextAreaUndoItem) = .{ .items = &.{}, .capacity = 0 },
+    last_was_char_insert: bool = false,
+    max_undo: usize = 100,
+    /// 右键上下文菜单
+    context_menu_owned: ?*ContextMenu = null,
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         placeholder: []const u8 = "",
         font_size: f32 = 14.0,
         on_change: ?*const fn (self: *TextArea, text: []const u8) void = null,
         text_align: text_layout.TextAlign = .left,
+        show_line_numbers: bool = false,
+        highlight_current_line: bool = false,
     }) !*TextArea {
         const self = try allocator.create(TextArea);
         self.* = .{
@@ -56,7 +87,25 @@ pub const TextArea = struct {
             .placeholder = opts.placeholder,
             .on_change = opts.on_change,
             .text_align = opts.text_align,
+            .show_line_numbers = opts.show_line_numbers,
+            .highlight_current_line = opts.highlight_current_line,
         };
+        self.base.cursor = .ibeam;
+
+        const menu = try ContextMenu.create(allocator, &.{
+            .{ .label = "撤销", .on_click = undoCallback, .ctx = self },
+            .{ .label = "重做", .on_click = redoCallback, .ctx = self },
+            .{ .is_separator = true },
+            .{ .label = "剪切", .on_click = cutCallback, .ctx = self },
+            .{ .label = "复制", .on_click = copyCallback, .ctx = self },
+            .{ .label = "粘贴", .on_click = pasteCallback, .ctx = self },
+            .{ .is_separator = true },
+            .{ .label = "全选", .on_click = selectAllCallback, .ctx = self },
+        });
+        menu.on_before_show = beforeShowCallback;
+        self.context_menu_owned = menu;
+        self.base.context_menu = menu;
+
         return self;
     }
 
@@ -64,7 +113,114 @@ pub const TextArea = struct {
         self.base.background.deinit(allocator);
         self.text.deinit(allocator);
         self.base.children.deinit(allocator);
+        self.clearUndoStack();
+        self.clearRedoStack();
+        self.undo_stack.deinit(allocator);
+        self.redo_stack.deinit(allocator);
+        if (self.context_menu_owned) |menu| {
+            menu.destroy(allocator);
+        }
         allocator.destroy(self);
+    }
+
+    fn clearUndoStack(self: *TextArea) void {
+        for (self.undo_stack.items) |item| {
+            self.allocator.free(item.text);
+        }
+        self.undo_stack.clearRetainingCapacity();
+    }
+
+    fn clearRedoStack(self: *TextArea) void {
+        for (self.redo_stack.items) |item| {
+            self.allocator.free(item.text);
+        }
+        self.redo_stack.clearRetainingCapacity();
+    }
+
+    fn pushUndoState(self: *TextArea, merge_with_last_insert: bool) void {
+        if (merge_with_last_insert and self.last_was_char_insert and self.undo_stack.items.len > 0) {
+            const last = &self.undo_stack.items[self.undo_stack.items.len - 1];
+            self.allocator.free(last.text);
+            last.* = .{
+                .text = self.allocator.dupe(u8, self.text.items) catch return,
+                .cursor = self.cursor,
+                .selection_start = self.selection_start,
+                .scroll_y = self.scroll_y,
+            };
+            return;
+        }
+
+        const item = TextAreaUndoItem{
+            .text = self.allocator.dupe(u8, self.text.items) catch return,
+            .cursor = self.cursor,
+            .selection_start = self.selection_start,
+            .scroll_y = self.scroll_y,
+        };
+
+        if (self.undo_stack.items.len >= self.max_undo) {
+            const oldest = self.undo_stack.orderedRemove(0);
+            self.allocator.free(oldest.text);
+        }
+
+        self.undo_stack.append(self.allocator, item) catch {
+            self.allocator.free(item.text);
+        };
+
+        self.clearRedoStack();
+    }
+
+    pub fn undo(self: *TextArea) void {
+        if (self.undo_stack.items.len == 0) return;
+
+        const current = TextAreaUndoItem{
+            .text = self.allocator.dupe(u8, self.text.items) catch return,
+            .cursor = self.cursor,
+            .selection_start = self.selection_start,
+            .scroll_y = self.scroll_y,
+        };
+        self.redo_stack.append(self.allocator, current) catch {
+            self.allocator.free(current.text);
+            return;
+        };
+
+        const prev = self.undo_stack.pop().?;
+        self.text.clearRetainingCapacity();
+        self.text.appendSlice(self.allocator, prev.text) catch {};
+        self.cursor = prev.cursor;
+        self.selection_start = prev.selection_start;
+        self.scroll_y = prev.scroll_y;
+        self.desired_col = null;
+        self.allocator.free(prev.text);
+        self.last_was_char_insert = false;
+        self.base.markDirty();
+        self.notifyChange();
+    }
+
+    pub fn redo(self: *TextArea) void {
+        if (self.redo_stack.items.len == 0) return;
+
+        const current = TextAreaUndoItem{
+            .text = self.allocator.dupe(u8, self.text.items) catch return,
+            .cursor = self.cursor,
+            .selection_start = self.selection_start,
+            .scroll_y = self.scroll_y,
+        };
+        self.undo_stack.append(self.allocator, current) catch {
+            self.allocator.free(current.text);
+            return;
+        };
+
+        const next = self.redo_stack.pop().?;
+        self.text.clearRetainingCapacity();
+        self.text.appendSlice(self.allocator, next.text) catch {};
+        self.cursor = next.cursor;
+        self.selection_start = next.selection_start;
+        self.scroll_y = next.scroll_y;
+        self.desired_col = null;
+        self.allocator.free(next.text);
+        self.last_was_char_insert = false;
+        self.base.markDirty();
+        self.notifyChange();
     }
 
     pub fn getText(self: *const TextArea) []const u8 {
@@ -98,6 +254,22 @@ pub const TextArea = struct {
 
     fn charWidth(self: *const TextArea) f32 {
         return self.font_size * 0.6;
+    }
+
+    fn lineNumberAreaWidth(self: *const TextArea) f32 {
+        if (!self.show_line_numbers) return 0;
+        const digits = countDigits(self.lineCount());
+        return @as(f32, @floatFromInt(digits)) * self.charWidth() + self.padding * 2;
+    }
+
+    fn countDigits(n: usize) usize {
+        if (n == 0) return 1;
+        var count: usize = 0;
+        var x = n;
+        while (x > 0) : (x /= 10) {
+            count += 1;
+        }
+        return count;
     }
 
     /// 包含 offset 的行的起始字节偏移
@@ -233,9 +405,10 @@ pub const TextArea = struct {
         ctx.renderer.fillRoundedRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }, self.corner_radius, border_c) catch {};
         ctx.renderer.fillRoundedRect(.{ .x = rx + 1.5, .y = ry + 1.5, .width = rw - 3, .height = rh - 3 }, self.corner_radius - 1, self.bg_color) catch {};
 
-        const text_x = rx + self.padding;
+        const lnw = self.lineNumberAreaWidth();
+        const text_x = rx + self.padding + lnw;
         const lh = self.lineHeight();
-        const avail_w = rw - self.padding * 2;
+        const avail_w = rw - self.padding * 2 - lnw;
 
         var font = coretext.CtFont.create(null, self.font_size, 400) catch return;
         defer font.destroy();
@@ -247,10 +420,21 @@ pub const TextArea = struct {
             return;
         }
 
+        // 行号区域背景
+        if (self.show_line_numbers) {
+            ctx.renderer.fillRect(
+                .{ .x = rx + 1.5, .y = ry + 1.5, .width = lnw, .height = rh - 3 },
+                self.line_number_bg,
+            ) catch {};
+        }
+
         // 可视行范围
         const first_line: usize = @intFromFloat(@max(0, @floor(self.scroll_y / lh)));
         const visible_lines: usize = @as(usize, @intFromFloat(@ceil((rh - self.padding * 2) / lh))) + 1;
         const total_lines = self.lineCount();
+
+        // 当前行
+        const cursor_line = if (w.state.focused) self.lineIndex(self.cursor) else total_lines;
 
         // 选区范围
         const has_sel = self.hasSelection();
@@ -262,6 +446,23 @@ pub const TextArea = struct {
             const ls = self.lineStartAtIndex(li);
             const le = self.lineEnd(ls);
             const line_y = ry + self.padding + @as(f32, @floatFromInt(li)) * lh - self.scroll_y;
+
+            // 当前行高亮
+            if (self.highlight_current_line and li == cursor_line) {
+                ctx.renderer.fillRect(
+                    .{ .x = rx + 1.5, .y = line_y + 1, .width = rw - 3, .height = lh - 2 },
+                    self.current_line_color,
+                ) catch {};
+            }
+
+            // 行号
+            if (self.show_line_numbers) {
+                var num_buf: [16]u8 = undefined;
+                const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{li + 1}) catch "?";
+                const nw = @as(f32, @floatFromInt(num_str.len)) * self.charWidth();
+                const num_x = rx + self.padding + lnw - self.padding - nw;
+                self.drawLabel(ctx, &font, num_str, num_x, line_y, self.line_number_color);
+            }
 
             // 该行对齐偏移
             const line_slice = self.text.items[ls..le];
@@ -287,14 +488,14 @@ pub const TextArea = struct {
 
         // 光标
         if (w.state.focused and self.cursor_visible) {
-            const cursor_line = self.lineIndex(self.cursor);
+            const cl = self.lineIndex(self.cursor);
             const cursor_col = self.colOf(self.cursor);
             // 光标所在行的对齐偏移
-            const cls = self.lineStartAtIndex(cursor_line);
+            const cls = self.lineStartAtIndex(cl);
             const cle = self.lineEnd(cls);
             const c_offset = self.lineAlignOffset(font.measureText(self.text.items[cls..cle]), avail_w);
             const cx = text_x + c_offset + @as(f32, @floatFromInt(cursor_col)) * self.charWidth();
-            const cy = ry + self.padding + @as(f32, @floatFromInt(cursor_line)) * lh - self.scroll_y;
+            const cy = ry + self.padding + @as(f32, @floatFromInt(cl)) * lh - self.scroll_y;
             if (cy >= ry and cy + lh <= ry + rh) {
                 ctx.renderer.fillRect(
                     .{ .x = cx, .y = cy + 3, .width = 2, .height = lh - 6 },
@@ -412,9 +613,11 @@ pub const TextArea = struct {
                         if (self.hasSelection()) {
                             self.deleteSelection();
                         } else if (self.cursor > 0) {
+                            self.pushUndoState(false);
                             _ = self.text.orderedRemove(self.cursor - 1);
                             self.cursor -= 1;
                             self.desired_col = null;
+                            self.last_was_char_insert = false;
                             self.notifyChange();
                         }
                         self.afterMove();
@@ -424,7 +627,9 @@ pub const TextArea = struct {
                         if (self.hasSelection()) {
                             self.deleteSelection();
                         } else if (self.cursor < self.text.items.len) {
+                            self.pushUndoState(false);
                             _ = self.text.orderedRemove(self.cursor);
+                            self.last_was_char_insert = false;
                             self.notifyChange();
                         }
                         self.afterMove();
@@ -432,29 +637,94 @@ pub const TextArea = struct {
                     },
                     .enter => {
                         // 插入换行
-                        if (self.hasSelection()) self.deleteSelection();
+                        self.pushUndoState(false);
+                        if (self.hasSelection()) self.deleteSelectionNoUndo();
                         self.text.insertSlice(self.allocator, self.cursor, "\n") catch return .handled;
                         self.cursor += 1;
                         self.desired_col = null;
+                        self.last_was_char_insert = false;
                         self.notifyChange();
                         self.afterMove();
                         return .handled;
                     },
                     .tab => {
                         // 插入 4 空格
-                        if (self.hasSelection()) self.deleteSelection();
+                        self.pushUndoState(false);
+                        if (self.hasSelection()) self.deleteSelectionNoUndo();
                         self.text.insertSlice(self.allocator, self.cursor, "    ") catch return .handled;
                         self.cursor += 4;
                         self.desired_col = null;
+                        self.last_was_char_insert = false;
                         self.notifyChange();
                         self.afterMove();
                         return .handled;
                     },
                     .a => {
-                        if (k.modifiers.super_key) {
+                        if (k.modifiers.super_key or k.modifiers.ctrl) {
                             self.selection_start = 0;
                             self.cursor = self.text.items.len;
                             self.base.markDirty();
+                            return .handled;
+                        }
+                    },
+                    // Ctrl/Cmd+C 复制选区
+                    .c => {
+                        if (k.modifiers.super_key or k.modifiers.ctrl) {
+                            if (self.hasSelection()) {
+                                const s = @min(self.selection_start.?, self.cursor);
+                                const e = @max(self.selection_start.?, self.cursor);
+                                clipboard.setText(self.text.items[s..e]) catch {};
+                            }
+                            return .handled;
+                        }
+                    },
+                    // Ctrl/Cmd+X 剪切选区
+                    .x => {
+                        if (k.modifiers.super_key or k.modifiers.ctrl) {
+                            if (self.hasSelection()) {
+                                const s = @min(self.selection_start.?, self.cursor);
+                                const e = @max(self.selection_start.?, self.cursor);
+                                clipboard.setText(self.text.items[s..e]) catch {};
+                                self.deleteSelection();
+                                self.base.markDirty();
+                            }
+                            return .handled;
+                        }
+                    },
+                    // Ctrl/Cmd+V 粘贴
+                    .v => {
+                        if (k.modifiers.super_key or k.modifiers.ctrl) {
+                            if (clipboard.getText(self.allocator)) |pasted| {
+                                defer self.allocator.free(pasted);
+                                if (pasted.len > 0) {
+                                    self.pushUndoState(false);
+                                    if (self.hasSelection()) self.deleteSelectionNoUndo();
+                                    self.text.insertSlice(self.allocator, self.cursor, pasted) catch return .handled;
+                                    self.cursor += pasted.len;
+                                    self.desired_col = null;
+                                    self.last_was_char_insert = false;
+                                    self.notifyChange();
+                                    self.afterMove();
+                                }
+                            } else |_| {}
+                            return .handled;
+                        }
+                    },
+                    // Ctrl/Cmd+Z 撤销
+                    .z => {
+                        if (k.modifiers.super_key or k.modifiers.ctrl) {
+                            if (k.modifiers.shift) {
+                                self.redo();
+                            } else {
+                                self.undo();
+                            }
+                            return .handled;
+                        }
+                    },
+                    // Ctrl+Y 重做
+                    .y => {
+                        if (k.modifiers.ctrl) {
+                            self.redo();
                             return .handled;
                         }
                     },
@@ -463,12 +733,14 @@ pub const TextArea = struct {
             },
             .text_input => |ti| {
                 if (!w.state.focused) return .ignored;
-                if (self.hasSelection()) self.deleteSelection();
+                self.pushUndoState(true);
+                if (self.hasSelection()) self.deleteSelectionNoUndo();
                 var buf: [4]u8 = undefined;
                 const len = std.unicode.utf8Encode(ti.codepoint, &buf) catch return .handled;
                 self.text.insertSlice(self.allocator, self.cursor, buf[0..len]) catch return .handled;
                 self.cursor += len;
                 self.desired_col = null;
+                self.last_was_char_insert = true;
                 self.notifyChange();
                 self.afterMove();
                 return .handled;
@@ -540,6 +812,13 @@ pub const TextArea = struct {
 
     fn deleteSelection(self: *TextArea) void {
         if (!self.hasSelection()) return;
+        self.pushUndoState(false);
+        self.deleteSelectionNoUndo();
+        self.last_was_char_insert = false;
+    }
+
+    fn deleteSelectionNoUndo(self: *TextArea) void {
+        if (!self.hasSelection()) return;
         const start = @min(self.selection_start.?, self.cursor);
         const end = @max(self.selection_start.?, self.cursor);
         var i: usize = end;
@@ -558,3 +837,80 @@ pub const TextArea = struct {
         }
     }
 };
+
+// ── Context Menu Callbacks ─────────────────────────────────────────────────
+
+fn undoCallback(ctx: ?*anyopaque) void {
+    const self: *TextArea = @ptrCast(@alignCast(ctx orelse return));
+    self.undo();
+}
+
+fn redoCallback(ctx: ?*anyopaque) void {
+    const self: *TextArea = @ptrCast(@alignCast(ctx orelse return));
+    self.redo();
+}
+
+fn cutCallback(ctx: ?*anyopaque) void {
+    const self: *TextArea = @ptrCast(@alignCast(ctx orelse return));
+    if (self.hasSelection()) {
+        const s = @min(self.selection_start.?, self.cursor);
+        const e = @max(self.selection_start.?, self.cursor);
+        clipboard.setText(self.text.items[s..e]) catch {};
+        self.deleteSelection();
+        self.base.markDirty();
+    }
+}
+
+fn copyCallback(ctx: ?*anyopaque) void {
+    const self: *TextArea = @ptrCast(@alignCast(ctx orelse return));
+    if (self.hasSelection()) {
+        const s = @min(self.selection_start.?, self.cursor);
+        const e = @max(self.selection_start.?, self.cursor);
+        clipboard.setText(self.text.items[s..e]) catch {};
+    }
+}
+
+fn pasteCallback(ctx: ?*anyopaque) void {
+    const self: *TextArea = @ptrCast(@alignCast(ctx orelse return));
+    if (clipboard.getText(self.allocator)) |pasted| {
+        defer self.allocator.free(pasted);
+        if (pasted.len > 0) {
+            self.pushUndoState(false);
+            if (self.hasSelection()) self.deleteSelectionNoUndo();
+            self.text.insertSlice(self.allocator, self.cursor, pasted) catch return;
+            self.cursor += pasted.len;
+            self.desired_col = null;
+            self.last_was_char_insert = false;
+            self.notifyChange();
+            self.ensureCursorVisible();
+            self.base.markDirty();
+        }
+    } else |_| {}
+}
+
+fn selectAllCallback(ctx: ?*anyopaque) void {
+    const self: *TextArea = @ptrCast(@alignCast(ctx orelse return));
+    self.selection_start = 0;
+    self.cursor = self.text.items.len;
+    self.base.markDirty();
+}
+
+fn beforeShowCallback(menu: *ContextMenu) void {
+    const self: *TextArea = blk: {
+        if (menu.items.items.len == 0) return;
+        const first = menu.items.items[0];
+        const ctx = first.ctx orelse return;
+        break :blk @ptrCast(@alignCast(ctx));
+    };
+
+    const has_undo = self.undo_stack.items.len > 0;
+    const has_redo = self.redo_stack.items.len > 0;
+    const has_sel = self.hasSelection();
+    const has_paste = clipboard.getText(self.allocator) catch null != null;
+
+    menu.setItemDisabled(0, !has_undo);
+    menu.setItemDisabled(1, !has_redo);
+    menu.setItemDisabled(3, !has_sel);
+    menu.setItemDisabled(4, !has_sel);
+    menu.setItemDisabled(5, !has_paste);
+}

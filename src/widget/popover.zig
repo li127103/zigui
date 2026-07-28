@@ -60,7 +60,7 @@ pub const Popover = struct {
         self.base.layout_style.width = opts.width;
         self.base.layout_style.height = opts.height;
         self.base.state.visible = false;
-        self.base.accessibility = .{ .role = .window };
+        self.base.accessibility = .{ .role = .dialog };
         return self;
     }
 
@@ -289,23 +289,22 @@ pub const Popover = struct {
         // 先让子元素处理
         for (self.base.children.items) |child| {
             const result = child.dispatchEvent(event, ectx);
-            if (result == .consumed) return .consumed;
+            if (result == .handled) return .handled;
         }
 
         switch (event.*) {
-            .mouse_down => |ev| {
+            .mouse_button => |mb| {
                 if (self.auto_close) {
                     // 检查是否点击在 Popover 外面
-                    const abs_x = ectx.offset_x + w.rect.x;
-                    const abs_y = ectx.offset_y + w.rect.y;
-                    const px = ev.x;
-                    const py = ev.y;
-                    if (px < abs_x or px > abs_x + w.rect.width or py < abs_y or py > abs_y + w.rect.height) {
+                    const abs = w.absoluteRect();
+                    const px = @as(f32, @floatFromInt(mb.x));
+                    const py = @as(f32, @floatFromInt(mb.y));
+                    if (px < abs.x or px > abs.x + w.rect.width or py < abs.y or py > abs.y + w.rect.height) {
                         self.popdown();
-                        return .consumed;
+                        return .handled;
                     }
                 }
-                return .consumed;
+                return .handled;
             },
             else => return .ignored,
         }

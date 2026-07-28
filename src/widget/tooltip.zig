@@ -5,8 +5,7 @@ const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
-const text_layout = @import("../text/layout.zig");
-const coretext = @import("../text/coretext.zig");
+const styled_text = @import("../text/styled_text.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
@@ -88,12 +87,9 @@ pub const Tooltip = struct {
         if (!self.visible or self.text.len == 0) return;
 
         // 测量文本
-        var font = coretext.CtFont.create(null, self.font_size, 400) catch return;
-        defer font.destroy();
-        const text_w = font.measureText(self.text);
-
-        const tw = text_w + self.padding_h * 2;
-        const th = self.font_size * 1.2 + self.padding_v * 2;
+        const text_size = styled_text.measureText(ctx.allocator, self.text, .{ .font_size = self.font_size });
+        const tw = text_size.width + self.padding_h * 2;
+        const th = text_size.height + self.padding_v * 2;
 
         // 定位 (在鼠标上方)
         const tx = ctx.offset_x + self.pos_x - tw / 2.0;
@@ -106,15 +102,13 @@ pub const Tooltip = struct {
         ctx.renderer.fillRect(.{ .x = ctx.offset_x + self.pos_x - 4, .y = ty + th, .width = 8, .height = 4 }, self.bg_color) catch {};
 
         // 文本
-        var tl = text_layout.TextLayout.layout(
+        styled_text.drawText(
+            ctx.renderer,
             ctx.allocator,
-            &ctx.renderer.glyph_atlas.?,
-            ctx.renderer.device,
             self.text,
-            .{ .font = &font, .font_size = self.font_size },
-        ) catch return;
-        defer tl.deinit();
-
-        ctx.renderer.drawText(&tl, tx + self.padding_h, ty + self.padding_v, self.text_color) catch {};
+            tx + self.padding_h,
+            ty + self.padding_v,
+            .{ .font_size = self.font_size, .color = self.text_color },
+        );
     }
 };

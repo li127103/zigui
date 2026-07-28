@@ -23,6 +23,176 @@ pub const AppConfig = struct {
 /// IME 删除请求 (与 app_linux.zig 对齐)
 pub const ImeDelete = struct { before: u32, after: u32 };
 
+/// macOS 子窗口 (每个窗口有独立的 Metal 设备、渲染器、事件队列)
+pub const CocoaSubWindow = struct {
+    allocator: std.mem.Allocator,
+    window_id: u32,
+    title: []const u8,
+    width: u32,
+    height: u32,
+    scale_factor: f32,
+
+    metal_device: metal.MetalDevice,
+    renderer: renderer2d.Renderer2D,
+    glyph_atlas: atlas_mod.GlyphAtlas,
+
+    event_queue: pal.EventQueue = .{},
+
+    mouse_x: f32 = 0,
+    mouse_y: f32 = 0,
+    mouse_down: bool = false,
+    mouse_clicked: bool = false,
+    right_clicked: bool = false,
+    scroll_delta: f32 = 0,
+    key_hit: ?pal.event.KeyCode = null,
+    key_mods: pal.event.Modifiers = .{},
+    file_drop: ?pal.event.FileDrop = null,
+
+    touches: [16]pal.event.Touch = undefined,
+    touch_count: usize = 0,
+
+    dirty: dirty_mod.DirtyRegion,
+    needs_redraw: bool = true,
+
+    frame_stats: perf_mod.FrameStats = .{},
+
+    visible: bool = true,
+    should_close: bool = false,
+
+    user_data: ?*anyopaque = null,
+    on_draw: ?*const fn (win: *CocoaSubWindow) void = null,
+    on_close: ?*const fn (win: *CocoaSubWindow) void = null,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        metal_layer: *anyopaque,
+        window_id: u32,
+        title: []const u8,
+        width: u32,
+        height: u32,
+        scale_factor: f32,
+    ) !*CocoaSubWindow {
+        const self = try allocator.create(CocoaSubWindow);
+        errdefer allocator.destroy(self);
+
+        var metal_device = try metal.MetalDevice.init(metal_layer, 65536);
+        errdefer metal_device.deinit();
+
+        var glyph_atlas = try atlas_mod.GlyphAtlas.init(allocator, 2048, 2048);
+        errdefer glyph_atlas.deinit();
+        try glyph_atlas.createTexture(&metal_device);
+
+        var renderer = renderer2d.Renderer2D.init(allocator, undefined);
+        renderer.glyph_atlas = &glyph_atlas;
+
+        const dirty = dirty_mod.DirtyRegion.init(allocator);
+        errdefer dirty.deinit();
+
+        const owned_title = try allocator.alloc(u8, title.len);
+        @memcpy(owned_title, title);
+
+        self.* = .{
+            .allocator = allocator,
+            .window_id = window_id,
+            .title = owned_title,
+            .width = width,
+            .height = height,
+            .scale_factor = scale_factor,
+            .metal_device = metal_device,
+            .renderer = renderer,
+            .glyph_atlas = glyph_atlas,
+            .dirty = dirty,
+        };
+        self.renderer.device = &self.metal_device;
+        self.renderer.glyph_atlas = &self.glyph_atlas;
+
+        return self;
+    }
+
+    pub fn deinit(self: *CocoaSubWindow) void {
+        self.event_queue.deinit(self.allocator);
+        self.dirty.deinit();
+        self.renderer.deinit();
+        self.glyph_atlas.deinit();
+        self.metal_device.deinit();
+        self.allocator.free(self.title);
+        self.allocator.destroy(self);
+    }
+
+    pub fn setTitle(self: *CocoaSubWindow, title: []const u8) void {
+        self.allocator.free(self.title);
+        const owned_title = self.allocator.alloc(u8, title.len) catch return;
+        @memcpy(owned_title, title);
+        self.title = owned_title;
+    }
+
+    pub fn markDirty(self: *CocoaSubWindow) void {
+        self.needs_redraw = true;
+    }
+
+    pub fn getRenderer(self: *CocoaSubWindow) *renderer2d.Renderer2D {
+        return &self.renderer;
+    }
+
+    pub fn getWidth(self: *const CocoaSubWindow) u32 {
+        return self.width;
+    }
+
+    pub fn getHeight(self: *const CocoaSubWindow) u32 {
+        return self.height;
+    }
+
+    /// 处理窗口事件队列中的事件，更新窗口状态
+    pub fn processEvents(self: *CocoaSubWindow) void {
+        const events = self.event_queue.drain();
+        for (events) |ev| {
+            switch (ev) {
+                .close_requested => {
+                    self.should_close = true;
+                    if (self.on_close) |cb| cb(self);
+                },
+                .resize => |r| {
+                    self.width = r.width;
+                    self.height = r.height;
+                    self.metal_device.setDrawableSize(r.width, r.height);
+                    self.markDirty();
+                },
+                .mouse_move => |m| {
+                    self.mouse_x = @floatFromInt(m.x);
+                    self.mouse_y = @floatFromInt(m.y);
+                },
+                .mouse_button => |m| {
+                    self.mouse_x = @floatFromInt(m.x);
+                    self.mouse_y = @floatFromInt(m.y);
+                    if (m.button == .left) {
+                        if (m.state == .pressed) {
+                            self.mouse_down = true;
+                            self.mouse_clicked = true;
+                        } else {
+                            self.mouse_down = false;
+                        }
+                    }
+                    if (m.button == .right and m.state == .pressed) {
+                        self.right_clicked = true;
+                    }
+                },
+                .scroll => |s| {
+                    if (s.axis == .vertical) {
+                        self.scroll_delta += s.delta;
+                    }
+                },
+                .key => |k| {
+                    self.key_mods = k.modifiers;
+                    if (k.state == .pressed) {
+                        self.key_hit = k.key;
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     config: AppConfig,
@@ -62,6 +232,9 @@ pub const App = struct {
     touch_count: usize = 0,
     // IME preedit 缓冲 (跨平台 API 使用)
     preedit_buf: [256]u8 = undefined,
+
+    // 子窗口
+    sub_windows: std.AutoHashMapUnmanaged(u32, *CocoaSubWindow) = .{},
 
     /// 本帧触摸事件 (drawFrame 内调用; 帧末自动清空)
     pub fn touchEvents(self: *App) []const pal.event.Touch {
@@ -164,6 +337,12 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        // 销毁所有子窗口
+        var it = self.sub_windows.valueIterator();
+        while (it.next()) |win| {
+            win.*.deinit();
+        }
+        self.sub_windows.deinit(self.allocator);
         self.event_queue.deinit(self.allocator);
         self.dirty.deinit();
         self.renderer.deinit();
@@ -198,6 +377,31 @@ pub const App = struct {
             // 2. 处理事件
             const events = self.event_queue.drain();
             for (events) |ev| {
+                // 获取事件的 window_id (主窗口为 0)
+                const ev_window_id: u32 = switch (ev) {
+                    .close_requested => |e| e.window_id,
+                    .resize => |e| e.window_id,
+                    .key => |e| e.window_id,
+                    .scroll => |e| e.window_id,
+                    .text_input => |e| e.window_id,
+                    .mouse_move => |e| e.window_id,
+                    .mouse_button => |e| e.window_id,
+                    .mouse_leave => |e| e.window_id,
+                    .file_drop => |e| e.window_id,
+                    .touch => |e| e.window_id,
+                    else => 0,
+                };
+
+                // 子窗口事件 → 路由到对应子窗口的事件队列
+                if (ev_window_id != 0) {
+                    if (self.sub_windows.get(ev_window_id)) |win| {
+                        win.event_queue.push(self.allocator, ev) catch {};
+                        win.needs_redraw = true;
+                    }
+                    continue;
+                }
+
+                // 主窗口事件 → 原有的处理逻辑
                 switch (ev) {
                     .close_requested => self.running = false,
                     .resize => |r| {
@@ -269,6 +473,9 @@ pub const App = struct {
                 }
             }
 
+            // 2.1 处理子窗口事件
+            self.processSubWindowEvents();
+
             if (cocoa.CocoaBackend.shouldQuit()) {
                 self.running = false;
             }
@@ -314,6 +521,9 @@ pub const App = struct {
 
             // 6. 提交帧
             self.metal_device.endFrame();
+
+            // 7. 渲染子窗口
+            self.renderSubWindows();
         }
     }
 
@@ -351,5 +561,112 @@ pub const App = struct {
     /// 获取 Metal device
     pub fn getMetalDevice(self: *App) *metal.MetalDevice {
         return &self.metal_device;
+    }
+
+    // ── 子窗口 API ────────────────────────────────────────────────────
+
+    /// 创建子窗口，返回 window_id (> 0)
+    pub fn createSubWindow(self: *App, title: []const u8, width: u32, height: u32) !u32 {
+        const wid = self.cocoa_backend.createSubWindow(title, width, height);
+        if (wid == 0) return error.SubWindowCreateFailed;
+
+        const layer = self.cocoa_backend.getSubWindowMetalLayer(wid) orelse {
+            self.cocoa_backend.destroySubWindow(wid);
+            return error.NoMetalLayer;
+        };
+
+        const scale = self.cocoa_backend.getSubWindowScaleFactor(wid);
+
+        const win = try CocoaSubWindow.init(
+            self.allocator,
+            layer,
+            wid,
+            title,
+            width,
+            height,
+            scale,
+        );
+        errdefer win.deinit();
+
+        try self.sub_windows.put(self.allocator, wid, win);
+        return wid;
+    }
+
+    /// 销毁子窗口
+    pub fn destroySubWindow(self: *App, wid: u32) void {
+        if (self.sub_windows.fetchRemove(wid)) |entry| {
+            entry.value.deinit();
+        }
+        self.cocoa_backend.destroySubWindow(wid);
+    }
+
+    /// 获取子窗口指针
+    pub fn getSubWindow(self: *App, wid: u32) ?*CocoaSubWindow {
+        return self.sub_windows.get(wid);
+    }
+
+    /// 显示子窗口
+    pub fn showSubWindow(self: *App, wid: u32) void {
+        if (self.sub_windows.get(wid)) |win| {
+            win.visible = true;
+        }
+        self.cocoa_backend.showSubWindow(wid);
+    }
+
+    /// 隐藏子窗口
+    pub fn hideSubWindow(self: *App, wid: u32) void {
+        if (self.sub_windows.get(wid)) |win| {
+            win.visible = false;
+        }
+        self.cocoa_backend.hideSubWindow(wid);
+    }
+
+    /// 设置子窗口标题
+    pub fn setSubWindowTitle(self: *App, wid: u32, title: []const u8) void {
+        if (self.sub_windows.get(wid)) |win| {
+            win.setTitle(title);
+        }
+        self.cocoa_backend.setSubWindowTitle(wid, title);
+    }
+
+    /// 处理子窗口事件 (按 window_id 路由)
+    fn processSubWindowEvents(self: *App) void {
+        // 注意: 事件已在事件处理阶段通过 window_id 路由到对应的子窗口 event_queue
+        // 这里调用每个子窗口的 processEvents 来更新状态
+        var it = self.sub_windows.valueIterator();
+        while (it.next()) |win| {
+            win.*.processEvents();
+        }
+    }
+
+    /// 渲染所有可见子窗口
+    fn renderSubWindows(self: *App) void {
+        var it = self.sub_windows.valueIterator();
+        while (it.next()) |win| {
+            if (!win.*.visible) continue;
+            if (!win.*.needs_redraw) continue;
+
+            const fb_size = win.*.metal_device.beginFrame() orelse continue;
+            win.*.width = fb_size[0];
+            win.*.height = fb_size[1];
+
+            win.*.renderer.beginFrame();
+            win.*.frame_stats.beginFrame();
+            if (win.*.on_draw) |cb| {
+                cb(win.*);
+            }
+            win.*.renderer.submit();
+            win.*.frame_stats.endFrame();
+
+            win.*.metal_device.endFrame();
+            win.*.needs_redraw = false;
+            win.*.mouse_clicked = false;
+            win.*.right_clicked = false;
+            win.*.scroll_delta = 0;
+            win.*.key_hit = null;
+            win.*.file_drop = null;
+            win.*.touch_count = 0;
+            win.*.dirty.clear();
+        }
     }
 };

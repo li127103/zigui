@@ -23,6 +23,7 @@ pub const LayoutOptions = struct {
     line_height_scale: f32 = 1.2,
     text_align: TextAlign = .left,
     wrap: TextWrap = .word,
+    italic: bool = false,
 };
 
 pub const PlacedGlyph = struct {
@@ -101,7 +102,7 @@ pub const TextLayout = struct {
             const sg = shaped[i];
 
             // 获取 atlas entry (FreeType 单字体, 无回退)
-            const entry = try glyph_atlas.getOrRasterize(device, opts.font, sg.glyph_id, opts.font_size);
+            const entry = try glyph_atlas.getOrRasterizeItalic(device, opts.font, sg.glyph_id, opts.font_size, opts.italic);
 
             const advance = sg.x_advance;
 

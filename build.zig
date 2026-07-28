@@ -64,6 +64,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "new-controls", .path = "examples/new_controls_demo_linux.zig" },
         .{ .name = "layout-demo", .path = "examples/layout_containers_demo_linux.zig" },
         .{ .name = "perf-demo", .path = "examples/perf_demo.zig" },
+        .{ .name = "multi-window", .path = "examples/multi_window_demo_linux.zig" },
     };
     for (examples) |ex| {
         const exe = b.addExecutable(.{

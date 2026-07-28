@@ -6,35 +6,35 @@ pub const max_ime_text = 256;
 /// 平台无关的统一事件
 pub const Event = union(enum) {
     // 窗口事件
-    resize: struct { width: u32, height: u32 },
-    move: struct { x: i32, y: i32 },
+    resize: struct { window_id: u32, width: u32, height: u32 },
+    move: struct { window_id: u32, x: i32, y: i32 },
     close_requested: struct { window_id: u32 },
-    focus_change: struct { focused: bool },
-    scale_change: struct { new_scale: f32 },
-    minimize: void,
-    maximize: struct { maximized: bool },
+    focus_change: struct { window_id: u32, focused: bool },
+    scale_change: struct { window_id: u32, new_scale: f32 },
+    minimize: struct { window_id: u32 },
+    maximize: struct { window_id: u32, maximized: bool },
 
     // 鼠标事件
-    mouse_move: struct { x: i32, y: i32 },
-    mouse_button: struct { button: MouseButton, state: ButtonState, x: i32, y: i32 },
-    scroll: struct { axis: ScrollAxis, delta: f32 },
-    mouse_enter: void,
-    mouse_leave: void,
+    mouse_move: struct { window_id: u32, x: i32, y: i32 },
+    mouse_button: struct { window_id: u32, button: MouseButton, state: ButtonState, x: i32, y: i32 },
+    scroll: struct { window_id: u32, axis: ScrollAxis, delta: f32 },
+    mouse_enter: struct { window_id: u32 },
+    mouse_leave: struct { window_id: u32 },
 
     // 键盘事件
-    key: struct { state: ButtonState, key: KeyCode, modifiers: Modifiers },
-    text_input: struct { codepoint: u21 },
+    key: struct { window_id: u32, state: ButtonState, key: KeyCode, modifiers: Modifiers },
+    text_input: struct { window_id: u32, codepoint: u21 },
 
     // IME 事件 (text-input)
-    ime_commit: struct { text: [max_ime_text]u8, len: u32 }, // 已提交文本 (UTF-8)
-    ime_preedit: struct { text: [max_ime_text]u8, len: u32, cursor_begin: i32, cursor_end: i32 }, // 组合中文本; len==0 表示组合结束
-    ime_delete: struct { before_length: u32, after_length: u32 }, // 删除光标周围文本 (字节数)
+    ime_commit: struct { window_id: u32, text: [max_ime_text]u8, len: u32 }, // 已提交文本 (UTF-8)
+    ime_preedit: struct { window_id: u32, text: [max_ime_text]u8, len: u32, cursor_begin: i32, cursor_end: i32 }, // 组合中文本; len==0 表示组合结束
+    ime_delete: struct { window_id: u32, before_length: u32, after_length: u32 }, // 删除光标周围文本 (字节数)
 
     // 触摸事件
-    touch: Touch,
+    touch: struct { window_id: u32, touch: Touch },
 
     // 文件拖放
-    file_drop: FileDrop,
+    file_drop: struct { window_id: u32, file_drop: FileDrop },
 };
 
 /// 触摸点事件载荷

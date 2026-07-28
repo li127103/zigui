@@ -68,16 +68,73 @@ pub const CocoaBackend = struct {
         return @intCast(@max(n, 0));
     }
 
+    // ── 子窗口 API ────────────────────────────────────────────────────
+
+    /// 创建子窗口，返回 window_id (> 0)，失败返回 0
+    pub fn createSubWindow(self: *CocoaBackend, title: []const u8, width: u32, height: u32) u32 {
+        _ = self;
+        var buf: [256:0]u8 = undefined;
+        const len = @min(title.len, 255);
+        @memcpy(buf[0..len], title[0..len]);
+        buf[len] = 0;
+        return c.zigui_cocoa_create_sub_window(&buf, @intCast(width), @intCast(height));
+    }
+
+    /// 销毁子窗口
+    pub fn destroySubWindow(self: *CocoaBackend, window_id: u32) void {
+        _ = self;
+        c.zigui_cocoa_destroy_sub_window(window_id);
+    }
+
+    /// 显示子窗口
+    pub fn showSubWindow(self: *CocoaBackend, window_id: u32) void {
+        _ = self;
+        c.zigui_cocoa_show_sub_window(window_id);
+    }
+
+    /// 隐藏子窗口
+    pub fn hideSubWindow(self: *CocoaBackend, window_id: u32) void {
+        _ = self;
+        c.zigui_cocoa_hide_sub_window(window_id);
+    }
+
+    /// 设置子窗口标题
+    pub fn setSubWindowTitle(self: *CocoaBackend, window_id: u32, title: []const u8) void {
+        _ = self;
+        var buf: [256:0]u8 = undefined;
+        const len = @min(title.len, 255);
+        @memcpy(buf[0..len], title[0..len]);
+        buf[len] = 0;
+        c.zigui_cocoa_set_sub_window_title(window_id, &buf);
+    }
+
+    /// 获取子窗口的 Metal layer (用于 Metal 渲染初始化)
+    pub fn getSubWindowMetalLayer(self: *CocoaBackend, window_id: u32) ?*anyopaque {
+        _ = self;
+        const handle = c.zigui_cocoa_get_sub_window_handle(window_id);
+        return handle.metal_layer;
+    }
+
+    /// 获取子窗口的缩放因子
+    pub fn getSubWindowScaleFactor(self: *CocoaBackend, window_id: u32) f32 {
+        _ = self;
+        const handle = c.zigui_cocoa_get_sub_window_handle(window_id);
+        return handle.scale_factor;
+    }
+
     fn translateEvent(ev: c.ZiguiEvent) ?event_mod.Event {
         const u = ev.unnamed_0;
+        const wid = ev.window_id;
         return switch (ev.type) {
-            c.ZIGUI_EVENT_CLOSE_REQUESTED => .{ .close_requested = .{ .window_id = 0 } },
-            c.ZIGUI_EVENT_RESIZE => .{ .resize = .{ .width = u.resize.width, .height = u.resize.height } },
+            c.ZIGUI_EVENT_CLOSE_REQUESTED => .{ .close_requested = .{ .window_id = wid } },
+            c.ZIGUI_EVENT_RESIZE => .{ .resize = .{ .window_id = wid, .width = u.resize.width, .height = u.resize.height } },
             c.ZIGUI_EVENT_MOUSE_MOVE => .{ .mouse_move = .{
+                .window_id = wid,
                 .x = @intFromFloat(u.mouse_move.x),
                 .y = @intFromFloat(u.mouse_move.y),
             } },
             c.ZIGUI_EVENT_MOUSE_BUTTON => .{ .mouse_button = .{
+                .window_id = wid,
                 .button = switch (u.mouse_button.button) {
                     0 => .left,
                     1 => .right,
@@ -88,10 +145,12 @@ pub const CocoaBackend = struct {
                 .y = @intFromFloat(u.mouse_button.y),
             } },
             c.ZIGUI_EVENT_SCROLL => .{ .scroll = .{
+                .window_id = wid,
                 .axis = if (@abs(u.scroll.dy) >= @abs(u.scroll.dx)) .vertical else .horizontal,
                 .delta = if (@abs(u.scroll.dy) >= @abs(u.scroll.dx)) u.scroll.dy else u.scroll.dx,
             } },
             c.ZIGUI_EVENT_KEY => .{ .key = .{
+                .window_id = wid,
                 .state = if (u.key.pressed != 0) .pressed else .released,
                 .key = translateKeyCode(u.key.keycode),
                 .modifiers = .{
@@ -102,6 +161,7 @@ pub const CocoaBackend = struct {
                 },
             } },
             c.ZIGUI_EVENT_TEXT_INPUT => .{ .text_input = .{
+                .window_id = wid,
                 .codepoint = @intCast(u.text_input.codepoint),
             } },
             c.ZIGUI_EVENT_IME_COMPOSITION => .{ .ime_composition = .{
@@ -120,18 +180,21 @@ pub const CocoaBackend = struct {
                 const n = @min(@as(usize, u.file_drop.path_len), fd.path.len);
                 @memcpy(fd.path[0..n], u.file_drop.path[0..n]);
                 fd.path_len = @intCast(n);
-                break :blk .{ .file_drop = fd };
+                break :blk .{ .file_drop = .{ .window_id = wid, .file_drop = fd } };
             },
             c.ZIGUI_EVENT_TOUCH => .{ .touch = .{
-                .id = u.touch.id,
-                .phase = switch (u.touch.phase) {
-                    0 => .began,
-                    1 => .moved,
-                    2 => .ended,
-                    else => .cancelled,
+                .window_id = wid,
+                .touch = .{
+                    .id = u.touch.id,
+                    .phase = switch (u.touch.phase) {
+                        0 => .began,
+                        1 => .moved,
+                        2 => .ended,
+                        else => .cancelled,
+                    },
+                    .x = u.touch.x,
+                    .y = u.touch.y,
                 },
-                .x = u.touch.x,
-                .y = u.touch.y,
             } },
             else => null,
         };
@@ -140,30 +203,109 @@ pub const CocoaBackend = struct {
     /// macOS virtual keycode → zigui KeyCode
     fn translateKeyCode(keycode: u16) event_mod.KeyCode {
         return switch (keycode) {
-            0 => .a, 1 => .s, 2 => .d, 3 => .f, 4 => .h, 5 => .g, 6 => .z, 7 => .x,
-            8 => .c, 9 => .v, 11 => .b, 12 => .q, 13 => .w, 14 => .e, 15 => .r,
-            16 => .y, 17 => .t, 18 => .@"1", 19 => .@"2", 20 => .@"3", 21 => .@"4",
-            22 => .@"6", 23 => .@"5", 24 => .equal, 25 => .@"9", 26 => .@"7",
-            27 => .minus, 28 => .@"8", 29 => .@"0",
-            30 => .right_bracket, 31 => .o, 32 => .u, 33 => .left_bracket,
-            34 => .i, 35 => .p, 36 => .enter, 37 => .l, 38 => .j, 39 => .apostrophe,
-            40 => .k, 41 => .semicolon, 42 => .backslash, 43 => .comma,
-            44 => .slash, 45 => .n, 46 => .m, 47 => .period,
-            48 => .tab, 49 => .space, 50 => .grave, 51 => .backspace,
-            53 => .escape, 55 => .left_super, 56 => .left_shift, 57 => .caps_lock,
-            58 => .left_alt, 59 => .left_ctrl, 60 => .right_shift, 61 => .right_alt,
-            62 => .right_ctrl, 63 => .right_super,
-            65 => .kp_decimal, 67 => .kp_multiply, 69 => .kp_add,
-            75 => .kp_divide, 76 => .kp_enter, 78 => .kp_subtract,
-            81 => .kp_equal, 82 => .kp_0, 83 => .kp_1, 84 => .kp_2, 85 => .kp_3,
-            86 => .kp_4, 87 => .kp_5, 88 => .kp_6, 89 => .kp_7,
-            91 => .kp_8, 92 => .kp_9,
-            96 => .f5, 97 => .f6, 98 => .f7, 99 => .f3, 100 => .f8, 101 => .f9,
-            103 => .f11, 105 => .f13, 107 => .f14,
-            109 => .f10, 111 => .f12, 113 => .f15,
-            114 => .insert, 115 => .home, 116 => .page_up, 117 => .delete,
-            118 => .f4, 119 => .end, 120 => .f2, 121 => .page_down, 122 => .f1,
-            123 => .left, 124 => .right, 125 => .down, 126 => .up,
+            0 => .a,
+            1 => .s,
+            2 => .d,
+            3 => .f,
+            4 => .h,
+            5 => .g,
+            6 => .z,
+            7 => .x,
+            8 => .c,
+            9 => .v,
+            11 => .b,
+            12 => .q,
+            13 => .w,
+            14 => .e,
+            15 => .r,
+            16 => .y,
+            17 => .t,
+            18 => .@"1",
+            19 => .@"2",
+            20 => .@"3",
+            21 => .@"4",
+            22 => .@"6",
+            23 => .@"5",
+            24 => .equal,
+            25 => .@"9",
+            26 => .@"7",
+            27 => .minus,
+            28 => .@"8",
+            29 => .@"0",
+            30 => .right_bracket,
+            31 => .o,
+            32 => .u,
+            33 => .left_bracket,
+            34 => .i,
+            35 => .p,
+            36 => .enter,
+            37 => .l,
+            38 => .j,
+            39 => .apostrophe,
+            40 => .k,
+            41 => .semicolon,
+            42 => .backslash,
+            43 => .comma,
+            44 => .slash,
+            45 => .n,
+            46 => .m,
+            47 => .period,
+            48 => .tab,
+            49 => .space,
+            50 => .grave,
+            51 => .backspace,
+            53 => .escape,
+            55 => .left_super,
+            56 => .left_shift,
+            57 => .caps_lock,
+            58 => .left_alt,
+            59 => .left_ctrl,
+            60 => .right_shift,
+            61 => .right_alt,
+            62 => .right_ctrl,
+            63 => .right_super,
+            65 => .kp_decimal,
+            67 => .kp_multiply,
+            69 => .kp_add,
+            75 => .kp_divide,
+            76 => .kp_enter,
+            78 => .kp_subtract,
+            81 => .kp_equal,
+            82 => .kp_0,
+            83 => .kp_1,
+            84 => .kp_2,
+            85 => .kp_3,
+            86 => .kp_4,
+            87 => .kp_5,
+            88 => .kp_6,
+            89 => .kp_7,
+            91 => .kp_8,
+            92 => .kp_9,
+            96 => .f5,
+            97 => .f6,
+            98 => .f7,
+            99 => .f3,
+            100 => .f8,
+            101 => .f9,
+            103 => .f11,
+            105 => .f13,
+            107 => .f14,
+            109 => .f10,
+            111 => .f12,
+            113 => .f15,
+            114 => .insert,
+            115 => .home,
+            116 => .page_up,
+            117 => .delete,
+            118 => .f4,
+            119 => .end,
+            120 => .f2,
+            121 => .page_down,
+            122 => .f1,
+            123 => .left,
+            124 => .right,
+            125 => .down,
+            126 => .up,
             else => .escape,
         };
     }

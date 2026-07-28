@@ -6,6 +6,7 @@ const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
 const styled_text = @import("../text/styled_text.zig");
+const icons = @import("icons.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
@@ -17,6 +18,14 @@ pub const Button = struct {
     label: []const u8,
     font_size: f32,
     on_click: ?*const fn (self: *Button) void,
+    /// 图标 (null = 无图标, 纯文本按钮)
+    icon: ?icons.IconName = null,
+    /// 图标边长 (px, 图标在 16×16 坐标系内等比缩放)
+    icon_size: f32 = 16.0,
+    /// 图标与文本之间的间距
+    icon_gap: f32 = 8.0,
+    /// 图标颜色 (默认跟随 text_color)
+    icon_color: ?math.Color = null,
     // 样式
     bg_color: math.Color,
     bg_hover: math.Color,
@@ -29,6 +38,9 @@ pub const Button = struct {
     pub fn create(allocator: std.mem.Allocator, label_text: []const u8, opts: struct {
         font_size: f32 = 14.0,
         on_click: ?*const fn (self: *Button) void = null,
+        icon: ?icons.IconName = null,
+        icon_size: f32 = 16.0,
+        icon_color: ?math.Color = null,
         bg_color: math.Color = math.Color.hex(0x3B82F6FF),
         bg_hover: math.Color = math.Color.hex(0x60A5FAFF),
         bg_pressed: math.Color = math.Color.hex(0x2563EBFF),
@@ -46,6 +58,10 @@ pub const Button = struct {
             .label = label_text,
             .font_size = opts.font_size,
             .on_click = opts.on_click,
+            .icon = opts.icon,
+            .icon_size = opts.icon_size,
+            .icon_gap = 8.0,
+            .icon_color = opts.icon_color,
             .bg_color = opts.bg_color,
             .bg_hover = opts.bg_hover,
             .bg_pressed = opts.bg_pressed,
@@ -55,7 +71,15 @@ pub const Button = struct {
             .padding_v = opts.padding_v,
         };
         self.base.accessibility = .{ .role = .button, .label = label_text };
+        self.base.cursor = .pointing_hand;
         return self;
+    }
+
+    /// 设置/清除图标 (运行时切换)
+    pub fn setIcon(self: *Button, icon: ?icons.IconName) void {
+        self.icon = icon;
+        self.base.markLayoutDirty();
+        self.base.markDirty();
     }
 
     pub fn destroy(self: *Button, allocator: std.mem.Allocator) void {
@@ -89,9 +113,22 @@ pub const Button = struct {
             .font_weight = 500,
         });
 
+        // 内容宽度: 图标 (+间距) + 文本
+        var content_w = text_size.width;
+        var icon_w: f32 = 0;
+        if (self.icon) |ic| {
+            if (ic != .none) {
+                icon_w = self.icon_size;
+                content_w += icon_w;
+                if (self.label.len > 0) content_w += self.icon_gap;
+            }
+        }
+        // 内容高度: max(文本, 图标)
+        const content_h = if (icon_w > 0) @max(text_size.height, self.icon_size) else text_size.height;
+
         return .{
-            .width = text_size.width + self.padding_h * 2,
-            .height = text_size.height + self.padding_v * 2,
+            .width = content_w + self.padding_h * 2,
+            .height = content_h + self.padding_v * 2,
         };
     }
 
@@ -125,15 +162,36 @@ pub const Button = struct {
             ) catch {};
         }
 
-        // 文本 (居中)
-        if (self.label.len > 0) {
-            const text_size = styled_text.measureText(ctx.allocator, self.label, .{
-                .font_size = self.font_size,
-                .font_weight = 500,
-            });
-            const text_x = rx + (w.rect.width - text_size.width) / 2.0;
-            const text_y = ry + (w.rect.height - text_size.height) / 2.0;
+        // 测量内容以居中布局 [图标 (间距) 文本]
+        const text_size = styled_text.measureText(ctx.allocator, self.label, .{
+            .font_size = self.font_size,
+            .font_weight = 500,
+        });
 
+        const has_icon = if (self.icon) |ic| (ic != .none) else false;
+        var icon_w: f32 = 0;
+        if (has_icon) icon_w = self.icon_size;
+        const gap: f32 = if (has_icon and self.label.len > 0) self.icon_gap else 0;
+        const content_w = icon_w + gap + text_size.width;
+        const content_h = if (has_icon) @max(text_size.height, self.icon_size) else text_size.height;
+
+        // 内容起始 x (整体居中)
+        const start_x = rx + (w.rect.width - content_w) / 2.0;
+        const content_top = ry + (w.rect.height - content_h) / 2.0;
+
+        // 绘制图标
+        if (has_icon) {
+            const icon_x = start_x;
+            const icon_y = content_top + (content_h - self.icon_size) / 2.0;
+            const ic = self.icon.?;
+            const ic_color = self.icon_color orelse self.text_color;
+            icons.drawIcon(ctx.renderer, icon_x, icon_y, self.icon_size, ic_color, ic) catch {};
+        }
+
+        // 绘制文本 (图标右侧)
+        if (self.label.len > 0) {
+            const text_x = start_x + icon_w + gap;
+            const text_y = content_top + (content_h - text_size.height) / 2.0;
             styled_text.drawText(
                 ctx.renderer,
                 ctx.allocator,

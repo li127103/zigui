@@ -5,8 +5,7 @@ const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
-const text_layout = @import("../text/layout.zig");
-const coretext = @import("../text/coretext.zig");
+const styled_text = @import("../text/styled_text.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
@@ -166,19 +165,14 @@ pub const ListView = struct {
     }
 
     fn drawLabel(self: *ListView, ctx: *PaintContext, text: []const u8, x: f32, y: f32, color: math.Color) void {
-        var font = coretext.CtFont.create(null, self.font_size, 400) catch return;
-        defer font.destroy();
-
-        var tl = text_layout.TextLayout.layout(
+        styled_text.drawText(
+            ctx.renderer,
             ctx.allocator,
-            &ctx.renderer.glyph_atlas.?,
-            ctx.renderer.device,
             text,
-            .{ .font = &font, .font_size = self.font_size },
-        ) catch return;
-        defer tl.deinit();
-
-        ctx.renderer.drawText(&tl, x, y, color) catch {};
+            x,
+            y,
+            .{ .font_size = self.font_size, .color = color },
+        );
     }
 
     fn onEvent(w: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {

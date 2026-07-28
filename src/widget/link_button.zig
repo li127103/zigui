@@ -54,6 +54,7 @@ pub const LinkButton = struct {
             .on_click = opts.on_click,
         };
         self.base.accessibility = .{ .role = .button, .label = text };
+        self.base.cursor = .pointing_hand;
         return self;
     }
 

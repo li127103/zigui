@@ -45,6 +45,7 @@ pub const Slider = struct {
             .step = opts.step,
             .on_change = opts.on_change,
         };
+        self.base.cursor = .pointing_hand;
         return self;
     }
 

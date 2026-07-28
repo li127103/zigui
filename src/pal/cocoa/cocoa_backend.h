@@ -27,10 +27,13 @@ typedef enum {
     ZIGUI_EVENT_IME_CANCEL,
     ZIGUI_EVENT_FILE_DROP,
     ZIGUI_EVENT_TOUCH,
+    ZIGUI_EVENT_MOUSE_ENTER,
+    ZIGUI_EVENT_MOUSE_LEAVE,
 } ZiguiEventType;
 
 typedef struct {
     ZiguiEventType type;
+    uint32_t window_id;
     union {
         struct { uint32_t width; uint32_t height; } resize;
         struct { float x; float y; } mouse_move;
@@ -49,6 +52,14 @@ int zigui_cocoa_init(void);
 ZiguiWindowHandle zigui_cocoa_create_window(const char *title, int width, int height);
 int zigui_cocoa_poll_events(ZiguiEvent *events, int max_events);
 bool zigui_cocoa_should_quit(void);
+
+/* Sub-windows */
+uint32_t zigui_cocoa_create_sub_window(const char *title, int width, int height);
+void zigui_cocoa_destroy_sub_window(uint32_t window_id);
+void zigui_cocoa_show_sub_window(uint32_t window_id);
+void zigui_cocoa_hide_sub_window(uint32_t window_id);
+void zigui_cocoa_set_sub_window_title(uint32_t window_id, const char *title);
+ZiguiWindowHandle zigui_cocoa_get_sub_window_handle(uint32_t window_id);
 
 /* Clipboard */
 int zigui_cocoa_get_clipboard(char *buf, int buf_size);

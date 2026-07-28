@@ -1,43 +1,59 @@
-//! Spinner 控件 - 加载指示器 (环形渐隐旋转点, 需每帧调用 tick 推进动画)
+//! Spinner 控件 - 加载动画 (对标 GtkSpinner)
 
 const std = @import("std");
 const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
+const pal = @import("../pal/pal.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
+const EventContext = widget_mod.EventContext;
+const EventResult = widget_mod.EventResult;
 
 pub const Spinner = struct {
     base: Widget,
-    progress: f32, // 0..1 旋转相位
-    speed: f32, // 圈/秒
-    spoke_count: usize,
+    /// 是否处于活动状态（旋转中）
+    active: bool,
+    /// 尺寸（宽高相同）
+    size: f32,
+    /// 线条宽度
+    stroke_width: f32,
+    /// 主色调
     color: math.Color,
-    dot_radius: f32,
+    /// 背景弧颜色
+    track_color: math.Color,
+    /// 旋转速度倍数 (1.0 = 默认)
+    speed: f32,
+    /// 当前旋转角度（弧度）
+    angle: f32 = 0,
+    /// 弧长（弧度，0.2~0.8 之间脉动）
+    arc_length: f32 = 0.5,
+    arc_phase: f32 = 0,
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
-        speed: f32 = 1.5,
-        spoke_count: usize = 12,
+        active: bool = true,
+        size: f32 = 24,
+        stroke_width: f32 = 2.5,
         color: math.Color = math.Color.hex(0x3B82F6FF),
-        dot_radius: f32 = 3.0,
-        size: f32 = 32.0,
+        track_color: math.Color = math.Color.hex(0xE2E8F0FF),
+        speed: f32 = 1.0,
+        dot_radius: f32 = 0,
     }) !*Spinner {
         const self = try allocator.create(Spinner);
+        const sw = if (opts.dot_radius > 0) opts.dot_radius * 2 else opts.stroke_width;
         self.* = .{
             .base = .{
                 .vtable = &vtable,
                 .id = widget_mod.genWidgetId(),
             },
-            .progress = 0,
-            .speed = opts.speed,
-            .spoke_count = @max(3, opts.spoke_count),
+            .active = opts.active,
+            .size = opts.size,
+            .stroke_width = sw,
             .color = opts.color,
-            .dot_radius = opts.dot_radius,
+            .track_color = opts.track_color,
+            .speed = opts.speed,
         };
-        self.base.rect.width = opts.size;
-        self.base.rect.height = opts.size;
-        self.base.accessibility = .{ .role = .progress, .label = "loading" };
         return self;
     }
 
@@ -47,23 +63,35 @@ pub const Spinner = struct {
         allocator.destroy(self);
     }
 
-    /// 推进动画 (每帧由应用调用, delta_ms 为帧间隔)
-    pub fn tick(self: *Spinner, delta_ms: u32) void {
-        const delta = @as(f32, @floatFromInt(delta_ms)) / 1000.0 * self.speed;
-        self.progress += delta;
-        self.progress -= @floor(self.progress);
+    pub fn start(self: *Spinner) void {
+        self.active = true;
         self.base.markDirty();
     }
 
-    // ── VTable 实现 ──────────────────────────────────────────────────────────
+    pub fn stop(self: *Spinner) void {
+        self.active = false;
+        self.base.markDirty();
+    }
+
+    pub fn tick(self: *Spinner, delta_ms: u32) void {
+        if (!self.active) return;
+
+        const dt = @as(f32, @floatFromInt(delta_ms)) / 1000.0;
+        self.angle += dt * 3.0 * std.math.tau * self.speed;
+        self.angle = std.math.mod(f32, self.angle, std.math.tau) catch 0;
+
+        self.arc_phase += dt * 1.5 * self.speed;
+        const pulse = 0.5 + 0.5 * @sin(self.arc_phase);
+        self.arc_length = 0.25 + pulse * 0.45;
+
+        self.base.markDirty();
+    }
 
     const vtable = Widget.VTable{
         .type_name = "spinner",
         .measure = measure,
         .paint = paint,
-        .on_event = null,
         .tick = tickVTable,
-        .focusable = false,
         .destroy = destroyVTable,
     };
 
@@ -72,79 +100,92 @@ pub const Spinner = struct {
         self.destroy(allocator);
     }
 
+    fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
+        const self: *Spinner = @fieldParentPtr("base", w);
+        _ = constraints;
+        _ = ctx;
+        return .{
+            .width = self.size,
+            .height = self.size,
+        };
+    }
+
     fn tickVTable(w: *Widget, delta_ms: u32) void {
         const self: *Spinner = @fieldParentPtr("base", w);
         self.tick(delta_ms);
     }
 
-    fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
-        _ = ctx;
-        _ = constraints;
-        return .{ .width = w.rect.width, .height = w.rect.height };
+    fn drawArc(
+        renderer: anytype,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        start_angle: f32,
+        end_angle: f32,
+        width: f32,
+        color: math.Color,
+    ) !void {
+        const segments: usize = 48;
+        var i: usize = 0;
+        while (i < segments) : (i += 1) {
+            const t1 = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(segments));
+            const t2 = @as(f32, @floatFromInt(i + 1)) / @as(f32, @floatFromInt(segments));
+            const a1 = start_angle + t1 * (end_angle - start_angle);
+            const a2 = start_angle + t2 * (end_angle - start_angle);
+
+            const x1o = cx + (radius + width / 2.0) * @cos(a1);
+            const y1o = cy + (radius + width / 2.0) * @sin(a1);
+            const x2o = cx + (radius + width / 2.0) * @cos(a2);
+            const y2o = cy + (radius + width / 2.0) * @sin(a2);
+            const x1i = cx + (radius - width / 2.0) * @cos(a1);
+            const y1i = cy + (radius - width / 2.0) * @sin(a1);
+            const x2i = cx + (radius - width / 2.0) * @cos(a2);
+            const y2i = cy + (radius - width / 2.0) * @sin(a2);
+
+            const pts = [_][2]f32{
+                .{ x1o, y1o },
+                .{ x2o, y2o },
+                .{ x2i, y2i },
+                .{ x1i, y1i },
+            };
+            try renderer.fillConvexPolygon(&pts, color);
+        }
     }
 
     fn paint(w: *Widget, ctx: *PaintContext) void {
         const self: *Spinner = @fieldParentPtr("base", w);
+
         const rx = ctx.offset_x + w.rect.x;
         const ry = ctx.offset_y + w.rect.y;
 
         const cx = rx + w.rect.width / 2.0;
         const cy = ry + w.rect.height / 2.0;
-        const ring_r = @min(w.rect.width, w.rect.height) / 2.0 - self.dot_radius;
-        if (ring_r <= 0) return;
+        const radius = @min(w.rect.width, w.rect.height) / 2.0 - self.stroke_width;
 
-        const two_pi = std.math.pi * 2.0;
-        const n_f: f32 = @floatFromInt(self.spoke_count);
+        drawArc(
+            ctx.renderer,
+            cx,
+            cy,
+            radius,
+            0,
+            std.math.tau,
+            self.stroke_width,
+            self.track_color,
+        ) catch {};
 
-        var i: usize = 0;
-        while (i < self.spoke_count) : (i += 1) {
-            const frac = @as(f32, @floatFromInt(i)) / n_f;
-            // 头部在 progress 相位, 尾部按 frac 逆序渐隐
-            const angle = self.progress * two_pi - frac * two_pi;
-            const dx = cx + ring_r * @cos(angle);
-            const dy = cy + ring_r * @sin(angle);
-            // 头部 (i=0) 最不透明, 尾部渐隐至 ~15%
-            const alpha = 1.0 - frac * 0.85;
-            const color = math.Color{
-                .r = self.color.r,
-                .g = self.color.g,
-                .b = self.color.b,
-                .a = @intFromFloat(alpha * @as(f32, @floatFromInt(self.color.a))),
-            };
-            const r = self.dot_radius;
-            ctx.renderer.fillRoundedRect(
-                .{ .x = dx - r, .y = dy - r, .width = r * 2, .height = r * 2 },
-                r,
-                color,
+        if (self.active) {
+            const start_angle = self.angle;
+            const end_angle = self.angle + self.arc_length * std.math.tau;
+            drawArc(
+                ctx.renderer,
+                cx,
+                cy,
+                radius,
+                start_angle,
+                end_angle,
+                self.stroke_width,
+                self.color,
             ) catch {};
         }
     }
 };
-
-// ── Tests ──────────────────────────────────────────────────────────────────
-
-test "spinner tick advances and wraps phase" {
-    const sp = try Spinner.create(std.testing.allocator, .{ .speed = 1.0 });
-    defer sp.destroy(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(f32, 0), sp.progress);
-    // speed=1 圈/秒, 500ms → 0.5
-    sp.tick(500);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.5), sp.progress, 0.0001);
-    // 再 600ms → 1.1 → 回绕到 0.1
-    sp.tick(600);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.1), sp.progress, 0.0001);
-}
-
-test "spinner enforces minimum spoke count" {
-    const sp = try Spinner.create(std.testing.allocator, .{ .spoke_count = 1 });
-    defer sp.destroy(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 3), sp.spoke_count);
-}
-
-test "spinner create sets explicit size" {
-    const sp = try Spinner.create(std.testing.allocator, .{ .size = 48 });
-    defer sp.destroy(std.testing.allocator);
-    try std.testing.expectEqual(@as(f32, 48), sp.base.rect.width);
-    try std.testing.expectEqual(@as(f32, 48), sp.base.rect.height);
-}

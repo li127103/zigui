@@ -96,6 +96,7 @@ pub const SpinButton = struct {
         };
         self.base.accessibility = .{ .role = .slider };
         self.syncInputBuf();
+        self.base.cursor = .ibeam;
         return self;
     }
 

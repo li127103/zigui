@@ -27,7 +27,21 @@ const Overlay = zigui.overlay.Overlay;
 const Expander = zigui.expander.Expander;
 const Revealer = zigui.revealer.Revealer;
 const AspectFrame = zigui.aspect_frame.AspectFrame;
+const InfoBar = zigui.info_bar.InfoBar;
+const SearchEntry = zigui.search_entry.SearchEntry;
+const MenuButton = zigui.menu_button.MenuButton;
+const Popover = zigui.popover.Popover;
+const DropDown = zigui.drop_down.DropDown;
+const LevelBar = zigui.level_bar.LevelBar;
+const Calendar = zigui.calendar.Calendar;
+const ProgressBar = zigui.progress_bar.ProgressBar;
+const TextInput = zigui.text_input.TextInput;
 const ScrollView = zigui.scroll_view.ScrollView;
+const FileChooser = zigui.file_chooser.FileChooser;
+const FileChooserMode = zigui.file_chooser.FileChooserMode;
+const ColorButton = zigui.color_button.ColorButton;
+const FontButton = zigui.font_button.FontButton;
+const FontDesc = zigui.font_chooser.FontDesc;
 
 const theme_dark: zigui.theme.Theme = zigui.theme.dark;
 
@@ -41,6 +55,24 @@ var g_overlay_visible: bool = false;
 var g_revealer: ?*Revealer = null;
 var g_frame: u32 = 0;
 var g_prev_mouse_down: bool = false;
+var g_right_clicked: bool = false;
+var g_prev_right_down: bool = false;
+/// 快捷键消息 (由快捷键回调设置, drawFrame 中显示)
+var g_shortcut_msg: []const u8 = "按 Ctrl+N/O/S 或 F1 试试快捷键";
+/// 全局控件引用 (用于动态更新)
+var g_indeterminate_pb: ?*ProgressBar = null;
+var g_determinate_pb: ?*ProgressBar = null;
+var g_pb_value: f32 = 0.0;
+var g_dropdown_label: ?*Label = null;
+var g_calendar_label: ?*Label = null;
+var g_file_chooser: ?*FileChooser = null;
+var g_file_chooser_label: ?*Label = null;
+var g_file_chooser_buf: [256]u8 = undefined;
+/// Tooltip 支持
+var g_tooltip: ?*zigui.tooltip.Tooltip = null;
+var g_tooltip_ctrl = zigui.tooltip_controller.TooltipController.init(undefined);
+/// 右键菜单
+var g_context_menu: ?*zigui.context_menu.ContextMenu = null;
 /// FlowBox 数字标签的静态存储 (1-16), 避免堆分配泄漏
 var g_flow_num_texts: [16][2]u8 = undefined;
 var g_flow_num_slices: [16][]const u8 = undefined;
@@ -60,9 +92,28 @@ pub fn main() !void {
     try buildTree(allocator);
     defer destroyTree();
 
+    // 注册全局快捷键
+    try app.addShortcut(.n, .{ .ctrl = true }, onShortcutNew, null);
+    try app.addShortcut(.o, .{ .ctrl = true }, onShortcutOpen, null);
+    try app.addShortcut(.s, .{ .ctrl = true }, onShortcutSave, null);
+    try app.addShortcut(.f1, .{}, onShortcutHelp, null);
+
     try app.run(&drawFrame);
 
     styled_text.deinitFontCache();
+}
+
+fn onShortcutNew(_: ?*anyopaque) void {
+    g_shortcut_msg = "Ctrl+N: 新建";
+}
+fn onShortcutOpen(_: ?*anyopaque) void {
+    g_shortcut_msg = "Ctrl+O: 打开";
+}
+fn onShortcutSave(_: ?*anyopaque) void {
+    g_shortcut_msg = "Ctrl+S: 保存";
+}
+fn onShortcutHelp(_: ?*anyopaque) void {
+    g_shortcut_msg = "F1: 帮助 (快捷键: Ctrl+N/O/S, F1)";
 }
 
 fn buildTree(alloc: std.mem.Allocator) !void {
@@ -86,7 +137,27 @@ fn buildTree(alloc: std.mem.Allocator) !void {
     errdefer root.destroy(alloc);
 
     try buildHeader(root, alloc);
+
+    // 右键菜单 (必须先于 buildBody 创建, 因为 ColorButton 会引用它)
+    const cm_items = [_]zigui.context_menu.ContextMenuItem{
+        .{ .label = "复制颜色值", .on_click = onCtxCopyColor },
+        .{ .label = "设为背景色", .on_click = onCtxSetBg },
+        .{ .is_separator = true },
+        .{ .label = "重置为默认", .on_click = onCtxReset, .disabled = true },
+    };
+    const ctx_menu = try zigui.context_menu.ContextMenu.create(alloc, &cm_items);
+    g_context_menu = ctx_menu;
+
     try buildBody(root, alloc);
+
+    // Tooltip (必须最后添加, 以在最上层绘制)
+    const tip = try zigui.tooltip.Tooltip.create(alloc, "");
+    try root.base.addChild(alloc, &tip.base);
+    g_tooltip = tip;
+    g_tooltip_ctrl = zigui.tooltip_controller.TooltipController.init(tip);
+
+    // 右键菜单加到最上层
+    try root.base.addChild(alloc, &ctx_menu.base);
 
     g_root = root;
     g_alloc = alloc;
@@ -215,15 +286,41 @@ fn buildLeftColumn(body: *Container, alloc: std.mem.Allocator) !void {
 fn buildRightColumn(body: *Container, alloc: std.mem.Allocator) !void {
     const col = try Container.create(alloc, .{
         .direction = .column,
-        .gap = .{ .width = 0, .height = 16 },
     });
     col.base.layout_style.flex_grow = 1;
     col.base.layout_style.min_width = .{ .px = 0 };
     try body.base.addChild(alloc, &col.base);
 
-    try buildCenterBoxDemo(col, alloc);
-    try buildFlowBoxDemo(col, alloc);
-    try buildOverlayDemo(col, alloc);
+    const scroll = try ScrollView.create(alloc, .{
+        .bg_color = math.Color.hex(0x0F172AFF),
+    });
+    scroll.base.layout_style.flex_grow = 1;
+    try col.base.addChild(alloc, &scroll.base);
+
+    const content = try Container.create(alloc, .{
+        .direction = .column,
+        .padding = math.EdgeInsets.all(16),
+        .gap = .{ .width = 0, .height = 16 },
+    });
+    try scroll.base.addChild(alloc, &content.base);
+
+    try buildCenterBoxDemo(content, alloc);
+    try buildFlowBoxDemo(content, alloc);
+    try buildOverlayDemo(content, alloc);
+    try buildInfoBarDemo(content, alloc);
+    try buildSearchEntryDemo(content, alloc);
+    try buildMenuButtonDemo(content, alloc);
+    try buildMarkupDemo(content, alloc);
+    try buildIconDemo(content, alloc);
+    try buildDropDownDemo(content, alloc);
+    try buildLevelBarDemo(content, alloc);
+    try buildProgressBarDemo(content, alloc);
+    try buildPasswordDemo(content, alloc);
+    try buildLabelWrapDemo(content, alloc);
+    try buildCalendarDemo(content, alloc);
+    try buildFileChooserDemo(content, alloc);
+    try buildColorButtonDemo(content, alloc);
+    try buildFontButtonDemo(content, alloc);
 }
 
 fn addSection(parent: *Container, alloc: std.mem.Allocator, text: []const u8) !void {
@@ -504,6 +601,724 @@ fn buildFlowBoxDemo(parent: *Container, alloc: std.mem.Allocator) !void {
         try item.base.addChild(alloc, &num_lbl.base);
         try flow.addChild(&item.base);
     }
+}
+
+fn buildDropDownDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "DropDown 下拉选择");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .row,
+        .gap = .{ .width = 12, .height = 0 },
+    });
+    demo.base.layout_style.align_items = .center;
+    try parent.base.addChild(alloc, &demo.base);
+
+    const dd = try DropDown.create(alloc, .{
+        .on_change = onDropDownChange,
+    });
+    try dd.addItem("选项 A", 1);
+    try dd.addItem("选项 B", 2);
+    try dd.addItem("选项 C", 3);
+    try dd.addItem("选项 D", 4);
+    try demo.base.addChild(alloc, &dd.base);
+
+    const lbl = try Label.create(alloc, "选中: 选项 A", .{
+        .font_size = 13,
+        .color = math.Color.hex(0x64748BFF),
+    });
+    g_dropdown_label = lbl;
+    try demo.base.addChild(alloc, &lbl.base);
+}
+
+var g_dropdown_buf: [64]u8 = undefined;
+var g_calendar_buf: [64]u8 = undefined;
+
+fn onDropDownChange(dd: *DropDown, _: usize) void {
+    if (g_dropdown_label) |lbl| {
+        const text = dd.getSelectedText();
+        const msg = std.fmt.bufPrint(&g_dropdown_buf, "选中: {s}", .{text}) catch "选中";
+        lbl.text = msg;
+        lbl.base.markDirty();
+    }
+}
+
+fn buildLevelBarDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "LevelBar 等级条");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 8 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    // 离散模式 - 电量 (5 段)
+    const battery_lbl = try Label.create(alloc, "电量 (离散 5 段)", .{
+        .font_size = 12,
+        .color = math.Color.hex(0x64748BFF),
+    });
+    try demo.base.addChild(alloc, &battery_lbl.base);
+
+    const battery = try LevelBar.create(alloc, .{
+        .value = 0.6,
+        .mode = .discrete,
+        .segments = 5,
+    });
+    battery.base.layout_style.width = .{ .px = 200 };
+    try demo.base.addChild(alloc, &battery.base);
+
+    // 离散模式 - 信号 (4 段, 低值)
+    const signal_lbl = try Label.create(alloc, "信号 (低值红色)", .{
+        .font_size = 12,
+        .color = math.Color.hex(0x64748BFF),
+    });
+    try demo.base.addChild(alloc, &signal_lbl.base);
+
+    const signal = try LevelBar.create(alloc, .{
+        .value = 0.15,
+        .mode = .discrete,
+        .segments = 4,
+    });
+    signal.base.layout_style.width = .{ .px = 160 };
+    try demo.base.addChild(alloc, &signal.base);
+
+    // 连续模式
+    const cont_lbl = try Label.create(alloc, "连续模式 (高值绿色)", .{
+        .font_size = 12,
+        .color = math.Color.hex(0x64748BFF),
+    });
+    try demo.base.addChild(alloc, &cont_lbl.base);
+
+    const cont = try LevelBar.create(alloc, .{
+        .value = 0.9,
+        .mode = .continuous,
+    });
+    cont.base.layout_style.width = .{ .px = 200 };
+    try demo.base.addChild(alloc, &cont.base);
+}
+
+fn buildProgressBarDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "ProgressBar 进度条");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 8 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    // 确定模式
+    const det_lbl = try Label.create(alloc, "确定模式 (每帧 +1%)", .{
+        .font_size = 12,
+        .color = math.Color.hex(0x64748BFF),
+    });
+    try demo.base.addChild(alloc, &det_lbl.base);
+
+    const det_pb = try ProgressBar.create(alloc, .{
+        .value = 0,
+        .show_label = true,
+    });
+    det_pb.base.layout_style.width = .{ .px = 250 };
+    g_determinate_pb = det_pb;
+    try demo.base.addChild(alloc, &det_pb.base);
+
+    // 不确定模式
+    const indet_lbl = try Label.create(alloc, "不确定模式 (来回滚动)", .{
+        .font_size = 12,
+        .color = math.Color.hex(0x64748BFF),
+    });
+    try demo.base.addChild(alloc, &indet_lbl.base);
+
+    const indet_pb = try ProgressBar.create(alloc, .{
+        .indeterminate = true,
+    });
+    indet_pb.base.layout_style.width = .{ .px = 250 };
+    g_indeterminate_pb = indet_pb;
+    try demo.base.addChild(alloc, &indet_pb.base);
+}
+
+fn buildPasswordDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "TextInput 密码模式");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 8 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    // 密码输入
+    const pwd_lbl = try Label.create(alloc, "密码 (visibility=false, max=16)", .{
+        .font_size = 12,
+        .color = math.Color.hex(0x64748BFF),
+    });
+    try demo.base.addChild(alloc, &pwd_lbl.base);
+
+    const pwd = try TextInput.create(alloc, .{
+        .placeholder = "请输入密码",
+        .visibility = false,
+        .max_length = 16,
+    });
+    pwd.base.layout_style.width = .{ .px = 250 };
+    try demo.base.addChild(alloc, &pwd.base);
+
+    // 普通输入 + max_length
+    const limited_lbl = try Label.create(alloc, "限长输入 (max=10)", .{
+        .font_size = 12,
+        .color = math.Color.hex(0x64748BFF),
+    });
+    try demo.base.addChild(alloc, &limited_lbl.base);
+
+    const limited = try TextInput.create(alloc, .{
+        .placeholder = "最多 10 个字符",
+        .max_length = 10,
+    });
+    limited.base.layout_style.width = .{ .px = 250 };
+    try demo.base.addChild(alloc, &limited.base);
+}
+
+fn buildLabelWrapDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "Label 换行与省略号");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 8 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    // 自动换行
+    const wrap_lbl = try Label.create(alloc, "这是自动换行的长文本, 当文本超过容器宽度时会自动折行显示, 适合显示段落内容。", .{
+        .font_size = 13,
+        .color = math.Color.hex(0xF8FAFCFF),
+        .wrap = true,
+    });
+    wrap_lbl.base.layout_style.width = .{ .px = 300 };
+    try demo.base.addChild(alloc, &wrap_lbl.base);
+
+    // 省略号
+    const ellip_lbl = try Label.create(alloc, "这是带省略号的文本, 超出宽度的部分会被截断并显示省略号...", .{
+        .font_size = 13,
+        .color = math.Color.hex(0xF8FAFCFF),
+        .ellipsize = .end,
+    });
+    ellip_lbl.base.layout_style.width = .{ .px = 200 };
+    try demo.base.addChild(alloc, &ellip_lbl.base);
+}
+
+fn buildCalendarDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "Calendar 日历");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 8 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    const cal = try Calendar.create(alloc, .{
+        .year = 2026,
+        .month = 7,
+        .on_change = onCalendarChange,
+    });
+    try demo.base.addChild(alloc, &cal.base);
+
+    const lbl = try Label.create(alloc, "点击日期选择", .{
+        .font_size = 12,
+        .color = math.Color.hex(0x64748BFF),
+    });
+    g_calendar_label = lbl;
+    try demo.base.addChild(alloc, &lbl.base);
+}
+
+fn onCalendarChange(cal: *Calendar, year: u16, month: u4, day: u8) void {
+    _ = cal;
+    if (g_calendar_label) |lbl| {
+        const msg = std.fmt.bufPrint(&g_calendar_buf, "选中: {d}年{d}月{d}日", .{ year, month, day }) catch "选中";
+        lbl.text = msg;
+        lbl.base.markDirty();
+    }
+}
+
+fn buildFileChooserDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "FileChooser 文件选择对话框");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 8 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    const btn_row = try Container.create(alloc, .{
+        .direction = .row,
+        .gap = .{ .width = 8, .height = 0 },
+    });
+    try demo.base.addChild(alloc, &btn_row.base);
+
+    const open_btn = try Button.create(alloc, "打开文件", .{
+        .on_click = onOpenFileClick,
+    });
+    try btn_row.base.addChild(alloc, &open_btn.base);
+
+    const save_btn = try Button.create(alloc, "保存文件", .{
+        .on_click = onSaveFileClick,
+        .bg_color = math.Color.hex(0x10B981FF),
+        .bg_hover = math.Color.hex(0x34D399FF),
+        .bg_pressed = math.Color.hex(0x059669FF),
+    });
+    try btn_row.base.addChild(alloc, &save_btn.base);
+
+    const lbl = try Label.create(alloc, "未选择文件", .{
+        .font_size = 12,
+        .color = math.Color.hex(0x64748BFF),
+    });
+    g_file_chooser_label = lbl;
+    try demo.base.addChild(alloc, &lbl.base);
+}
+
+fn onOpenFileClick(btn: *Button) void {
+    _ = btn;
+    const alloc = g_alloc orelse return;
+    const root = g_root orelse return;
+
+    // 如果已有文件选择器, 直接显示
+    if (g_file_chooser) |fc| {
+        fc.mode = .open;
+        fc.show();
+        return;
+    }
+
+    const chooser = FileChooser.create(alloc, .{
+        .mode = .open,
+        .title = "打开文件",
+        .initial_path = "/tmp",
+        .on_file_selected = onFileSelected,
+        .on_cancel = onFileChooserCancel,
+    }) catch return;
+    g_file_chooser = chooser;
+    root.base.addChild(alloc, &chooser.base) catch return;
+    chooser.show();
+}
+
+fn onSaveFileClick(btn: *Button) void {
+    _ = btn;
+    const alloc = g_alloc orelse return;
+    const root = g_root orelse return;
+
+    if (g_file_chooser) |fc| {
+        fc.mode = .save;
+        fc.show();
+        return;
+    }
+
+    const chooser = FileChooser.create(alloc, .{
+        .mode = .save,
+        .title = "保存文件",
+        .initial_path = "/tmp",
+        .on_file_selected = onFileSelected,
+        .on_cancel = onFileChooserCancel,
+    }) catch return;
+    g_file_chooser = chooser;
+    root.base.addChild(alloc, &chooser.base) catch return;
+    chooser.show();
+}
+
+fn onFileSelected(fc: *FileChooser, path: []const u8) void {
+    _ = fc;
+    if (g_file_chooser_label) |lbl| {
+        const buf = &g_file_chooser_buf;
+        const prefix = "已选择: ";
+        const max_path_len = buf.len - prefix.len - 3;
+        if (path.len <= max_path_len) {
+            @memcpy(buf[0..prefix.len], prefix);
+            @memcpy(buf[prefix.len .. prefix.len + path.len], path);
+            lbl.text = buf[0 .. prefix.len + path.len];
+        } else {
+            @memcpy(buf[0..prefix.len], prefix);
+            @memcpy(buf[prefix.len .. prefix.len + max_path_len], path[0..max_path_len]);
+            @memcpy(buf[prefix.len + max_path_len .. prefix.len + max_path_len + 3], "...");
+            lbl.text = buf[0 .. prefix.len + max_path_len + 3];
+        }
+        lbl.base.markDirty();
+    }
+}
+
+fn onFileChooserCancel(fc: *FileChooser) void {
+    _ = fc;
+}
+
+// ── 右键菜单回调 ──────────────────────────────────────────────────────────
+
+fn onCtxCopyColor(_: ?*anyopaque) void {
+    // 演示用: 实际可以复制到剪贴板
+}
+
+fn onCtxSetBg(_: ?*anyopaque) void {
+    // 演示用: 实际可以设置背景色
+}
+
+fn onCtxReset(_: ?*anyopaque) void {
+    // 禁用的菜单项
+}
+
+fn buildColorButtonDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "ColorButton 颜色选择按钮");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .row,
+        .gap = .{ .width = 12, .height = 0 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    const colors = [_]struct { color: math.Color, name: []const u8 }{
+        .{ .color = math.Color.hex(0x3B82F6FF), .name = "蓝色 (Blue)" },
+        .{ .color = math.Color.hex(0xEF4444FF), .name = "红色 (Red)" },
+        .{ .color = math.Color.hex(0x22C55EFF), .name = "绿色 (Green)" },
+        .{ .color = math.Color.hex(0xF59E0BFF), .name = "橙色 (Orange)" },
+        .{ .color = math.Color.hex(0x8B5CF6FF), .name = "紫色 (Purple)" },
+    };
+
+    inline for (colors) |c| {
+        const btn = try ColorButton.create(alloc, .{
+            .color = c.color,
+        });
+        btn.base.tooltip_text = c.name;
+        btn.base.context_menu = g_context_menu;
+        try demo.base.addChild(alloc, &btn.base);
+    }
+}
+
+var g_font_preview_label: *Label = undefined;
+
+fn onFontChanged(_: *FontButton, desc: FontDesc) void {
+    g_font_preview_label.font_size = desc.size;
+    g_font_preview_label.font_weight = if (desc.bold) 700 else 400;
+    g_font_preview_label.text = desc.family;
+}
+
+fn buildFontButtonDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "FontButton 字体选择按钮");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .row,
+        .gap = .{ .width = 16, .height = 0 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    const btn = try FontButton.create(alloc, .{
+        .family = "Sans",
+        .size = 14,
+        .on_font_changed = onFontChanged,
+    });
+    try demo.base.addChild(alloc, &btn.base);
+
+    g_font_preview_label = try Label.create(alloc, "Sans", .{
+        .font_size = 14,
+        .color = math.Color.hex(0xF8FAFCFF),
+    });
+    try demo.base.addChild(alloc, &g_font_preview_label.base);
+}
+
+fn buildMarkupDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "Label 富文本标记");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 8 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    // 富文本示例
+    const lbl1 = try Label.create(alloc, "普通文本 <b>粗体</b> <color=0xEF4444FF>红色</color> <color=0x22C55EFF>绿色</color>", .{
+        .font_size = 14,
+        .color = math.Color.hex(0xF8FAFCFF),
+        .use_markup = true,
+    });
+    try demo.base.addChild(alloc, &lbl1.base);
+
+    const lbl2 = try Label.create(alloc, "<size=20>大字</size> <size=12>小字</size> <b><color=0x3B82F6FF>蓝色粗体</color></b>", .{
+        .font_size = 14,
+        .color = math.Color.hex(0xF8FAFCFF),
+        .use_markup = true,
+    });
+    try demo.base.addChild(alloc, &lbl2.base);
+
+    const lbl3 = try Label.create(alloc, "<b>标题</b> <i>斜体</i> <color=0xF59E0BFF>警告色</color> 普通", .{
+        .font_size = 16,
+        .color = math.Color.hex(0xF8FAFCFF),
+        .use_markup = true,
+    });
+    try demo.base.addChild(alloc, &lbl3.base);
+
+    const lbl4 = try Label.create(alloc, "<u>下划线</u> <s>删除线</s> <b><i>粗斜体</i></b>", .{
+        .font_size = 14,
+        .color = math.Color.hex(0xF8FAFCFF),
+        .use_markup = true,
+    });
+    try demo.base.addChild(alloc, &lbl4.base);
+
+    const lbl5 = try Label.create(alloc, "<i><u>斜体+下划线</u></i>  <color=0xEF4444FF><s>红色删除线</s></color>", .{
+        .font_size = 14,
+        .color = math.Color.hex(0xF8FAFCFF),
+        .use_markup = true,
+    });
+    try demo.base.addChild(alloc, &lbl5.base);
+}
+
+fn buildIconDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "Button 图标按钮 (纯图标 / 图标+文本)");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 10 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    // 第一行: 纯图标按钮 (方形, 浅底深图标)
+    const icon_row = try Container.create(alloc, .{
+        .direction = .row,
+        .gap = .{ .width = 8, .height = 0 },
+    });
+    try demo.base.addChild(alloc, &icon_row.base);
+
+    const IconName = zigui.icons.IconName;
+    const icon_names = [_]IconName{
+        .close, .menu, .search, .settings, .plus, .minus, .refresh, .edit, .trash, .save,
+    };
+    for (icon_names) |ic| {
+        const btn = try Button.create(alloc, "", .{
+            .icon = ic,
+            .icon_size = 16,
+            .bg_color = math.Color.hex(0x1E293BFF),
+            .bg_hover = math.Color.hex(0x334155FF),
+            .bg_pressed = math.Color.hex(0x0F172AFF),
+            .text_color = math.Color.hex(0xE2E8F0FF),
+            .corner_radius = 6,
+            .padding_h = 8,
+            .padding_v = 8,
+        });
+        btn.base.layout_style.width = .{ .px = 32 };
+        btn.base.layout_style.height = .{ .px = 32 };
+        try icon_row.base.addChild(alloc, &btn.base);
+    }
+
+    // 第二行: 图标 + 文本按钮
+    const mixed_row = try Container.create(alloc, .{
+        .direction = .row,
+        .gap = .{ .width = 8, .height = 0 },
+    });
+    mixed_row.base.layout_style.wrap = .wrap;
+    try demo.base.addChild(alloc, &mixed_row.base);
+
+    const save_btn = try Button.create(alloc, "保存", .{
+        .icon = .save,
+        .bg_color = math.Color.hex(0x10B981FF),
+        .bg_hover = math.Color.hex(0x34D399FF),
+        .bg_pressed = math.Color.hex(0x059669FF),
+    });
+    try mixed_row.base.addChild(alloc, &save_btn.base);
+
+    const edit_btn = try Button.create(alloc, "编辑", .{
+        .icon = .edit,
+        .bg_color = math.Color.hex(0x3B82F6FF),
+        .bg_hover = math.Color.hex(0x60A5FAFF),
+    });
+    try mixed_row.base.addChild(alloc, &edit_btn.base);
+
+    const del_btn = try Button.create(alloc, "删除", .{
+        .icon = .trash,
+        .bg_color = math.Color.hex(0xEF4444FF),
+        .bg_hover = math.Color.hex(0xF87171FF),
+    });
+    try mixed_row.base.addChild(alloc, &del_btn.base);
+
+    const refresh_btn = try Button.create(alloc, "刷新", .{
+        .icon = .refresh,
+        .bg_color = math.Color.hex(0x6366F1FF),
+        .bg_hover = math.Color.hex(0x818CF8FF),
+    });
+    try mixed_row.base.addChild(alloc, &refresh_btn.base);
+
+    // 第三行: 更多图标展示 (信息类)
+    const more_row = try Container.create(alloc, .{
+        .direction = .row,
+        .gap = .{ .width = 8, .height = 0 },
+    });
+    more_row.base.layout_style.wrap = .wrap;
+    try demo.base.addChild(alloc, &more_row.base);
+
+    const more_icons = [_]struct { name: IconName, label: []const u8, bg: math.Color }{
+        .{ .name = .home, .label = "首页", .bg = math.Color.hex(0xF59E0BFF) },
+        .{ .name = .user, .label = "用户", .bg = math.Color.hex(0x8B5CF6FF) },
+        .{ .name = .star, .label = "收藏", .bg = math.Color.hex(0xEAB308FF) },
+        .{ .name = .heart, .label = "喜欢", .bg = math.Color.hex(0xEC4899FF) },
+        .{ .name = .info, .label = "信息", .bg = math.Color.hex(0x06B6D4FF) },
+        .{ .name = .warning, .label = "警告", .bg = math.Color.hex(0xF97316FF) },
+        .{ .name = .err, .label = "错误", .bg = math.Color.hex(0xDC2626FF) },
+        .{ .name = .question, .label = "帮助", .bg = math.Color.hex(0x64748BFF) },
+    };
+    for (more_icons) |m| {
+        const btn = try Button.create(alloc, m.label, .{
+            .icon = m.name,
+            .bg_color = m.bg,
+            .bg_hover = math.Color.hex(0x475569FF),
+        });
+        try more_row.base.addChild(alloc, &btn.base);
+    }
+
+    // 第四行: 箭头 + 勾选
+    const arrow_row = try Container.create(alloc, .{
+        .direction = .row,
+        .gap = .{ .width = 8, .height = 0 },
+    });
+    try demo.base.addChild(alloc, &arrow_row.base);
+
+    const arrows = [_]struct { name: IconName, bg: math.Color }{
+        .{ .name = .arrow_left, .bg = math.Color.hex(0x334155FF) },
+        .{ .name = .arrow_up, .bg = math.Color.hex(0x334155FF) },
+        .{ .name = .arrow_down, .bg = math.Color.hex(0x334155FF) },
+        .{ .name = .arrow_right, .bg = math.Color.hex(0x334155FF) },
+        .{ .name = .check, .bg = math.Color.hex(0x22C55EFF) },
+        .{ .name = .plus, .bg = math.Color.hex(0x3B82F6FF) },
+    };
+    for (arrows) |a| {
+        const btn = try Button.create(alloc, "", .{
+            .icon = a.name,
+            .icon_size = 18,
+            .bg_color = a.bg,
+            .bg_hover = math.Color.hex(0x475569FF),
+            .corner_radius = 6,
+            .padding_h = 10,
+            .padding_v = 10,
+        });
+        try arrow_row.base.addChild(alloc, &btn.base);
+    }
+}
+
+fn buildMenuButtonDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "MenuButton 菜单按钮");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .row,
+        .gap = .{ .width = 8, .height = 0 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    // 菜单按钮 1: 设置
+    const popover1 = try Popover.create(alloc, .{ .position = .bottom });
+    const menu_content1 = try Container.create(alloc, .{
+        .bg_color = math.Color.hex(0x1E293BFF),
+        .corner_radius = 8,
+        .padding = math.EdgeInsets.all(8),
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 4 },
+    });
+    const item1 = try Label.create(alloc, "  设置  ", .{ .font_size = 14, .color = math.Color.hex(0xF8FAFCFF) });
+    try menu_content1.base.addChild(alloc, &item1.base);
+    const item2 = try Label.create(alloc, "  关于  ", .{ .font_size = 14, .color = math.Color.hex(0xF8FAFCFF) });
+    try menu_content1.base.addChild(alloc, &item2.base);
+    try popover1.addChild(&menu_content1.base);
+    try demo.base.addChild(alloc, &popover1.base);
+
+    const btn1 = try MenuButton.create(alloc, "设置", .{});
+    btn1.setPopover(popover1);
+    try demo.base.addChild(alloc, &btn1.base);
+
+    // 菜单按钮 2: 文件
+    const popover2 = try Popover.create(alloc, .{ .position = .bottom });
+    const menu_content2 = try Container.create(alloc, .{
+        .bg_color = math.Color.hex(0x1E293BFF),
+        .corner_radius = 8,
+        .padding = math.EdgeInsets.all(8),
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 4 },
+    });
+    const item3 = try Label.create(alloc, "  新建  ", .{ .font_size = 14, .color = math.Color.hex(0xF8FAFCFF) });
+    try menu_content2.base.addChild(alloc, &item3.base);
+    const item4 = try Label.create(alloc, "  打开  ", .{ .font_size = 14, .color = math.Color.hex(0xF8FAFCFF) });
+    try menu_content2.base.addChild(alloc, &item4.base);
+    const item5 = try Label.create(alloc, "  保存  ", .{ .font_size = 14, .color = math.Color.hex(0xF8FAFCFF) });
+    try menu_content2.base.addChild(alloc, &item5.base);
+    try popover2.addChild(&menu_content2.base);
+    try demo.base.addChild(alloc, &popover2.base);
+
+    const btn2 = try MenuButton.create(alloc, "文件", .{});
+    btn2.setPopover(popover2);
+    try demo.base.addChild(alloc, &btn2.base);
+}
+
+fn buildSearchEntryDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "SearchEntry 搜索框");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 8 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    const search = try SearchEntry.create(alloc, .{
+        .placeholder = "输入关键词搜索...",
+        .on_search = onSearch,
+    });
+    search.base.layout_style.width = .{ .px = 300 };
+    try demo.base.addChild(alloc, &search.base);
+
+    // 结果标签
+    const result_lbl = try Label.create(alloc, "输入文字后按 ESC 清空", .{
+        .font_size = 13,
+        .color = math.Color.hex(0x64748BFF),
+    });
+    try demo.base.addChild(alloc, &result_lbl.base);
+}
+
+fn onSearch(entry: *SearchEntry, text: []const u8) void {
+    _ = entry;
+    _ = text;
+}
+
+fn buildInfoBarDemo(parent: *Container, alloc: std.mem.Allocator) !void {
+    try addSection(parent, alloc, "InfoBar 通知消息条");
+
+    const demo = try Container.create(alloc, .{
+        .direction = .column,
+        .gap = .{ .width = 0, .height = 8 },
+    });
+    try parent.base.addChild(alloc, &demo.base);
+
+    // Info
+    const info_bar = try InfoBar.create(alloc, "操作已完成, 数据已保存", .info, .{
+        .on_response = infoBarResponse,
+        .on_close = infoBarClose,
+    });
+    try info_bar.addAction("查看", 100);
+    try info_bar.addAction("撤销", 101);
+    try demo.base.addChild(alloc, &info_bar.base);
+
+    // Warning
+    const warn_bar = try InfoBar.create(alloc, "您的存储空间不足, 请清理", .warning, .{
+        .on_close = infoBarClose,
+    });
+    try warn_bar.addAction("清理", 200);
+    try demo.base.addChild(alloc, &warn_bar.base);
+
+    // Error
+    const err_bar = try InfoBar.create(alloc, "网络连接失败, 请检查网络设置", .err, .{
+        .on_close = infoBarClose,
+    });
+    try err_bar.addAction("重试", 300);
+    try demo.base.addChild(alloc, &err_bar.base);
+
+    // Question (无关闭按钮)
+    const q_bar = try InfoBar.create(alloc, "是否保存更改?", .question, .{
+        .on_response = infoBarResponse,
+    });
+    try q_bar.addAction("保存", 400);
+    try q_bar.addAction("不保存", 401);
+    try demo.base.addChild(alloc, &q_bar.base);
+}
+
+fn infoBarResponse(bar: *InfoBar, response_id: i32) void {
+    _ = bar;
+    _ = response_id;
+}
+
+fn infoBarClose(bar: *InfoBar) void {
+    _ = bar;
 }
 
 fn buildOverlayDemo(parent: *Container, alloc: std.mem.Allocator) !void {
@@ -820,6 +1635,16 @@ fn drawFrame(app: *zigui.app.App) void {
     const delta_ms = app.getDeltaMs();
     root.base.tickTree(delta_ms);
 
+    // 更新 Tooltip
+    g_tooltip_ctrl.update(&root.base, app.mouse_x, app.mouse_y, delta_ms);
+
+    // 动态更新确定模式进度条
+    if (g_determinate_pb) |pb| {
+        g_pb_value += @as(f32, @floatFromInt(delta_ms)) / 1000.0 * 0.15; // 15%/秒
+        if (g_pb_value > 1.0) g_pb_value = 0.0;
+        pb.setValue(g_pb_value);
+    }
+
     root.base.layout_style.width = .{ .px = w };
     root.base.layout_style.height = .{ .px = h };
 
@@ -838,22 +1663,43 @@ fn dispatchInput(app: *zigui.app.App) void {
     const mx: i32 = @intFromFloat(app.mouse_x);
     const my: i32 = @intFromFloat(app.mouse_y);
 
-    var ev_move = pal.Event{ .mouse_move = .{ .x = mx, .y = my } };
+    var ev_move = pal.Event{ .mouse_move = .{ .window_id = 0, .x = mx, .y = my } };
     _ = root.base.dispatchEvent(&ev_move, &ectx);
 
+    // 根据鼠标位置更新光标样式
+    if (root.base.hitTest(app.mouse_x, app.mouse_y)) |hit| {
+        app.setCursor(hit.resolveCursor());
+    } else {
+        app.setCursor(.arrow);
+    }
+
     if (app.mouse_clicked) {
-        var ev = pal.Event{ .mouse_button = .{ .button = .left, .state = .pressed, .x = mx, .y = my } };
+        var ev = pal.Event{ .mouse_button = .{ .window_id = 0, .button = .left, .state = .pressed, .x = mx, .y = my } };
         _ = root.base.dispatchEvent(&ev, &ectx);
     }
     const md = app.mouse_down;
     if (!md and g_prev_mouse_down) {
-        var ev = pal.Event{ .mouse_button = .{ .button = .left, .state = .released, .x = mx, .y = my } };
+        var ev = pal.Event{ .mouse_button = .{ .window_id = 0, .button = .left, .state = .released, .x = mx, .y = my } };
         _ = root.base.dispatchEvent(&ev, &ectx);
     }
     g_prev_mouse_down = md;
 
+    // 右键菜单: 点击外部关闭
+    if (app.right_clicked) {
+        const ctx_menu = g_context_menu orelse return;
+
+        // 先派发右键事件 (Widget 基类会自动弹出有 context_menu 的控件的菜单)
+        var ev_right = pal.Event{ .mouse_button = .{ .window_id = 0, .button = .right, .state = .pressed, .x = mx, .y = my } };
+        _ = root.base.dispatchEvent(&ev_right, &ectx);
+
+        // 如果菜单已经打开, 点击外部关闭
+        if (ctx_menu.open and !ctx_menu.containsPoint(app.mouse_x, app.mouse_y)) {
+            ctx_menu.popdown();
+        }
+    }
+
     if (app.scroll_delta != 0) {
-        var ev = pal.Event{ .scroll = .{ .axis = .vertical, .delta = app.scroll_delta } };
+        var ev = pal.Event{ .scroll = .{ .window_id = 0, .axis = .vertical, .delta = app.scroll_delta } };
         _ = root.base.dispatchEvent(&ev, &ectx);
     }
 
@@ -866,7 +1712,23 @@ fn dispatchInput(app: *zigui.app.App) void {
             }
             return;
         }
-        var ev = pal.Event{ .key = .{ .state = .pressed, .key = key, .modifiers = app.key_mods } };
+        var ev = pal.Event{ .key = .{ .window_id = 0, .state = .pressed, .key = key, .modifiers = app.key_mods } };
+        _ = root.base.dispatchEvent(&ev, &ectx);
+    }
+
+    // 分发文本输入 (字符)
+    for (app.typedCodepoints()) |cp| {
+        var ev = pal.Event{ .text_input = .{ .window_id = 0, .codepoint = cp } };
+        _ = root.base.dispatchEvent(&ev, &ectx);
+    }
+
+    // 分发 IME 提交文本 (拷贝到固定数组, 帧末重置)
+    const ime_text = app.imeCommitText();
+    if (ime_text.len > 0) {
+        var buf: [pal.event.max_ime_text]u8 = undefined;
+        const n = @min(ime_text.len, buf.len);
+        @memcpy(buf[0..n], ime_text[0..n]);
+        var ev = pal.Event{ .ime_commit = .{ .window_id = 0, .text = buf, .len = @intCast(n) } };
         _ = root.base.dispatchEvent(&ev, &ectx);
     }
 }

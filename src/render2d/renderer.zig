@@ -94,6 +94,70 @@ pub const Renderer2D = struct {
         }
     }
 
+    /// 填充圆形 (中心扇形三角化)
+    pub fn fillCircle(self: *Renderer2D, cx: f32, cy: f32, radius: f32, color: math.Color) !void {
+        if (radius <= 0) return;
+        const c = colorToFloat(color);
+        const center = Vertex2D{ .pos = .{ cx, cy }, .color = c };
+        const segments: u32 = 24;
+        var i: u32 = 0;
+        while (i < segments) : (i += 1) {
+            const a0 = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(segments)) * 2.0 * std.math.pi;
+            const a1 = @as(f32, @floatFromInt(i + 1)) / @as(f32, @floatFromInt(segments)) * 2.0 * std.math.pi;
+            try self.vertices.appendSlice(self.allocator, &.{
+                center,
+                .{ .pos = .{ cx + radius * @cos(a0), cy + radius * @sin(a0) }, .color = c },
+                .{ .pos = .{ cx + radius * @cos(a1), cy + radius * @sin(a1) }, .color = c },
+            });
+        }
+    }
+
+    /// 填充圆环 (描边圆: 外半径 r_outer 减内半径 r_inner 的环形区域)
+    pub fn fillRing(self: *Renderer2D, cx: f32, cy: f32, r_outer: f32, r_inner: f32, color: math.Color) !void {
+        if (r_outer <= 0) return;
+        const ro = r_outer;
+        const ri = @max(0.0, r_inner);
+        if (ri >= ro) return;
+        const c = colorToFloat(color);
+        const segments: u32 = 24;
+        var i: u32 = 0;
+        while (i < segments) : (i += 1) {
+            const a0 = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(segments)) * 2.0 * std.math.pi;
+            const a1 = @as(f32, @floatFromInt(i + 1)) / @as(f32, @floatFromInt(segments)) * 2.0 * std.math.pi;
+            const ox0 = cx + ro * @cos(a0);
+            const oy0 = cy + ro * @sin(a0);
+            const ox1 = cx + ro * @cos(a1);
+            const oy1 = cy + ro * @sin(a1);
+            const ix0 = cx + ri * @cos(a0);
+            const iy0 = cy + ri * @sin(a0);
+            const ix1 = cx + ri * @cos(a1);
+            const iy1 = cy + ri * @sin(a1);
+            try self.vertices.appendSlice(self.allocator, &.{
+                .{ .pos = .{ ox0, oy0 }, .color = c },
+                .{ .pos = .{ ox1, oy1 }, .color = c },
+                .{ .pos = .{ ix0, iy0 }, .color = c },
+                .{ .pos = .{ ox1, oy1 }, .color = c },
+                .{ .pos = .{ ix1, iy1 }, .color = c },
+                .{ .pos = .{ ix0, iy0 }, .color = c },
+            });
+        }
+    }
+
+    /// 填充凸多边形 (从首点扇形三角化; 调用者保证凸性)
+    pub fn fillConvexPolygon(self: *Renderer2D, points: []const [2]f32, color: math.Color) !void {
+        if (points.len < 3) return;
+        const c = colorToFloat(color);
+        const p0 = Vertex2D{ .pos = points[0], .color = c };
+        var i: usize = 1;
+        while (i + 1 < points.len) : (i += 1) {
+            try self.vertices.appendSlice(self.allocator, &.{
+                p0,
+                .{ .pos = points[i], .color = c },
+                .{ .pos = points[i + 1], .color = c },
+            });
+        }
+    }
+
     /// 描边圆角矩形边框 (内外轮廓环形三角化, 不覆盖内部区域,
     /// 供框架背景之上的边框绘制, 避免挖空式画边覆盖背景色/背景图)
     pub fn strokeRoundedRect(self: *Renderer2D, rect: math.Rect(f32), radius: f32, border_width: f32, color: math.Color) !void {

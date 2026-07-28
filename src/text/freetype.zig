@@ -266,6 +266,82 @@ pub const FtFont = struct {
         };
     }
 
+    /// 光栅化 glyph 并合成斜体 (fake italic: 水平错切)
+    /// buf 为输出缓冲区, max_width 为缓冲区可用宽度 (像素)
+    /// 返回写入 buf 中的斜体字形位图 (从 buf[0..] 开始)
+    pub fn rasterizeGlyphItalic(self: *const FtFont, glyph_id: u32, buf: []u8, max_width: u32) ?GlyphBitmapMetrics {
+        // 先正常光栅化
+        if (ft.FT_Load_Glyph(self.face, glyph_id, ft.FT_LOAD_RENDER) != 0) {
+            return null;
+        }
+
+        const bitmap = &self.face.*.glyph.*.bitmap;
+        const src_w: i32 = @intCast(bitmap.*.width);
+        const src_h: i32 = @intCast(bitmap.*.rows);
+        const advance: i32 = @intCast(self.face.*.glyph.*.advance.x >> 6);
+        const bearing_x: i32 = @intCast(self.face.*.glyph.*.bitmap_left);
+        const bearing_y: i32 = @intCast(self.face.*.glyph.*.bitmap_top);
+
+        if (src_w <= 0 or src_h <= 0) {
+            return .{
+                .width = 0,
+                .height = 0,
+                .bearing_x = 0,
+                .bearing_y = 0,
+                .advance = advance,
+            };
+        }
+
+        // Fake italic: 水平错切, 约 18° (tan(18°) ≈ 0.325)
+        const shear: f32 = 0.3;
+        const src_pitch: i32 = @intCast(bitmap.*.pitch);
+        const src_buf: [*]const u8 = @ptrCast(bitmap.*.buffer);
+
+        // 计算错切后宽度
+        const shear_shift: f32 = @as(f32, @floatFromInt(src_h)) * shear;
+        const dst_w: i32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(src_w)) + shear_shift));
+        if (dst_w > @as(i32, @intCast(max_width))) return null;
+
+        const dst_h = src_h;
+        const needed: usize = @intCast(dst_w * dst_h);
+        if (buf.len < needed) return null;
+
+        // 清空目标缓冲区
+        @memset(buf[0..needed], 0);
+
+        // 逐行错切复制 (顶部右移最多, 底部右移为 0)
+        const src_h_usize: usize = @intCast(src_h);
+        const src_w_usize: usize = @intCast(src_w);
+        const dst_w_usize: usize = @intCast(dst_w);
+        const src_pitch_usize: usize = @intCast(src_pitch);
+        var y: usize = 0;
+        while (y < src_h_usize) : (y += 1) {
+            // 从顶部到底部, 偏移量从 shear_shift 线性减到 0
+            const y_frac: f32 = @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(src_h - 1));
+            const x_offset: f32 = shear_shift * (1.0 - y_frac);
+            const x_off_int: usize = @intFromFloat(@round(x_offset));
+
+            const src_row = src_buf + y * src_pitch_usize;
+            const dst_row = buf[y * dst_w_usize + x_off_int ..];
+
+            var x: usize = 0;
+            while (x < src_w_usize and x_off_int + x < dst_w_usize) : (x += 1) {
+                const src_val = src_row[x];
+                if (src_val > 0) {
+                    dst_row[x] = src_val;
+                }
+            }
+        }
+
+        return .{
+            .width = dst_w,
+            .height = dst_h,
+            .bearing_x = bearing_x,
+            .bearing_y = bearing_y,
+            .advance = advance,
+        };
+    }
+
     /// 字体稳定标识
     pub fn fontId(self: *const FtFont) u64 {
         return self.font_id;

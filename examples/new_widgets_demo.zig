@@ -292,25 +292,25 @@ fn dispatchInput(app: *zigui.app.App) void {
     const my: i32 = @intFromFloat(app.mouse_y);
 
     // 鼠标移动 (悬停)
-    var ev_move = pal.Event{ .mouse_move = .{ .x = mx, .y = my } };
+    var ev_move = pal.Event{ .mouse_move = .{ .window_id = 0, .x = mx, .y = my } };
     _ = root.base.dispatchEvent(&ev_move, &ectx);
 
     // 鼠标按下
     if (app.mouse_clicked) {
-        var ev = pal.Event{ .mouse_button = .{ .button = .left, .state = .pressed, .x = mx, .y = my } };
+        var ev = pal.Event{ .mouse_button = .{ .window_id = 0, .button = .left, .state = .pressed, .x = mx, .y = my } };
         _ = root.base.dispatchEvent(&ev, &ectx);
     }
     // 鼠标释放 (经 mouse_down 边沿检测)
     const md = app.mouse_down;
     if (!md and g_prev_mouse_down) {
-        var ev = pal.Event{ .mouse_button = .{ .button = .left, .state = .released, .x = mx, .y = my } };
+        var ev = pal.Event{ .mouse_button = .{ .window_id = 0, .button = .left, .state = .released, .x = mx, .y = my } };
         _ = root.base.dispatchEvent(&ev, &ectx);
     }
     g_prev_mouse_down = md;
 
     // 滚轮
     if (app.scroll_delta != 0) {
-        var ev = pal.Event{ .scroll = .{ .axis = .vertical, .delta = app.scroll_delta } };
+        var ev = pal.Event{ .scroll = .{ .window_id = 0, .axis = .vertical, .delta = app.scroll_delta } };
         _ = root.base.dispatchEvent(&ev, &ectx);
     }
 
@@ -325,7 +325,7 @@ fn dispatchInput(app: *zigui.app.App) void {
             }
             return;
         }
-        var ev = pal.Event{ .key = .{ .state = .pressed, .key = key, .modifiers = app.key_mods } };
+        var ev = pal.Event{ .key = .{ .window_id = 0, .state = .pressed, .key = key, .modifiers = app.key_mods } };
         _ = root.base.dispatchEvent(&ev, &ectx);
     }
 }

@@ -35,8 +35,8 @@ const DropDown = zigui.drop_down.DropDown;
 const LevelBar = zigui.level_bar.LevelBar;
 const Calendar = zigui.calendar.Calendar;
 const ProgressBar = zigui.progress_bar.ProgressBar;
-const TextInput = zigui.text_input.TextInput;
-const ScrollView = zigui.scroll_view.ScrollView;
+const Entry = zigui.entry.Entry;
+const ScrolledWindow = zigui.scrolled_window.ScrolledWindow;
 const FileChooser = zigui.file_chooser.FileChooser;
 const FileChooserMode = zigui.file_chooser.FileChooserMode;
 const ColorButton = zigui.color_button.ColorButton;
@@ -261,7 +261,7 @@ fn buildLeftColumn(body: *Container, alloc: std.mem.Allocator) !void {
     col.base.layout_style.flex_shrink = 0;
     try body.base.addChild(alloc, &col.base);
 
-    const scroll = try ScrollView.create(alloc, .{
+    const scroll = try ScrolledWindow.create(alloc, .{
         .bg_color = math.Color.hex(0xF8FAFCFF),
         .corner_radius = 12,
     });
@@ -291,7 +291,7 @@ fn buildRightColumn(body: *Container, alloc: std.mem.Allocator) !void {
     col.base.layout_style.min_width = .{ .px = 0 };
     try body.base.addChild(alloc, &col.base);
 
-    const scroll = try ScrollView.create(alloc, .{
+    const scroll = try ScrolledWindow.create(alloc, .{
         .bg_color = math.Color.hex(0x0F172AFF),
     });
     scroll.base.layout_style.flex_grow = 1;
@@ -751,7 +751,7 @@ fn buildPasswordDemo(parent: *Container, alloc: std.mem.Allocator) !void {
     });
     try demo.base.addChild(alloc, &pwd_lbl.base);
 
-    const pwd = try TextInput.create(alloc, .{
+    const pwd = try Entry.create(alloc, .{
         .placeholder = "请输入密码",
         .visibility = false,
         .max_length = 16,
@@ -766,7 +766,7 @@ fn buildPasswordDemo(parent: *Container, alloc: std.mem.Allocator) !void {
     });
     try demo.base.addChild(alloc, &limited_lbl.base);
 
-    const limited = try TextInput.create(alloc, .{
+    const limited = try Entry.create(alloc, .{
         .placeholder = "最多 10 个字符",
         .max_length = 10,
     });
@@ -1281,34 +1281,43 @@ fn buildInfoBarDemo(parent: *Container, alloc: std.mem.Allocator) !void {
     try parent.base.addChild(alloc, &demo.base);
 
     // Info
-    const info_bar = try InfoBar.create(alloc, "操作已完成, 数据已保存", .info, .{
+    const info_bar = try InfoBar.create(alloc, .{
+        .message_type = .info,
+        .text = "操作已完成, 数据已保存",
         .on_response = infoBarResponse,
         .on_close = infoBarClose,
     });
-    try info_bar.addAction("查看", 100);
-    try info_bar.addAction("撤销", 101);
+    _ = try info_bar.addAction("查看", 100);
+    _ = try info_bar.addAction("撤销", 101);
     try demo.base.addChild(alloc, &info_bar.base);
 
     // Warning
-    const warn_bar = try InfoBar.create(alloc, "您的存储空间不足, 请清理", .warning, .{
+    const warn_bar = try InfoBar.create(alloc, .{
+        .message_type = .warning,
+        .text = "您的存储空间不足, 请清理",
         .on_close = infoBarClose,
     });
-    try warn_bar.addAction("清理", 200);
+    _ = try warn_bar.addAction("清理", 200);
     try demo.base.addChild(alloc, &warn_bar.base);
 
     // Error
-    const err_bar = try InfoBar.create(alloc, "网络连接失败, 请检查网络设置", .err, .{
+    const err_bar = try InfoBar.create(alloc, .{
+        .message_type = .err,
+        .text = "网络连接失败, 请检查网络设置",
         .on_close = infoBarClose,
     });
-    try err_bar.addAction("重试", 300);
+    _ = try err_bar.addAction("重试", 300);
     try demo.base.addChild(alloc, &err_bar.base);
 
     // Question (无关闭按钮)
-    const q_bar = try InfoBar.create(alloc, "是否保存更改?", .question, .{
+    const q_bar = try InfoBar.create(alloc, .{
+        .message_type = .question,
+        .text = "是否保存更改?",
+        .show_close = false,
         .on_response = infoBarResponse,
     });
-    try q_bar.addAction("保存", 400);
-    try q_bar.addAction("不保存", 401);
+    _ = try q_bar.addAction("保存", 400);
+    _ = try q_bar.addAction("不保存", 401);
     try demo.base.addChild(alloc, &q_bar.base);
 }
 

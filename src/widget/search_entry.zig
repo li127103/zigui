@@ -1,24 +1,34 @@
 //! SearchEntry 控件 - 搜索输入框 (对标 GtkSearchEntry)
-//! 在 TextInput 基础上增加左侧搜索图标和右侧清除按钮
+//! 在 Entry 基础上增加左侧搜索图标和右侧清除按钮
 
 const std = @import("std");
 const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
+const perf = @import("../perf.zig");
 const styled_text = @import("../text/styled_text.zig");
-const text_input_mod = @import("text_input.zig");
+const entry_mod = @import("entry.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
-const TextInput = text_input_mod.TextInput;
+const Entry = entry_mod.Entry;
+const Editable = @import("../model/editable.zig").Editable;
+const EntryBuffer = @import("../model/editable.zig").EntryBuffer;
+
+// Entry on_change -> SearchEntry on_search 的包装 (反查 parent)
+fn searchEntryChangeWrapper(entry_self: *Entry, text: []const u8) void {
+    const parent_widget = entry_self.base.parent orelse return;
+    const self: *SearchEntry = @fieldParentPtr("base", parent_widget);
+    if (self.on_search) |cb| cb(self, text);
+}
 
 pub const SearchEntry = struct {
     base: Widget,
     allocator: std.mem.Allocator,
-    input: *TextInput,
+    input: *Entry,
     placeholder: []const u8,
     font_size: f32,
     on_search: ?*const fn (self: *SearchEntry, text: []const u8) void = null,
@@ -35,6 +45,14 @@ pub const SearchEntry = struct {
     clear_size: f32 = 16.0,
     clear_btn_hover: bool = false,
     clear_btn_pressed: bool = false,
+    // GTK4 新增字段
+    loading: bool = false,
+    search_delay_ms: u32 = 150,
+    key_capture_widget: ?*Widget = null,
+    // 搜索延迟定时器
+    delay_timer_active: bool = false,
+    delay_timer_start: u64 = 0,
+    delay_pending_text: []const u8 = "",
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         placeholder: []const u8 = "搜索...",
@@ -42,7 +60,7 @@ pub const SearchEntry = struct {
         on_search: ?*const fn (self: *SearchEntry, text: []const u8) void = null,
     }) !*SearchEntry {
         const self = try allocator.create(SearchEntry);
-        const input = try TextInput.create(allocator, .{
+        const input = try Entry.create(allocator, .{
             .placeholder = opts.placeholder,
             .font_size = opts.font_size,
         });
@@ -57,6 +75,9 @@ pub const SearchEntry = struct {
             .font_size = opts.font_size,
             .on_search = opts.on_search,
         };
+        // 先添加 child, 再绑定 on_change wrapper (wrapper 需要 parent 指针)
+        try self.base.addChild(allocator, &input.base);
+        input.on_change = searchEntryChangeWrapper;
         self.base.accessibility = .{ .role = .text, .label = "search" };
         return self;
     }
@@ -77,6 +98,96 @@ pub const SearchEntry = struct {
         self.base.markDirty();
     }
 
+    /// 清空搜索文本 (GTK4: gtk_search_entry.set_text(""))
+    pub fn clear(self: *SearchEntry) void {
+        self.input.setText("") catch {};
+    }
+
+    /// GTK4: gtk_search_entry_get_event_controller_key / Editable interface
+    pub fn getEditable(self: *SearchEntry) Editable {
+        return self.input.getEditable();
+    }
+
+    /// GTK4: gtk_search_entry_get_buffer
+    pub fn getEntryBuffer(self: *const SearchEntry) ?*EntryBuffer {
+        return self.input.getEntryBuffer();
+    }
+
+    pub fn setEntryBuffer(self: *SearchEntry, buf: ?*EntryBuffer) void {
+        self.input.setEntryBuffer(buf);
+    }
+
+    // ── GTK4 SearchEntry 新增 API ──────────────────────────────────────────
+
+    /// GTK4: gtk_search_entry_set_loading
+    pub fn setLoading(self: *SearchEntry, loading: bool) void {
+        self.loading = loading;
+        self.base.markDirty();
+    }
+
+    /// GTK4: gtk_search_entry_get_loading
+    pub fn isLoading(self: *const SearchEntry) bool {
+        return self.loading;
+    }
+
+    /// GTK4: gtk_search_entry_set_search_delay
+    pub fn setSearchDelay(self: *SearchEntry, delay_ms: u32) void {
+        self.search_delay_ms = delay_ms;
+    }
+
+    /// GTK4: gtk_search_entry_get_search_delay
+    pub fn getSearchDelay(self: *const SearchEntry) u32 {
+        return self.search_delay_ms;
+    }
+
+    /// GTK4: gtk_search_entry_set_key_capture_widget
+    pub fn setKeyCaptureWidget(self: *SearchEntry, widget: ?*Widget) void {
+        self.key_capture_widget = widget;
+    }
+
+    /// GTK4: gtk_search_entry_get_key_capture_widget
+    pub fn getKeyCaptureWidget(self: *const SearchEntry) ?*Widget {
+        return self.key_capture_widget;
+    }
+
+    // ── Entry API 代理 (GTK4 对齐) ─────────────────────────────────────────
+
+    pub fn getPlaceholderText(self: *const SearchEntry) []const u8 {
+        return self.input.getPlaceholderText();
+    }
+    pub fn setPlaceholderText(self: *SearchEntry, text: []const u8) void {
+        self.placeholder = text;
+        self.input.setPlaceholderText(text);
+        self.base.markDirty();
+    }
+    pub fn getMaxLength(self: *const SearchEntry) u32 {
+        return self.input.getMaxLength();
+    }
+    pub fn setMaxLength(self: *SearchEntry, max: u32) void {
+        self.input.setMaxLength(max);
+    }
+    pub fn getCursorPosition(self: *const SearchEntry) usize {
+        return self.input.getCursorPosition();
+    }
+    pub fn setCursorPosition(self: *SearchEntry, pos: usize) void {
+        self.input.setCursorPosition(pos);
+    }
+    pub fn selectRegion(self: *SearchEntry, start: usize, end: usize) void {
+        self.input.selectRegion(start, end);
+    }
+    pub fn getSelectionBounds(self: *const SearchEntry, out_start: *usize, out_end: *usize) bool {
+        return self.input.getSelectionBounds(out_start, out_end);
+    }
+    pub fn selectAll(self: *SearchEntry) void {
+        self.input.selectAll();
+    }
+    pub fn hasSelection(self: *const SearchEntry) bool {
+        return self.input.hasSelection();
+    }
+    pub fn deleteSelection(self: *SearchEntry) void {
+        self.input.deleteSelection();
+    }
+
     // ── VTable 实现 ──────────────────────────────────────────────────────────
 
     const vtable = Widget.VTable{
@@ -84,9 +195,41 @@ pub const SearchEntry = struct {
         .measure = measure,
         .paint = paint,
         .on_event = onEvent,
+        .tick = tickFn,
         .focusable = false,
         .destroy = destroyVTable,
     };
+
+    /// 每帧推进：search_delay 定时器超时触发 on_search(delay_pending_text)
+    fn tickFn(w: *Widget, delta_ms: u32) void {
+        const self: *SearchEntry = @fieldParentPtr("base", w);
+        _ = delta_ms;
+        if (!self.delay_timer_active) return;
+        const now_ms: u64 = perf.nowMs();
+        if (now_ms - self.delay_timer_start >= self.search_delay_ms) {
+            self.delay_timer_active = false;
+            if (self.on_search) |cb| cb(self, self.delay_pending_text);
+        }
+    }
+
+    /// 文本变化后按 search_delay 决定：立即触发 或 启动/重置延迟定时器
+    fn handleTextChanged(self: *SearchEntry) void {
+        const text = self.getText();
+        if (self.search_delay_ms == 0) {
+            if (self.on_search) |cb| cb(self, text);
+            return;
+        }
+        // 启动或重置定时器：只要 delay 期间又输入一次，重新计时（debounce）
+        self.delay_pending_text = text;
+        self.delay_timer_start = perf.nowMs();
+        self.delay_timer_active = true;
+    }
+
+    /// 立即触发 on_search 并取消定时器（ESC/clear 清空等强交互场景）
+    fn emitSearchNow(self: *SearchEntry, text: []const u8) void {
+        self.delay_timer_active = false;
+        if (self.on_search) |cb| cb(self, text);
+    }
 
     fn destroyVTable(w: *Widget, allocator: std.mem.Allocator) void {
         const self: *SearchEntry = @fieldParentPtr("base", w);
@@ -96,7 +239,7 @@ pub const SearchEntry = struct {
     fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
         const self: *SearchEntry = @fieldParentPtr("base", w);
 
-        // 测量内部 TextInput (减去图标空间)
+        // 测量内部 Entry (减去图标空间)
         const icon_space = self.icon_padding * 2 + self.icon_size;
         const clear_space = self.icon_padding + self.clear_size + self.icon_padding;
         const adjusted = layout_mod.Constraints{
@@ -135,47 +278,66 @@ pub const SearchEntry = struct {
             border,
         ) catch {};
 
-        // ── 左侧搜索图标 (放大镜) ──
+        // ── 左侧图标: loading 时显示旋转指示器, 否则放大镜 ──
         const icon_x = rx + self.icon_padding;
         const icon_y = ry + (w.rect.height - self.icon_size) / 2.0;
-        const cx = icon_x + self.icon_size * 0.4;
-        const cy = icon_y + self.icon_size * 0.4;
-        const r = self.icon_size * 0.3;
+        if (self.loading) {
+            // 加载动画: 旋转的弧形
+            const cx = icon_x + self.icon_size / 2.0;
+            const cy = icon_y + self.icon_size / 2.0;
+            const r = self.icon_size * 0.4;
+            // 简化: 画一个开口圆环 (8个小方块模拟)
+            const time_ms = @as(u64, perf.nowMs());
+            const phase = @as(f32, @floatFromInt(time_ms % 1000)) / 1000.0;
+            var i: u32 = 0;
+            while (i < 8) : (i += 1) {
+                const angle = (2.0 * 3.14159 * @as(f32, @floatFromInt(i)) / 8.0) + phase * 2.0 * 3.14159;
+                const alpha: f32 = if (i == 0 or i == 1) 1.0 else if (i == 2 or i == 3) 0.6 else 0.25;
+                const px = cx + @cos(angle) * r;
+                const py = cy + @sin(angle) * r;
+                const dot_size: f32 = 2.0;
+                var dot_color = self.icon_color;
+                dot_color.a = @as(u8, @intFromFloat(@as(f32, @floatFromInt(dot_color.a)) * alpha));
+                ctx.renderer.fillRoundedRect(
+                    .{ .x = px - dot_size / 2.0, .y = py - dot_size / 2.0, .width = dot_size, .height = dot_size },
+                    dot_size / 2.0,
+                    dot_color,
+                ) catch {};
+            }
+        } else {
+            // 放大镜
+            const cx = icon_x + self.icon_size * 0.4;
+            const cy = icon_y + self.icon_size * 0.4;
+            const r = self.icon_size * 0.3;
 
-        // 画圆 (用 fillRoundedRect 近似)
-        ctx.renderer.fillRoundedRect(
-            .{ .x = cx - r, .y = cy - r, .width = r * 2, .height = r * 2 },
-            r,
-            math.Color.hex(0x00000000),
-        ) catch {};
-        // 画圆边框 -- 用 4 个小矩形描边近似
-        ctx.renderer.fillRect(.{ .x = cx - r, .y = cy - r - 1, .width = r * 2, .height = 1.5 }, self.icon_color) catch {};
-        ctx.renderer.fillRect(.{ .x = cx - r, .y = cy + r - 0.5, .width = r * 2, .height = 1.5 }, self.icon_color) catch {};
-        ctx.renderer.fillRect(.{ .x = cx - r - 1, .y = cy - r, .width = 1.5, .height = r * 2 }, self.icon_color) catch {};
-        ctx.renderer.fillRect(.{ .x = cx + r - 0.5, .y = cy - r, .width = 1.5, .height = r * 2 }, self.icon_color) catch {};
+            // 画圆边框 -- 用 4 个小矩形描边近似
+            ctx.renderer.fillRect(.{ .x = cx - r, .y = cy - r - 1, .width = r * 2, .height = 1.5 }, self.icon_color) catch {};
+            ctx.renderer.fillRect(.{ .x = cx - r, .y = cy + r - 0.5, .width = r * 2, .height = 1.5 }, self.icon_color) catch {};
+            ctx.renderer.fillRect(.{ .x = cx - r - 1, .y = cy - r, .width = 1.5, .height = r * 2 }, self.icon_color) catch {};
+            ctx.renderer.fillRect(.{ .x = cx + r - 0.5, .y = cy - r, .width = 1.5, .height = r * 2 }, self.icon_color) catch {};
 
-        // 画手柄 (斜线)
-        const handle_start_x = cx + r * 0.7;
-        const handle_start_y = cy + r * 0.7;
-        const handle_end_x = icon_x + self.icon_size - 2;
-        const handle_end_y = icon_y + self.icon_size - 2;
-        // 用小矩形近似斜线 (简化: 画一个对角小方块)
-        const hx = (handle_start_x + handle_end_x) / 2.0 - 1.0;
-        const hy = (handle_start_y + handle_end_y) / 2.0 - 1.0;
-        ctx.renderer.fillRect(.{ .x = hx, .y = hy, .width = 3.0, .height = 3.0 }, self.icon_color) catch {};
+            // 画手柄 (斜线)
+            const handle_start_x = cx + r * 0.7;
+            const handle_start_y = cy + r * 0.7;
+            const handle_end_x = icon_x + self.icon_size - 2;
+            const handle_end_y = icon_y + self.icon_size - 2;
+            const hx = (handle_start_x + handle_end_x) / 2.0 - 1.0;
+            const hy = (handle_start_y + handle_end_y) / 2.0 - 1.0;
+            ctx.renderer.fillRect(.{ .x = hx, .y = hy, .width = 3.0, .height = 3.0 }, self.icon_color) catch {};
+        }
 
-        // ── 绘制内部 TextInput ──
-        // TextInput 位置: 左侧图标之后, 右侧清除按钮之前
+        // ── 绘制内部 Entry ──
+        // Entry 位置: 左侧图标之后, 右侧清除按钮之前
         const input_x = rx + self.icon_padding * 2 + self.icon_size;
         const input_w = w.rect.width - (self.icon_padding * 2 + self.icon_size) - (self.icon_padding + self.clear_size + self.icon_padding);
-        // 设置 TextInput 的 rect
+        // 设置 Entry 的 rect
         self.input.base.rect = .{
             .x = input_x - rx, // 相对父控件
             .y = 0,
             .width = input_w,
             .height = w.rect.height,
         };
-        // 绘制 TextInput (调用其 paintTree)
+        // 绘制 Entry (调用其 paintTree)
         self.input.base.paintTree(ctx);
 
         // ── 右侧清除按钮 (有文本时显示) ──
@@ -215,6 +377,14 @@ pub const SearchEntry = struct {
         const self: *SearchEntry = @fieldParentPtr("base", w);
         const abs = w.absoluteRect();
 
+        // ── P34.2: key_capture_widget 按键先转发给捕获 widget（如上层 SearchBar 处理 Ctrl+F）──
+        if (event.* == .key) {
+            if (self.key_capture_widget) |kcw| {
+                const r = Widget.dispatchEvent(kcw, event, ectx);
+                if (r == .handled) return .handled;
+            }
+        }
+
         // 先处理清除按钮的点击
         switch (event.*) {
             .mouse_button => |mb| {
@@ -236,9 +406,9 @@ pub const SearchEntry = struct {
                         } else {
                             if (self.clear_btn_pressed) {
                                 self.clear_btn_pressed = false;
-                                // 清空文本
+                                // 清空文本 ── 立即 on_search（不走 delay）
                                 self.input.setText("") catch {};
-                                if (self.on_search) |cb| cb(self, "");
+                                self.emitSearchNow("");
                                 w.markDirty();
                                 return .handled;
                             }
@@ -265,10 +435,10 @@ pub const SearchEntry = struct {
             },
             .key => |key| {
                 if (key.state == .pressed and key.key == .escape) {
-                    // ESC 清空
+                    // ESC 清空 ── 有文本才清除，且立即 on_search（不走 delay）
                     if (self.input.getText().len > 0) {
                         self.input.setText("") catch {};
-                        if (self.on_search) |cb| cb(self, "");
+                        self.emitSearchNow("");
                         w.markDirty();
                         return .handled;
                     }
@@ -277,12 +447,12 @@ pub const SearchEntry = struct {
             else => {},
         }
 
-        // 转发事件给 TextInput
+        // 转发事件给 Entry
         const result = self.input.base.dispatchEvent(event, ectx);
 
-        // 文本变化时触发 on_search
+        // 文本变化：按 search_delay 规则走 debounce 或立即触发
         if (event.* == .text_input or event.* == .key) {
-            if (self.on_search) |cb| cb(self, self.input.getText());
+            self.handleTextChanged();
         }
 
         return result;

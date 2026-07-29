@@ -1,6 +1,6 @@
 //! zigui 新控件综合示例 - Linux 版本
 //!
-//! 展示: Separator / StatusBar / Expander / MessageDialog /
+//! 展示: Separator / Statusbar / Expander / MessageDialog /
 //!       SpinButton / ToggleButton / LinkButton / Grid
 //!
 //! 交互:
@@ -22,7 +22,7 @@ const Container = zigui.container.Container;
 const Label = zigui.label.Label;
 const Button = zigui.button.Button;
 const Separator = zigui.separator.Separator;
-const StatusBar = zigui.status_bar.StatusBar;
+const Statusbar = zigui.statusbar.Statusbar;
 const Expander = zigui.expander.Expander;
 const MessageDialog = zigui.message_dialog.MessageDialog;
 const MessageDialogKind = zigui.message_dialog.MessageDialogKind;
@@ -39,7 +39,7 @@ const theme_dark: zigui.theme.Theme = zigui.theme.dark;
 
 var g_root: ?*Container = null;
 var g_alloc: ?std.mem.Allocator = null;
-var g_status_bar: ?*StatusBar = null;
+var g_status_bar: ?*Statusbar = null;
 var g_status_buf: [128]u8 = undefined;
 var g_dialog: ?*MessageDialog = null;
 var g_spin_value: ?*Label = null;
@@ -80,7 +80,7 @@ fn buildTree(alloc: std.mem.Allocator) !void {
 
     try buildHeader(root, alloc);
     try buildBody(root, alloc);
-    try buildStatusBar(root, alloc);
+    try buildStatusbar(root, alloc);
 
     g_root = root;
     g_alloc = alloc;
@@ -379,8 +379,8 @@ fn buildRightColumn(body: *Container, alloc: std.mem.Allocator) !void {
     try dialog_card.base.addChild(alloc, &dialog_hint.base);
 }
 
-fn buildStatusBar(root: *Container, alloc: std.mem.Allocator) !void {
-    const sb = try StatusBar.create(alloc, .{
+fn buildStatusbar(root: *Container, alloc: std.mem.Allocator) !void {
+    const sb = try Statusbar.create(alloc, .{
         .text = "就绪 - 欢迎使用 zigui 新控件演示",
         .height = 28,
     });
@@ -412,7 +412,7 @@ fn onToggleChange(tb: *ToggleButton, active: bool) void {
         lbl.text = std.fmt.bufPrint(&g_toggle_buf, "状态: {s}", .{if (active) "ON" else "OFF"}) catch "状态";
     }
     if (g_status_bar) |sb| {
-        sb.setText(if (active) "自动保存: 已开启" else "自动保存: 已关闭") catch {};
+        sb.setText(if (active) "自动保存: 已开启" else "自动保存: 已关闭");
     }
     _ = tb;
 }
@@ -426,14 +426,14 @@ fn onSpinChange(sb: *SpinButton, value: f64) void {
 
 fn onLinkClick(lb: *LinkButton) void {
     if (g_status_bar) |sb| {
-        sb.setText("链接已点击: 正在打开浏览器...") catch {};
+        sb.setText("链接已点击: 正在打开浏览器...");
     }
     _ = lb;
 }
 
 fn onSubmitClick(btn: *Button) void {
     if (g_status_bar) |sb| {
-        sb.setText("表单已提交 (演示)") catch {};
+        sb.setText("表单已提交 (演示)");
     }
     _ = btn;
 }
@@ -473,7 +473,7 @@ fn showDialog(kind: MessageDialogKind, title: []const u8, message: []const u8, b
 
     g_dialog = dlg;
     if (g_status_bar) |sb| {
-        sb.setText("对话框已打开") catch {};
+        sb.setText("对话框已打开");
     }
 }
 
@@ -485,7 +485,7 @@ fn onDialogResult(dlg: *MessageDialog, result: MessageDialogResult) void {
             .yes => "Yes",
             .no => "No",
         };
-        sb.setText(std.fmt.bufPrint(&g_status_buf, "对话框结果: {s}", .{result_str}) catch "对话框已关闭") catch {};
+        sb.setText(std.fmt.bufPrint(&g_status_buf, "对话框结果: {s}", .{result_str}) catch "对话框已关闭");
     }
     g_dialog = null;
     _ = dlg;

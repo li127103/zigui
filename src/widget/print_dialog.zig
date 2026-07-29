@@ -18,12 +18,12 @@ const pal = @import("../pal/pal.zig");
 const container_mod = @import("container.zig");
 const label_mod = @import("label.zig");
 const button_mod = @import("button.zig");
-const text_input_mod = @import("text_input.zig");
+const entry_mod = @import("entry.zig");
 const combo_box_mod = @import("combo_box.zig");
-const checkbox_mod = @import("checkbox.zig");
+const check_button_mod = @import("check_button.zig");
 const spin_button_mod = @import("spin_button.zig");
 const separator_mod = @import("separator.zig");
-const scroll_view_mod = @import("scroll_view.zig");
+const scrolled_window_mod = @import("scrolled_window.zig");
 const layout_mod = @import("../layout/engine.zig");
 
 const Widget = widget_mod.Widget;
@@ -34,11 +34,11 @@ const EventResult = widget_mod.EventResult;
 const Container = container_mod.Container;
 const Label = label_mod.Label;
 const Button = button_mod.Button;
-const TextInput = text_input_mod.TextInput;
+const Entry = entry_mod.Entry;
 const ComboBox = combo_box_mod.ComboBox;
-const Checkbox = checkbox_mod.Checkbox;
+const CheckButton = check_button_mod.CheckButton;
 const Separator = separator_mod.Separator;
-const ScrollView = scroll_view_mod.ScrollView;
+const ScrolledWindow = scrolled_window_mod.ScrolledWindow;
 
 pub const PrintSettings = struct {
     printer_name: []const u8 = "",
@@ -67,17 +67,17 @@ pub const PrintDialog = struct {
     on_cancel: ?*const fn (self: *PrintDialog) void = null,
 
     content_container: ?*Container = null,
-    copies_spin: ?*TextInput = null,
-    range_all_check: ?*Checkbox = null,
-    range_custom_check: ?*Checkbox = null,
-    range_from_input: ?*TextInput = null,
-    range_to_input: ?*TextInput = null,
+    copies_spin: ?*Entry = null,
+    range_all_check: ?*CheckButton = null,
+    range_custom_check: ?*CheckButton = null,
+    range_from_input: ?*Entry = null,
+    range_to_input: ?*Entry = null,
     orientation_combo: ?*ComboBox = null,
     paper_combo: ?*ComboBox = null,
     color_combo: ?*ComboBox = null,
     duplex_combo: ?*ComboBox = null,
-    collate_check: ?*Checkbox = null,
-    reverse_check: ?*Checkbox = null,
+    collate_check: ?*CheckButton = null,
+    reverse_check: ?*CheckButton = null,
 
     overlay_color: math.Color = math.Color.hex(0x000000AA),
     bg_color: math.Color = math.Color.hex(0x1E293BFF),
@@ -149,7 +149,7 @@ pub const PrintDialog = struct {
         });
         try content.base.addChild(alloc, &title_lbl.base);
 
-        const sv = try ScrollView.create(alloc, .{
+        const sv = try ScrolledWindow.create(alloc, .{
             .width = 520,
             .height = 380,
         });
@@ -178,7 +178,7 @@ pub const PrintDialog = struct {
         const copies_row = try self.createLabelRow(alloc, "份数:");
         try inner.base.addChild(alloc, &copies_row.base);
 
-        const copies = try TextInput.create(alloc, .{
+        const copies = try Entry.create(alloc, .{
             .placeholder = "1",
             .initial_text = "1",
         });
@@ -186,11 +186,11 @@ pub const PrintDialog = struct {
         copies.base.layout_style.flex_grow = 1;
         self.copies_spin = copies;
 
-        const collate = try Checkbox.create(alloc, "自动分页", .{ .checked = true });
+        const collate = try CheckButton.create(alloc, "自动分页", .{ .checked = true });
         try inner.base.addChild(alloc, &collate.base);
         self.collate_check = collate;
 
-        const reverse = try Checkbox.create(alloc, "逆序打印", .{});
+        const reverse = try CheckButton.create(alloc, "逆序打印", .{});
         try inner.base.addChild(alloc, &reverse.base);
         self.reverse_check = reverse;
 
@@ -203,13 +203,13 @@ pub const PrintDialog = struct {
         });
         try inner.base.addChild(alloc, &range_lbl.base);
 
-        const range_all_check = try Checkbox.create(alloc, "全部", .{ .checked = true });
+        const range_all_check = try CheckButton.create(alloc, "全部", .{ .checked = true });
         try inner.base.addChild(alloc, &range_all_check.base);
         self.range_all_check = range_all_check;
         range_all_check.on_toggle = onRangeAllToggle;
         range_all_check.base.user_data = self;
 
-        const range_custom_check = try Checkbox.create(alloc, "页码范围:", .{});
+        const range_custom_check = try CheckButton.create(alloc, "页码范围:", .{});
         try inner.base.addChild(alloc, &range_custom_check.base);
         self.range_custom_check = range_custom_check;
         range_custom_check.on_toggle = onRangeCustomToggle;
@@ -228,7 +228,7 @@ pub const PrintDialog = struct {
         });
         try range_row.base.addChild(alloc, &from_lbl.base);
 
-        const from_input = try TextInput.create(alloc, .{ .placeholder = "1" });
+        const from_input = try Entry.create(alloc, .{ .placeholder = "1" });
         try range_row.base.addChild(alloc, &from_input.base);
         from_input.base.layout_style.flex_grow = 1;
         self.range_from_input = from_input;
@@ -239,7 +239,7 @@ pub const PrintDialog = struct {
         });
         try range_row.base.addChild(alloc, &to_lbl.base);
 
-        const to_input = try TextInput.create(alloc, .{ .placeholder = "1" });
+        const to_input = try Entry.create(alloc, .{ .placeholder = "1" });
         try range_row.base.addChild(alloc, &to_input.base);
         to_input.base.layout_style.flex_grow = 1;
         self.range_to_input = to_input;
@@ -323,7 +323,7 @@ pub const PrintDialog = struct {
         return row;
     }
 
-    fn onRangeAllToggle(chk: *Checkbox, checked: bool) void {
+    fn onRangeAllToggle(chk: *CheckButton, checked: bool) void {
         const self: *Self = @ptrCast(@alignCast(chk.base.user_data orelse return));
         if (checked) {
             self.settings.page_range_all = true;
@@ -331,7 +331,7 @@ pub const PrintDialog = struct {
         }
     }
 
-    fn onRangeCustomToggle(chk: *Checkbox, checked: bool) void {
+    fn onRangeCustomToggle(chk: *CheckButton, checked: bool) void {
         const self: *Self = @ptrCast(@alignCast(chk.base.user_data orelse return));
         if (checked) {
             self.settings.page_range_all = false;

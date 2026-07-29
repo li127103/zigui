@@ -17,7 +17,8 @@
 const std = @import("std");
 const math = @import("../math.zig");
 
-pub const Easing = enum {
+// 简化的预设 Easing（供内部 FloatAnimation/ColorAnimation 使用，向后兼容）
+pub const EasingPreset = enum {
     linear,
     ease_in_sine,
     ease_out_sine,
@@ -222,7 +223,7 @@ pub const easing = struct {
             (1.0 + easeOutBounce(2.0 * t - 1.0)) / 2.0;
     }
 
-    pub fn apply(easing_type: Easing, t: f32) f32 {
+    pub fn apply(easing_type: EasingPreset, t: f32) f32 {
         return switch (easing_type) {
             .linear => linear(t),
             .ease_in_sine => easeInSine(t),
@@ -259,6 +260,186 @@ pub const easing = struct {
     }
 };
 
+// ── 富 Easing 描述 (Tagged Union + 参数化曲线) ─────────────────────────────
+
+pub const CurveKind = enum {
+    sine,
+    quad,
+    cubic,
+    quart,
+    quint,
+    expo,
+    circ,
+    back,
+    elastic,
+    bounce,
+};
+
+pub const Easing = union(enum) {
+    pub const SpringConfig = struct {
+        stiffness: f32 = 170,
+        damping: f32 = 26,
+        mass: f32 = 1,
+    };
+
+    pub const CubicBezierConfig = struct {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+    };
+
+    pub const StepsConfig = struct {
+        count: u32,
+        jump_start: bool = false,
+    };
+
+    linear: void,
+    ease_in: CurveKind,
+    ease_out: CurveKind,
+    ease_in_out: CurveKind,
+    cubic_bezier: CubicBezierConfig,
+    steps: StepsConfig,
+    spring: SpringConfig,
+    preset: EasingPreset,
+
+    pub fn evaluate(self: Easing, t: f32) f32 {
+        const e = easing;
+        return switch (self) {
+            .linear => e.linear(t),
+            .ease_in => |k| switch (k) {
+                .sine => e.easeInSine(t),
+                .quad => e.easeInQuad(t),
+                .cubic => e.easeInCubic(t),
+                .quart => e.easeInQuart(t),
+                .quint => e.easeInQuint(t),
+                .expo => e.easeInExpo(t),
+                .circ => e.easeInCirc(t),
+                .back => e.easeInBack(t),
+                .elastic => e.easeInElastic(t),
+                .bounce => e.easeInBounce(t),
+            },
+            .ease_out => |k| switch (k) {
+                .sine => e.easeOutSine(t),
+                .quad => e.easeOutQuad(t),
+                .cubic => e.easeOutCubic(t),
+                .quart => e.easeOutQuart(t),
+                .quint => e.easeOutQuint(t),
+                .expo => e.easeOutExpo(t),
+                .circ => e.easeOutCirc(t),
+                .back => e.easeOutBack(t),
+                .elastic => e.easeOutElastic(t),
+                .bounce => e.easeOutBounce(t),
+            },
+            .ease_in_out => |k| switch (k) {
+                .sine => e.easeInOutSine(t),
+                .quad => e.easeInOutQuad(t),
+                .cubic => e.easeInOutCubic(t),
+                .quart => e.easeInOutQuart(t),
+                .quint => e.easeInOutQuint(t),
+                .expo => e.easeInOutExpo(t),
+                .circ => e.easeInOutCirc(t),
+                .back => e.easeInOutBack(t),
+                .elastic => e.easeInOutElastic(t),
+                .bounce => e.easeInOutBounce(t),
+            },
+            .cubic_bezier => |cfg| evaluateCubicBezier(cfg, t),
+            .steps => |cfg| {
+                const n: f32 = @floatFromInt(cfg.count);
+                if (cfg.jump_start) {
+                    return @min(@floor(t * (n + 1)) / n, 1);
+                } else {
+                    return @floor(t * n) / n;
+                }
+            },
+            .spring => |cfg| evaluateSpring(cfg, t),
+            .preset => |p| e.apply(p, t),
+        };
+    }
+
+    fn evaluateCubicBezier(cfg: CubicBezierConfig, t: f32) f32 {
+        // 简易近似: 对 x 做 Newton 法求 t, 然后返回 y
+        const cx = 3.0 * cfg.x1;
+        const bx = 3.0 * (cfg.x2 - cfg.x1) - cx;
+        const ax = 1.0 - cx - bx;
+        const cy = 3.0 * cfg.y1;
+        const by = 3.0 * (cfg.y2 - cfg.y1) - cy;
+        const ay = 1.0 - cy - by;
+
+        var guess: f32 = t;
+        for (0..8) |_| {
+            const x = ((ax * guess + bx) * guess + cx) * guess;
+            const dx = (3.0 * ax * guess + 2.0 * bx) * guess + cx;
+            if (@abs(dx) < 1e-6) break;
+            guess = guess - (x - t) / dx;
+        }
+        return ((ay * guess + by) * guess + cy) * guess;
+    }
+
+    fn evaluateSpring(cfg: SpringConfig, t: f32) f32 {
+        // 基于二阶弹簧微分方程的闭式解 (临界/欠阻尼近似)
+        const zeta = cfg.damping / (2.0 * @sqrt(cfg.stiffness * cfg.mass));
+        const omega_n = @sqrt(cfg.stiffness / cfg.mass);
+        const time = t * 2.0; // 归一化到 2 秒"观感"
+        if (zeta < 1.0) {
+            const omega_d = omega_n * @sqrt(1.0 - zeta * zeta);
+            const envelope = @exp(-zeta * omega_n * time);
+            return 1.0 - envelope * (@cos(omega_d * time) + (zeta * omega_n / @max(omega_d, 1e-6)) * @sin(omega_d * time));
+        } else {
+            // 临界/过阻尼
+            const r1 = -omega_n * (zeta + @sqrt(zeta * zeta - 1.0));
+            const r2 = -omega_n * (zeta - @sqrt(zeta * zeta - 1.0));
+            const denom = r2 - r1;
+            if (@abs(denom) < 1e-6) return 1.0 - (1.0 + omega_n * time) * @exp(-omega_n * time);
+            return 1.0 - (r2 * @exp(r1 * time) - r1 * @exp(r2 * time)) / denom;
+        }
+    }
+};
+
+// ── Tween (简单补间, 面向 demo 使用) ────────────────────────────────────────
+
+pub const Tween = struct {
+    from: f32 = 0,
+    to: f32 = 100,
+    duration_ms: u32 = 1000,
+    easing: Easing = .{ .linear = {} },
+
+    state: AnimationState = .idle,
+    elapsed_ms: u32 = 0,
+
+    pub fn start(self: *Tween) void {
+        self.state = .running;
+        self.elapsed_ms = 0;
+    }
+
+    pub fn reset(self: *Tween) void {
+        self.state = .idle;
+        self.elapsed_ms = 0;
+    }
+
+    pub fn update(self: *Tween, delta_ms: u32) bool {
+        if (self.state != .running) return false;
+        self.elapsed_ms += delta_ms;
+        if (self.elapsed_ms >= self.duration_ms) {
+            self.elapsed_ms = self.duration_ms;
+            self.state = .completed;
+            return false;
+        }
+        return true;
+    }
+
+    pub fn progress(self: *const Tween) f32 {
+        if (self.duration_ms == 0) return 1;
+        return std.math.clamp(@as(f32, @floatFromInt(self.elapsed_ms)) / @as(f32, @floatFromInt(self.duration_ms)), 0, 1);
+    }
+
+    pub fn currentValue(self: *const Tween) f32 {
+        const p = self.progress();
+        const eased = self.easing.evaluate(p);
+        return self.from + (self.to - self.from) * eased;
+    }
+};
+
 pub const AnimationState = enum {
     idle,
     running,
@@ -278,7 +459,7 @@ pub const FloatAnimation = struct {
     to: f32,
     duration: f32,
     current_time: f32 = 0,
-    easing_type: Easing = .ease_out_cubic,
+    easing_type: EasingPreset = .ease_out_cubic,
     direction: AnimationDirection = .normal,
     iterations: i32 = 1,
     current_iteration: i32 = 0,
@@ -302,7 +483,7 @@ pub const FloatAnimation = struct {
         from: f32,
         to: f32,
         duration: f32,
-        easing: Easing = .ease_out_cubic,
+        easing: EasingPreset = .ease_out_cubic,
         direction: AnimationDirection = .normal,
         iterations: i32 = 1,
         delay: f32 = 0,
@@ -499,7 +680,7 @@ pub const ColorAnimation = struct {
     to: math.Color,
     duration: f32,
     current_time: f32 = 0,
-    easing_type: Easing = .ease_out_cubic,
+    easing_type: EasingPreset = .ease_out_cubic,
     state: AnimationState = .idle,
     delay: f32 = 0,
     delay_remaining: f32 = 0,
@@ -519,7 +700,7 @@ pub const ColorAnimation = struct {
         from: math.Color,
         to: math.Color,
         duration: f32,
-        easing: Easing = .ease_out_cubic,
+        easing: EasingPreset = .ease_out_cubic,
         delay: f32 = 0,
         on_start: ?*const fn (anim: *ColorAnimation) void = null,
         on_update: ?*const fn (anim: *ColorAnimation, value: math.Color) void = null,

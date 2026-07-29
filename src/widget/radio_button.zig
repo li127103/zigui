@@ -1,4 +1,4 @@
-//! Radio 控件 - 单选按钮 (圆形, 配合 RadioGroup 实现互斥选择)
+//! RadioButton 控件 - 单选按钮 (圆形, 配合 RadioGroup 实现互斥选择)
 
 const std = @import("std");
 const math = @import("../math.zig");
@@ -13,7 +13,7 @@ const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 
 /// 单选按钮逻辑分组 (非 Widget, 仅维护选中索引)
-/// 同一组内的 Radio 互斥: 选中一个会取消其他。
+/// 同一组内的 RadioButton 互斥: 选中一个会取消其他。
 pub const RadioGroup = struct {
     selected_index: usize,
     on_change: ?*const fn (self: *RadioGroup, index: usize) void,
@@ -32,7 +32,7 @@ pub const RadioGroup = struct {
     }
 };
 
-pub const Radio = struct {
+pub const RadioButton = struct {
     base: Widget,
     group: *RadioGroup,
     index: usize,
@@ -58,8 +58,8 @@ pub const Radio = struct {
         text_color: math.Color = math.Color.hex(0xF8FAFCFF),
         text_disabled_color: math.Color = math.Color.hex(0x64748BFF),
         gap: f32 = 8.0,
-    }) !*Radio {
-        const self = try allocator.create(Radio);
+    }) !*RadioButton {
+        const self = try allocator.create(RadioButton);
         self.* = .{
             .base = .{
                 .vtable = &vtable,
@@ -83,14 +83,49 @@ pub const Radio = struct {
         return self;
     }
 
-    pub fn destroy(self: *Radio, allocator: std.mem.Allocator) void {
+    pub fn destroy(self: *RadioButton, allocator: std.mem.Allocator) void {
         self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
     }
 
-    pub fn isSelected(self: *const Radio) bool {
+    pub fn isSelected(self: *const RadioButton) bool {
         return self.group.selected_index == self.index;
+    }
+
+    // ── GTK4 兼容 API ─────────────────────────────────────────────────────
+
+    /// GTK4: gtk_check_button_get_active (RadioButton 继承 CheckButton 行为)
+    pub fn getActive(self: *const RadioButton) bool {
+        return self.isSelected();
+    }
+    /// GTK4: gtk_check_button_set_active
+    pub fn setActive(self: *RadioButton, v: bool) void {
+        if (v) {
+            const old = self.group.selected_index;
+            self.group.select(self.index);
+            if (old != self.group.selected_index) {
+                if (self.base.parent) |p| p.markDirty();
+                self.base.markDirty();
+            }
+        }
+    }
+    /// GTK4: gtk_check_button_set_group
+    pub fn setGroup(self: *RadioButton, group: *RadioGroup, index: usize) void {
+        self.group = group;
+        self.index = index;
+        if (group.selected_index == index) {
+            self.base.markDirty();
+        }
+    }
+    pub fn setLabel(self: *RadioButton, label: []const u8) void {
+        self.label = label;
+        self.base.accessibility.label = label;
+        self.base.markLayoutDirty();
+        self.base.markDirty();
+    }
+    pub fn getLabel(self: *const RadioButton) []const u8 {
+        return self.label;
     }
 
     // ── VTable 实现 ──────────────────────────────────────────────────────────
@@ -105,12 +140,12 @@ pub const Radio = struct {
     };
 
     fn destroyVTable(w: *Widget, allocator: std.mem.Allocator) void {
-        const self: *Radio = @fieldParentPtr("base", w);
+        const self: *RadioButton = @fieldParentPtr("base", w);
         self.destroy(allocator);
     }
 
     fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
-        const self: *Radio = @fieldParentPtr("base", w);
+        const self: *RadioButton = @fieldParentPtr("base", w);
         _ = constraints;
         const text_size = styled_text.measureText(ctx.allocator, self.label, .{
             .font_size = self.font_size,
@@ -122,7 +157,7 @@ pub const Radio = struct {
     }
 
     fn paint(w: *Widget, ctx: *PaintContext) void {
-        const self: *Radio = @fieldParentPtr("base", w);
+        const self: *RadioButton = @fieldParentPtr("base", w);
         const rx = ctx.offset_x + w.rect.x;
         const ry = ctx.offset_y + w.rect.y;
         const disabled = w.state.disabled;
@@ -188,7 +223,7 @@ pub const Radio = struct {
     }
 
     fn onEvent(w: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {
-        const self: *Radio = @fieldParentPtr("base", w);
+        const self: *RadioButton = @fieldParentPtr("base", w);
         _ = ectx;
         if (w.state.disabled) return .ignored;
 
@@ -264,9 +299,9 @@ test "radio group select is exclusive and fires callback" {
 
 test "radio isSelected reflects group selection" {
     var group = RadioGroup.init(0, .{});
-    const r0 = try Radio.create(std.testing.allocator, &group, 0, "a", .{});
+    const r0 = try RadioButton.create(std.testing.allocator, &group, 0, "a", .{});
     defer r0.destroy(std.testing.allocator);
-    const r1 = try Radio.create(std.testing.allocator, &group, 1, "b", .{});
+    const r1 = try RadioButton.create(std.testing.allocator, &group, 1, "b", .{});
     defer r1.destroy(std.testing.allocator);
 
     try std.testing.expect(r0.isSelected());
@@ -279,7 +314,7 @@ test "radio isSelected reflects group selection" {
 
 test "radio click selects its index" {
     var group = RadioGroup.init(0, .{});
-    const r1 = try Radio.create(std.testing.allocator, &group, 1, "b", .{});
+    const r1 = try RadioButton.create(std.testing.allocator, &group, 1, "b", .{});
     defer r1.destroy(std.testing.allocator);
     r1.base.rect = .{ .x = 0, .y = 0, .width = 100, .height = 20 };
     var ectx = EventContext{};

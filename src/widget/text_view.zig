@@ -1,4 +1,4 @@
-//! TextArea 控件 - 多行文本编辑 (多行光标/选区/滚动)
+//! TextView 控件 - 多行文本编辑 (多行光标/选区/滚动)
 
 const std = @import("std");
 const math = @import("../math.zig");
@@ -9,21 +9,127 @@ const text_layout = @import("../text/layout.zig");
 const coretext = @import("../text/coretext.zig");
 const clipboard = @import("../pal/clipboard.zig");
 const context_menu_mod = @import("context_menu.zig");
+const editable_mod = @import("../model/editable.zig");
 const ContextMenu = context_menu_mod.ContextMenu;
+const TextBuffer = editable_mod.TextBuffer;
+const Editable = editable_mod.Editable;
+const EditableIface = editable_mod.EditableIface;
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 
-const TextAreaUndoItem = struct {
+const TextViewUndoItem = struct {
     text: []u8,
     cursor: usize,
     selection_start: ?usize,
     scroll_y: f32,
 };
 
-pub const TextArea = struct {
+// ── EditableIface vtable (TextView 内部使用) ─────────────────────────────
+fn tvEditableGetText(ud: ?*anyopaque) []const u8 {
+    const self: *TextView = @ptrCast(@alignCast(ud orelse return &.{}));
+    return self.text.items;
+}
+fn tvEditableSetText(ud: ?*anyopaque, text: []const u8) void {
+    const self: *TextView = @ptrCast(@alignCast(ud orelse return));
+    self.setText(text) catch {};
+}
+fn tvEditableInsertText(ud: ?*anyopaque, position: usize, text: []const u8) usize {
+    const self: *TextView = @ptrCast(@alignCast(ud orelse return 0));
+    const old_cursor = self.cursor;
+    const old_sel = self.selection_start;
+    self.cursor = @min(position, self.text.items.len);
+    self.selection_start = null;
+    self.desired_col = null;
+    // 调用 insertBytes 或直接 insertSlice
+    self.pushUndoState(false);
+    self.clearRedoStack();
+    self.last_was_char_insert = false;
+    self.text.insertSlice(self.allocator, self.cursor, text) catch return 0;
+    self.cursor += text.len;
+    if (self.text_buffer) |b| b.insert(position, text);
+    self.base.markDirty();
+    self.notifyChange();
+    _ = old_cursor;
+    _ = old_sel;
+    return text.len;
+}
+fn tvEditableDeleteText(ud: ?*anyopaque, position: usize, n_chars: usize) void {
+    const self: *TextView = @ptrCast(@alignCast(ud orelse return));
+    if (n_chars == 0) return;
+    const pos = @min(position, self.text.items.len);
+    const n = @min(n_chars, self.text.items.len - pos);
+    if (n == 0) return;
+    self.pushUndoState(false);
+    self.clearRedoStack();
+    self.last_was_char_insert = false;
+    editable_mod.listDeleteRange(&self.text, pos, pos + n);
+    if (self.cursor > self.text.items.len) self.cursor = self.text.items.len;
+    if (self.selection_start != null and self.selection_start.? > self.text.items.len)
+        self.selection_start = self.text.items.len;
+    if (self.text_buffer) |b| b.delete(pos, n);
+    self.base.markDirty();
+    self.notifyChange();
+}
+fn tvEditableGetPosition(ud: ?*anyopaque) usize {
+    const self: *TextView = @ptrCast(@alignCast(ud orelse return 0));
+    return self.cursor;
+}
+fn tvEditableSelectRegion(ud: ?*anyopaque, start: usize, end: usize) void {
+    const self: *TextView = @ptrCast(@alignCast(ud orelse return));
+    if (self.text.items.len == 0) {
+        self.cursor = 0;
+        self.selection_start = null;
+        return;
+    }
+    const s = @min(start, self.text.items.len);
+    const e = @min(end, self.text.items.len);
+    if (s == e) {
+        self.cursor = s;
+        self.selection_start = null;
+    } else {
+        self.cursor = e;
+        self.selection_start = s;
+    }
+    self.desired_col = null;
+    self.base.markDirty();
+}
+fn tvEditableGetSelectionBounds(ud: ?*anyopaque, start: *usize, end: *usize) bool {
+    const self: *TextView = @ptrCast(@alignCast(ud orelse return false));
+    const s = self.selection_start orelse {
+        start.* = self.cursor;
+        end.* = self.cursor;
+        return false;
+    };
+    if (s <= self.cursor) {
+        start.* = s;
+        end.* = self.cursor;
+    } else {
+        start.* = self.cursor;
+        end.* = s;
+    }
+    return true;
+}
+fn tvEditableGetTextBuffer(ud: ?*anyopaque) ?*TextBuffer {
+    const self: *TextView = @ptrCast(@alignCast(ud orelse return null));
+    return self.text_buffer;
+}
+
+const textview_editable_vtable = EditableIface{
+    .getTextFn = tvEditableGetText,
+    .setTextFn = tvEditableSetText,
+    .insertTextFn = tvEditableInsertText,
+    .deleteTextFn = tvEditableDeleteText,
+    .getPositionFn = tvEditableGetPosition,
+    .selectRegionFn = tvEditableSelectRegion,
+    .getSelectionBoundsFn = tvEditableGetSelectionBounds,
+    .getEntryBufferFn = null,
+    .getTextBufferFn = tvEditableGetTextBuffer,
+};
+
+pub const TextView = struct {
     base: Widget,
     allocator: std.mem.Allocator,
     text: std.ArrayListUnmanaged(u8),
@@ -33,7 +139,9 @@ pub const TextArea = struct {
     font_size: f32,
     scroll_y: f32 = 0,
     placeholder: []const u8,
-    on_change: ?*const fn (self: *TextArea, text: []const u8) void,
+    on_change: ?*const fn (self: *TextView, text: []const u8) void,
+    /// 最大输入字节长度 (0=无限, 与 Entry 保持一致; GTK4 GtkTextView 无限制, 这里为易用性提供)
+    max_length: u32 = 0,
     // 样式
     bg_color: math.Color = math.Color.hex(0x1E293BFF),
     border_color: math.Color = math.Color.hex(0x334155FF),
@@ -60,22 +168,25 @@ pub const TextArea = struct {
     /// 当前行高亮颜色
     current_line_color: math.Color = math.Color.hex(0x33415533),
     // 撤销/重做
-    undo_stack: std.ArrayListUnmanaged(TextAreaUndoItem) = .{ .items = &.{}, .capacity = 0 },
-    redo_stack: std.ArrayListUnmanaged(TextAreaUndoItem) = .{ .items = &.{}, .capacity = 0 },
+    undo_stack: std.ArrayListUnmanaged(TextViewUndoItem) = .{ .items = &.{}, .capacity = 0 },
+    redo_stack: std.ArrayListUnmanaged(TextViewUndoItem) = .{ .items = &.{}, .capacity = 0 },
     last_was_char_insert: bool = false,
     max_undo: usize = 100,
     /// 右键上下文菜单
     context_menu_owned: ?*ContextMenu = null,
+    /// 可选的外部分享 TextBuffer (GTK4: gtk_text_view_get_buffer)
+    text_buffer: ?*TextBuffer = null,
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         placeholder: []const u8 = "",
         font_size: f32 = 14.0,
-        on_change: ?*const fn (self: *TextArea, text: []const u8) void = null,
+        on_change: ?*const fn (self: *TextView, text: []const u8) void = null,
         text_align: text_layout.TextAlign = .left,
         show_line_numbers: bool = false,
         highlight_current_line: bool = false,
-    }) !*TextArea {
-        const self = try allocator.create(TextArea);
+        max_length: u32 = 0,
+    }) !*TextView {
+        const self = try allocator.create(TextView);
         self.* = .{
             .base = .{
                 .vtable = &vtable,
@@ -86,6 +197,7 @@ pub const TextArea = struct {
             .font_size = opts.font_size,
             .placeholder = opts.placeholder,
             .on_change = opts.on_change,
+            .max_length = opts.max_length,
             .text_align = opts.text_align,
             .show_line_numbers = opts.show_line_numbers,
             .highlight_current_line = opts.highlight_current_line,
@@ -109,7 +221,36 @@ pub const TextArea = struct {
         return self;
     }
 
-    pub fn destroy(self: *TextArea, allocator: std.mem.Allocator) void {
+    /// GTK4 对齐: 返回 Editable 接口胖指针
+    pub fn getEditable(self: *TextView) Editable {
+        return .{
+            .iface = &textview_editable_vtable,
+            .userdata = @ptrCast(@alignCast(self)),
+        };
+    }
+
+    /// GTK4: gtk_text_view_get_buffer
+    pub fn getTextBuffer(self: *const TextView) ?*TextBuffer {
+        return self.text_buffer;
+    }
+
+    /// GTK4: gtk_text_view_set_buffer, 同步内容
+    pub fn setTextBuffer(self: *TextView, buf: ?*TextBuffer) void {
+        self.text_buffer = buf;
+        if (buf) |b| {
+            const bytes = b.getBytes();
+            self.setText(bytes) catch {};
+            // 同步 cursor/selection
+            self.cursor = @min(b.cursor_pos, self.text.items.len);
+            if (b.selection) |sel| {
+                self.selection_start = @min(sel.start, self.text.items.len);
+            } else {
+                self.selection_start = null;
+            }
+        }
+    }
+
+    pub fn destroy(self: *TextView, allocator: std.mem.Allocator) void {
         self.base.background.deinit(allocator);
         self.text.deinit(allocator);
         self.base.children.deinit(allocator);
@@ -123,21 +264,21 @@ pub const TextArea = struct {
         allocator.destroy(self);
     }
 
-    fn clearUndoStack(self: *TextArea) void {
+    fn clearUndoStack(self: *TextView) void {
         for (self.undo_stack.items) |item| {
             self.allocator.free(item.text);
         }
         self.undo_stack.clearRetainingCapacity();
     }
 
-    fn clearRedoStack(self: *TextArea) void {
+    fn clearRedoStack(self: *TextView) void {
         for (self.redo_stack.items) |item| {
             self.allocator.free(item.text);
         }
         self.redo_stack.clearRetainingCapacity();
     }
 
-    fn pushUndoState(self: *TextArea, merge_with_last_insert: bool) void {
+    fn pushUndoState(self: *TextView, merge_with_last_insert: bool) void {
         if (merge_with_last_insert and self.last_was_char_insert and self.undo_stack.items.len > 0) {
             const last = &self.undo_stack.items[self.undo_stack.items.len - 1];
             self.allocator.free(last.text);
@@ -150,7 +291,7 @@ pub const TextArea = struct {
             return;
         }
 
-        const item = TextAreaUndoItem{
+        const item = TextViewUndoItem{
             .text = self.allocator.dupe(u8, self.text.items) catch return,
             .cursor = self.cursor,
             .selection_start = self.selection_start,
@@ -169,10 +310,10 @@ pub const TextArea = struct {
         self.clearRedoStack();
     }
 
-    pub fn undo(self: *TextArea) void {
+    pub fn undo(self: *TextView) void {
         if (self.undo_stack.items.len == 0) return;
 
-        const current = TextAreaUndoItem{
+        const current = TextViewUndoItem{
             .text = self.allocator.dupe(u8, self.text.items) catch return,
             .cursor = self.cursor,
             .selection_start = self.selection_start,
@@ -196,10 +337,10 @@ pub const TextArea = struct {
         self.notifyChange();
     }
 
-    pub fn redo(self: *TextArea) void {
+    pub fn redo(self: *TextView) void {
         if (self.redo_stack.items.len == 0) return;
 
-        const current = TextAreaUndoItem{
+        const current = TextViewUndoItem{
             .text = self.allocator.dupe(u8, self.text.items) catch return,
             .cursor = self.cursor,
             .selection_start = self.selection_start,
@@ -223,40 +364,118 @@ pub const TextArea = struct {
         self.notifyChange();
     }
 
-    pub fn getText(self: *const TextArea) []const u8 {
+    pub fn getText(self: *const TextView) []const u8 {
         return self.text.items;
     }
 
-    pub fn setText(self: *TextArea, new_text: []const u8) !void {
+    pub fn setText(self: *TextView, new_text: []const u8) !void {
         self.text.clearRetainingCapacity();
         try self.text.appendSlice(self.allocator, new_text);
         self.cursor = new_text.len;
         self.selection_start = null;
         self.desired_col = null;
         self.base.markDirty();
+        // 同步 buffer + on_change
+        if (self.text_buffer) |b| b.setText(self.text.items);
+        self.notifyChange();
     }
 
     /// 设置文本对齐方式 (左/居中/右; 多行编辑两端对齐按左对齐处理)
-    pub fn setTextAlign(self: *TextArea, alignment: text_layout.TextAlign) void {
+    pub fn setTextAlign(self: *TextView, alignment: text_layout.TextAlign) void {
         self.text_align = alignment;
         self.base.markDirty();
     }
 
-    pub fn hasSelection(self: *const TextArea) bool {
+    /// GTK4: gtk_entry_get_placeholder_text (TextView 兼容)
+    pub fn getPlaceholderText(self: *const TextView) []const u8 {
+        return self.placeholder;
+    }
+
+    /// GTK4: gtk_entry_set_placeholder_text (TextView 兼容)
+    pub fn setPlaceholderText(self: *TextView, placeholder: []const u8) void {
+        self.placeholder = placeholder;
+        self.base.markDirty();
+    }
+
+    /// 返回最大输入字节长度 (0=无限)
+    pub fn getMaxLength(self: *const TextView) u32 {
+        return self.max_length;
+    }
+
+    /// 设置最大输入字节长度 (0=无限)
+    pub fn setMaxLength(self: *TextView, max: u32) void {
+        self.max_length = max;
+    }
+
+    /// GTK4: gtk_editable_get_position
+    pub fn getCursorPosition(self: *const TextView) usize {
+        return self.cursor;
+    }
+
+    /// GTK4: gtk_editable_set_position
+    pub fn setCursorPosition(self: *TextView, pos: usize) void {
+        self.cursor = @min(pos, self.text.items.len);
+        self.selection_start = null;
+        self.desired_col = null;
+        self.ensureCursorVisible();
+        self.base.markDirty();
+    }
+
+    /// GTK4: gtk_editable_select_region (start..end 字节偏移; start>end 自动交换; start==end 清除选择)
+    pub fn selectRegion(self: *TextView, start: usize, end: usize) void {
+        const s = @min(start, end);
+        const e = @max(start, end);
+        const clamped_s = @min(s, self.text.items.len);
+        const clamped_e = @min(e, self.text.items.len);
+        if (clamped_s == clamped_e) {
+            self.cursor = clamped_s;
+            self.selection_start = null;
+        } else {
+            self.cursor = clamped_e;
+            self.selection_start = clamped_s;
+        }
+        self.desired_col = null;
+        self.ensureCursorVisible();
+        self.base.markDirty();
+    }
+
+    /// GTK4: gtk_editable_get_selection_bounds
+    pub fn getSelectionBounds(self: *const TextView, out_start: *usize, out_end: *usize) bool {
+        const s = self.selection_start orelse {
+            out_start.* = self.cursor;
+            out_end.* = self.cursor;
+            return false;
+        };
+        if (s <= self.cursor) {
+            out_start.* = s;
+            out_end.* = self.cursor;
+        } else {
+            out_start.* = self.cursor;
+            out_end.* = s;
+        }
+        return true;
+    }
+
+    /// GTK4: gtk_editable_select_all — 选择全部文本
+    pub fn selectAll(self: *TextView) void {
+        self.selectRegion(0, self.text.items.len);
+    }
+
+    pub fn hasSelection(self: *const TextView) bool {
         return self.selection_start != null and self.selection_start.? != self.cursor;
     }
 
     // ── 行辅助 (基于 '\n' 扫描) ─────────────────────────────────────────────
 
-    fn lineHeight(self: *const TextArea) f32 {
+    fn lineHeight(self: *const TextView) f32 {
         return self.font_size * 1.4;
     }
 
-    fn charWidth(self: *const TextArea) f32 {
+    fn charWidth(self: *const TextView) f32 {
         return self.font_size * 0.6;
     }
 
-    fn lineNumberAreaWidth(self: *const TextArea) f32 {
+    fn lineNumberAreaWidth(self: *const TextView) f32 {
         if (!self.show_line_numbers) return 0;
         const digits = countDigits(self.lineCount());
         return @as(f32, @floatFromInt(digits)) * self.charWidth() + self.padding * 2;
@@ -273,7 +492,7 @@ pub const TextArea = struct {
     }
 
     /// 包含 offset 的行的起始字节偏移
-    fn lineStart(self: *const TextArea, offset: usize) usize {
+    fn lineStart(self: *const TextView, offset: usize) usize {
         const items = self.text.items;
         if (offset == 0) return 0;
         var i = @min(offset, items.len);
@@ -284,7 +503,7 @@ pub const TextArea = struct {
     }
 
     /// 包含 offset 的行的结束字节偏移 ('\n' 之前或文本末尾)
-    fn lineEnd(self: *const TextArea, offset: usize) usize {
+    fn lineEnd(self: *const TextView, offset: usize) usize {
         const items = self.text.items;
         var i = @min(offset, items.len);
         while (i < items.len) : (i += 1) {
@@ -294,7 +513,7 @@ pub const TextArea = struct {
     }
 
     /// offset 所在的行号 (0-based)
-    fn lineIndex(self: *const TextArea, offset: usize) usize {
+    fn lineIndex(self: *const TextView, offset: usize) usize {
         const items = self.text.items;
         var line: usize = 0;
         var i: usize = 0;
@@ -306,12 +525,12 @@ pub const TextArea = struct {
     }
 
     /// 总行数
-    fn lineCount(self: *const TextArea) usize {
+    fn lineCount(self: *const TextView) usize {
         return self.lineIndex(self.text.items.len) + 1;
     }
 
     /// 第 line 行的起始字节偏移
-    fn lineStartAtIndex(self: *const TextArea, line: usize) usize {
+    fn lineStartAtIndex(self: *const TextView, line: usize) usize {
         if (line == 0) return 0;
         const items = self.text.items;
         var current_line: usize = 0;
@@ -326,7 +545,7 @@ pub const TextArea = struct {
     }
 
     /// 给定行号和列号 (字节列) 求字节偏移, 钳制到行尾
-    fn offsetAt(self: *const TextArea, line: usize, col: usize) usize {
+    fn offsetAt(self: *const TextView, line: usize, col: usize) usize {
         const start = self.lineStartAtIndex(line);
         const end = self.lineEnd(start);
         const line_len = end - start;
@@ -334,27 +553,27 @@ pub const TextArea = struct {
     }
 
     /// offset 处的列号 (字节列)
-    fn colOf(self: *const TextArea, offset: usize) usize {
+    fn colOf(self: *const TextView, offset: usize) usize {
         return offset - self.lineStart(offset);
     }
 
     /// 内容总高度
-    fn contentHeight(self: *const TextArea) f32 {
+    fn contentHeight(self: *const TextView) f32 {
         return @as(f32, @floatFromInt(self.lineCount())) * self.lineHeight();
     }
 
-    fn maxScroll(self: *const TextArea) f32 {
+    fn maxScroll(self: *const TextView) f32 {
         const visible = self.base.rect.height - self.padding * 2;
         const content = self.contentHeight();
         return @max(0, content - visible);
     }
 
-    fn clampScroll(self: *TextArea) void {
+    fn clampScroll(self: *TextView) void {
         self.scroll_y = std.math.clamp(self.scroll_y, 0, self.maxScroll());
     }
 
     /// 确保光标在可视区域内 (自动滚动)
-    fn ensureCursorVisible(self: *TextArea) void {
+    fn ensureCursorVisible(self: *TextView) void {
         const lh = self.lineHeight();
         const line = self.lineIndex(self.cursor);
         const cursor_top = @as(f32, @floatFromInt(line)) * lh;
@@ -382,19 +601,19 @@ pub const TextArea = struct {
     };
 
     fn destroyVTable(w: *Widget, allocator: std.mem.Allocator) void {
-        const self: *TextArea = @fieldParentPtr("base", w);
+        const self: *TextView = @fieldParentPtr("base", w);
         self.destroy(allocator);
     }
 
     fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
-        const self: *TextArea = @fieldParentPtr("base", w);
+        const self: *TextView = @fieldParentPtr("base", w);
         _ = ctx;
         _ = constraints;
         return .{ .width = 320, .height = self.lineHeight() * 5 + self.padding * 2 };
     }
 
     fn paint(w: *Widget, ctx: *PaintContext) void {
-        const self: *TextArea = @fieldParentPtr("base", w);
+        const self: *TextView = @fieldParentPtr("base", w);
         const rx = ctx.offset_x + w.rect.x;
         const ry = ctx.offset_y + w.rect.y;
         const rw = w.rect.width;
@@ -514,7 +733,7 @@ pub const TextArea = struct {
     }
 
     /// 逐行文本对齐偏移 (左/居中/右; 两端对齐按左对齐; 行溢出时保持左对齐)
-    fn lineAlignOffset(self: *const TextArea, line_w: f32, avail_w: f32) f32 {
+    fn lineAlignOffset(self: *const TextView, line_w: f32, avail_w: f32) f32 {
         const extra = avail_w - line_w;
         if (extra <= 0) return 0;
         return switch (self.text_align) {
@@ -524,7 +743,7 @@ pub const TextArea = struct {
         };
     }
 
-    fn drawLabel(self: *TextArea, ctx: *PaintContext, font: *const coretext.CtFont, text: []const u8, x: f32, y: f32, color: math.Color) void {
+    fn drawLabel(self: *TextView, ctx: *PaintContext, font: *const coretext.CtFont, text: []const u8, x: f32, y: f32, color: math.Color) void {
         if (text.len == 0) return;
 
         var tl = text_layout.TextLayout.layout(
@@ -540,7 +759,7 @@ pub const TextArea = struct {
     }
 
     fn onEvent(w: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {
-        const self: *TextArea = @fieldParentPtr("base", w);
+        const self: *TextView = @fieldParentPtr("base", w);
         _ = ectx;
 
         switch (event.*) {
@@ -775,7 +994,7 @@ pub const TextArea = struct {
 
     // ── 内部操作 ────────────────────────────────────────────────────────────
 
-    fn beginSelect(self: *TextArea, shift: bool) void {
+    fn beginSelect(self: *TextView, shift: bool) void {
         if (shift) {
             if (self.selection_start == null) self.selection_start = self.cursor;
         } else {
@@ -784,7 +1003,7 @@ pub const TextArea = struct {
     }
 
     /// 垂直移动 delta 行 (-1 上 / +1 下), 保持列位置
-    fn moveVertical(self: *TextArea, delta: i32) void {
+    fn moveVertical(self: *TextView, delta: i32) void {
         const current_line = self.lineIndex(self.cursor);
         const col = self.desired_col orelse self.colOf(self.cursor);
         self.desired_col = col;
@@ -805,19 +1024,20 @@ pub const TextArea = struct {
         }
     }
 
-    fn afterMove(self: *TextArea) void {
+    fn afterMove(self: *TextView) void {
         self.ensureCursorVisible();
         self.base.markDirty();
     }
 
-    fn deleteSelection(self: *TextArea) void {
+    /// GTK4: gtk_editable_delete_selection — 删除选中内容（推撤销栈）
+    pub fn deleteSelection(self: *TextView) void {
         if (!self.hasSelection()) return;
         self.pushUndoState(false);
         self.deleteSelectionNoUndo();
         self.last_was_char_insert = false;
     }
 
-    fn deleteSelectionNoUndo(self: *TextArea) void {
+    fn deleteSelectionNoUndo(self: *TextView) void {
         if (!self.hasSelection()) return;
         const start = @min(self.selection_start.?, self.cursor);
         const end = @max(self.selection_start.?, self.cursor);
@@ -831,7 +1051,7 @@ pub const TextArea = struct {
         self.notifyChange();
     }
 
-    fn notifyChange(self: *TextArea) void {
+    fn notifyChange(self: *TextView) void {
         if (self.on_change) |cb| {
             cb(self, self.text.items);
         }
@@ -841,17 +1061,17 @@ pub const TextArea = struct {
 // ── Context Menu Callbacks ─────────────────────────────────────────────────
 
 fn undoCallback(ctx: ?*anyopaque) void {
-    const self: *TextArea = @ptrCast(@alignCast(ctx orelse return));
+    const self: *TextView = @ptrCast(@alignCast(ctx orelse return));
     self.undo();
 }
 
 fn redoCallback(ctx: ?*anyopaque) void {
-    const self: *TextArea = @ptrCast(@alignCast(ctx orelse return));
+    const self: *TextView = @ptrCast(@alignCast(ctx orelse return));
     self.redo();
 }
 
 fn cutCallback(ctx: ?*anyopaque) void {
-    const self: *TextArea = @ptrCast(@alignCast(ctx orelse return));
+    const self: *TextView = @ptrCast(@alignCast(ctx orelse return));
     if (self.hasSelection()) {
         const s = @min(self.selection_start.?, self.cursor);
         const e = @max(self.selection_start.?, self.cursor);
@@ -862,7 +1082,7 @@ fn cutCallback(ctx: ?*anyopaque) void {
 }
 
 fn copyCallback(ctx: ?*anyopaque) void {
-    const self: *TextArea = @ptrCast(@alignCast(ctx orelse return));
+    const self: *TextView = @ptrCast(@alignCast(ctx orelse return));
     if (self.hasSelection()) {
         const s = @min(self.selection_start.?, self.cursor);
         const e = @max(self.selection_start.?, self.cursor);
@@ -871,7 +1091,7 @@ fn copyCallback(ctx: ?*anyopaque) void {
 }
 
 fn pasteCallback(ctx: ?*anyopaque) void {
-    const self: *TextArea = @ptrCast(@alignCast(ctx orelse return));
+    const self: *TextView = @ptrCast(@alignCast(ctx orelse return));
     if (clipboard.getText(self.allocator)) |pasted| {
         defer self.allocator.free(pasted);
         if (pasted.len > 0) {
@@ -889,14 +1109,14 @@ fn pasteCallback(ctx: ?*anyopaque) void {
 }
 
 fn selectAllCallback(ctx: ?*anyopaque) void {
-    const self: *TextArea = @ptrCast(@alignCast(ctx orelse return));
+    const self: *TextView = @ptrCast(@alignCast(ctx orelse return));
     self.selection_start = 0;
     self.cursor = self.text.items.len;
     self.base.markDirty();
 }
 
 fn beforeShowCallback(menu: *ContextMenu) void {
-    const self: *TextArea = blk: {
+    const self: *TextView = blk: {
         if (menu.items.items.len == 0) return;
         const first = menu.items.items[0];
         const ctx = first.ctx orelse return;

@@ -1,4 +1,4 @@
-//! ScrollView 控件 - 滚动容器
+//! ScrolledWindow 控件 - 滚动容器
 //!
 //! 子项按 flexbox 排布为内容, 内容超出视口时可滚动 (滚轮/方向键/拖动滚动条)。
 //! 通过 vtable.perform_layout 覆盖默认布局以应用滚动偏移, 并经 base.clip_children
@@ -15,12 +15,33 @@ const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 
-pub const ScrollView = struct {
+/// GTK4: GtkPolicyType — 滚动条显示策略
+pub const PolicyType = enum {
+    /// 始终显示滚动条 (即使不溢出)
+    always,
+    /// 内容溢出时才显示滚动条 (默认)
+    automatic,
+    /// 永不显示滚动条 (也不支持滚动)
+    never,
+    /// 不绘制内部滚动条, 由外部控件提供滚动
+    external,
+};
+
+pub const ScrolledWindow = struct {
     base: Widget,
     scroll_x: f32 = 0,
     scroll_y: f32 = 0,
     scroll_enabled_x: bool,
     scroll_enabled_y: bool,
+    /// GTK4: gtk_scrolled_window_set_policy (水平/垂直滚动条策略)
+    hscrollbar_policy: PolicyType = .automatic,
+    vscrollbar_policy: PolicyType = .automatic,
+    /// GTK4: gtk_scrolled_window_set_has_frame — 显示边框
+    has_frame: bool = false,
+    /// GTK4: gtk_scrolled_window_set_min_content_width
+    min_content_width: f32 = 0,
+    /// GTK4: gtk_scrolled_window_set_min_content_height
+    min_content_height: f32 = 0,
     /// 内容尺寸 (布局时由子项计算)
     content_width: f32 = 0,
     content_height: f32 = 0,
@@ -28,6 +49,9 @@ pub const ScrollView = struct {
     scrollbar_thickness: f32,
     scrollbar_color: math.Color,
     scrollbar_active_color: math.Color,
+    /// has_frame=true 时的边框颜色/粗细
+    frame_color: math.Color = math.Color.hex(0x334155FF),
+    frame_width: f32 = 1.0,
     corner_radius: f32,
     /// 滚轮单步像素
     wheel_step: f32 = 40.0,
@@ -35,12 +59,21 @@ pub const ScrollView = struct {
     dragging_v: bool = false,
     dragging_h: bool = false,
     drag_offset: f32 = 0,
+    /// GTK4: gtk_scrolled_window_set_kinetic_scrolling
+    kinetic_scrolling: bool = true,
+    /// GTK4: gtk_scrolled_window_set_overlay_scrolling
+    overlay_scrolling: bool = true,
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         width: ?f32 = null,
         height: ?f32 = null,
         scroll_enabled_x: bool = false,
         scroll_enabled_y: bool = true,
+        hscrollbar_policy: ?PolicyType = null,
+        vscrollbar_policy: ?PolicyType = null,
+        has_frame: bool = false,
+        min_content_width: f32 = 0,
+        min_content_height: f32 = 0,
         direction: layout_mod.FlexDirection = .column,
         padding: math.EdgeInsets = .{},
         gap: math.Size(f32) = .{ .width = 0, .height = 0 },
@@ -48,19 +81,34 @@ pub const ScrollView = struct {
         scrollbar_thickness: f32 = 8.0,
         scrollbar_color: math.Color = math.Color.hex(0x475569AA),
         scrollbar_active_color: math.Color = math.Color.hex(0x94A3B8FF),
+        frame_color: math.Color = math.Color.hex(0x334155FF),
+        frame_width: f32 = 1.0,
         corner_radius: f32 = 0.0,
-    }) !*ScrollView {
-        const self = try allocator.create(ScrollView);
+    }) !*ScrolledWindow {
+        const self = try allocator.create(ScrolledWindow);
+        const hp: PolicyType = opts.hscrollbar_policy orelse
+            (if (opts.scroll_enabled_x) PolicyType.automatic else PolicyType.never);
+        const vp: PolicyType = opts.vscrollbar_policy orelse
+            (if (opts.scroll_enabled_y) PolicyType.automatic else PolicyType.never);
+        const s_x = hp != .never and hp != .external;
+        const s_y = vp != .never and vp != .external;
         self.* = .{
             .base = .{
                 .vtable = &vtable,
                 .id = widget_mod.genWidgetId(),
             },
-            .scroll_enabled_x = opts.scroll_enabled_x,
-            .scroll_enabled_y = opts.scroll_enabled_y,
+            .scroll_enabled_x = s_x,
+            .scroll_enabled_y = s_y,
+            .hscrollbar_policy = hp,
+            .vscrollbar_policy = vp,
+            .has_frame = opts.has_frame,
+            .min_content_width = opts.min_content_width,
+            .min_content_height = opts.min_content_height,
             .scrollbar_thickness = opts.scrollbar_thickness,
             .scrollbar_color = opts.scrollbar_color,
             .scrollbar_active_color = opts.scrollbar_active_color,
+            .frame_color = opts.frame_color,
+            .frame_width = opts.frame_width,
             .corner_radius = opts.corner_radius,
         };
         self.base.layout_style.direction = opts.direction;
@@ -74,7 +122,7 @@ pub const ScrollView = struct {
         return self;
     }
 
-    pub fn destroy(self: *ScrollView, allocator: std.mem.Allocator) void {
+    pub fn destroy(self: *ScrolledWindow, allocator: std.mem.Allocator) void {
         self.base.background.deinit(allocator);
         for (self.base.children.items) |child| {
             child.vtable.destroy(child, allocator);
@@ -83,19 +131,91 @@ pub const ScrollView = struct {
         allocator.destroy(self);
     }
 
+    // ── GTK4 API 对齐 ─────────────────────────────────────────────────────
+
+    /// GTK4: gtk_scrolled_window_set_policy
+    pub fn setPolicy(self: *ScrolledWindow, h: PolicyType, v: PolicyType) void {
+        self.hscrollbar_policy = h;
+        self.vscrollbar_policy = v;
+        self.scroll_enabled_x = h != .never and h != .external;
+        self.scroll_enabled_y = v != .never and v != .external;
+        if (!self.scroll_enabled_x) self.scroll_x = 0;
+        if (!self.scroll_enabled_y) self.scroll_y = 0;
+        self.base.markDirty();
+    }
+
+    /// GTK4: gtk_scrolled_window_get_policy
+    pub fn getPolicy(self: *const ScrolledWindow, out_h: *PolicyType, out_v: *PolicyType) void {
+        out_h.* = self.hscrollbar_policy;
+        out_v.* = self.vscrollbar_policy;
+    }
+
+    /// GTK4: gtk_scrolled_window_set_has_frame
+    pub fn setHasFrame(self: *ScrolledWindow, has: bool) void {
+        self.has_frame = has;
+        self.base.markDirty();
+    }
+    pub fn getHasFrame(self: *const ScrolledWindow) bool {
+        return self.has_frame;
+    }
+
+    /// GTK4: gtk_scrolled_window_set_min_content_width
+    pub fn setMinContentWidth(self: *ScrolledWindow, w: f32) void {
+        self.min_content_width = @max(0, w);
+        self.base.markLayoutDirty();
+    }
+    pub fn getMinContentWidth(self: *const ScrolledWindow) f32 {
+        return self.min_content_width;
+    }
+    pub fn setMinContentHeight(self: *ScrolledWindow, h: f32) void {
+        self.min_content_height = @max(0, h);
+        self.base.markLayoutDirty();
+    }
+    pub fn getMinContentHeight(self: *const ScrolledWindow) f32 {
+        return self.min_content_height;
+    }
+
+    /// GTK4: gtk_scrolled_window_set_child — 替换为单 child (GTK4 单 child)
+    /// 清空现有 children 并添加传入 widget；传 null 仅清空。
+    pub fn setChild(self: *ScrolledWindow, allocator: std.mem.Allocator, child: ?*Widget) void {
+        // destroy 现有 children
+        for (self.base.children.items) |c| c.vtable.destroy(c, allocator);
+        self.base.children.clearRetainingCapacity();
+        if (child) |c| self.base.addChild(allocator, c) catch {};
+        self.base.markLayoutDirty();
+        self.base.markDirty();
+    }
+
+    /// GTK4: gtk_scrolled_window_get_child — 返回第一个 child (GTK4 单 child)
+    pub fn getChild(self: *const ScrolledWindow) ?*Widget {
+        return if (self.base.children.items.len > 0) self.base.children.items[0] else null;
+    }
+
+    /// GTK4: gtk_scrolled_window_set_kinetic_scrolling
+    pub fn setKineticScrolling(self: *ScrolledWindow, v: bool) void {
+        self.kinetic_scrolling = v;
+        self.base.markDirty();
+    }
+
+    /// GTK4: gtk_scrolled_window_set_overlay_scrolling
+    pub fn setOverlayScrolling(self: *ScrolledWindow, v: bool) void {
+        self.overlay_scrolling = v;
+        self.base.markDirty();
+    }
+
     // ── 滚动状态 ──────────────────────────────────────────────────────────
 
-    fn maxScrollX(self: *const ScrollView) f32 {
+    fn maxScrollX(self: *const ScrolledWindow) f32 {
         if (!self.scroll_enabled_x) return 0;
         return @max(0, self.content_width - self.base.rect.width);
     }
 
-    fn maxScrollY(self: *const ScrollView) f32 {
+    fn maxScrollY(self: *const ScrolledWindow) f32 {
         if (!self.scroll_enabled_y) return 0;
         return @max(0, self.content_height - self.base.rect.height);
     }
 
-    pub fn scrollTo(self: *ScrollView, x: f32, y: f32) void {
+    pub fn scrollTo(self: *ScrolledWindow, x: f32, y: f32) void {
         self.scroll_x = std.math.clamp(x, 0, self.maxScrollX());
         self.scroll_y = std.math.clamp(y, 0, self.maxScrollY());
         self.applyClip();
@@ -103,12 +223,12 @@ pub const ScrollView = struct {
         self.base.markLayoutDirty();
     }
 
-    pub fn scrollBy(self: *ScrollView, dx: f32, dy: f32) void {
+    pub fn scrollBy(self: *ScrolledWindow, dx: f32, dy: f32) void {
         self.scrollTo(self.scroll_x + dx, self.scroll_y + dy);
     }
 
     /// 更新子树裁剪矩形 (视口, 绝对坐标)
-    fn applyClip(self: *ScrollView) void {
+    fn applyClip(self: *ScrolledWindow) void {
         const abs = self.base.absoluteRect();
         self.base.clip_children = math.Rect(f32){
             .x = abs.x,
@@ -120,7 +240,7 @@ pub const ScrollView = struct {
 
     // ── 滚动条几何 ──────────────────────────────────────────────────────────
 
-    fn verticalBarRect(self: *const ScrollView) math.Rect(f32) {
+    fn verticalBarRect(self: *const ScrolledWindow) math.Rect(f32) {
         return .{
             .x = self.base.rect.width - self.scrollbar_thickness,
             .y = 0,
@@ -129,7 +249,7 @@ pub const ScrollView = struct {
         };
     }
 
-    fn horizontalBarRect(self: *const ScrollView) math.Rect(f32) {
+    fn horizontalBarRect(self: *const ScrolledWindow) math.Rect(f32) {
         return .{
             .x = 0,
             .y = self.base.rect.height - self.scrollbar_thickness,
@@ -139,7 +259,7 @@ pub const ScrollView = struct {
     }
 
     /// 滑块矩形 (相对控件局部坐标)
-    fn thumbRect(self: *const ScrollView, vertical: bool) math.Rect(f32) {
+    fn thumbRect(self: *const ScrolledWindow, vertical: bool) math.Rect(f32) {
         const min_thumb: f32 = 24.0;
         if (vertical) {
             const bar = self.verticalBarRect();
@@ -173,7 +293,7 @@ pub const ScrollView = struct {
     };
 
     fn destroyVTable(w: *Widget, allocator: std.mem.Allocator) void {
-        const self: *ScrollView = @fieldParentPtr("base", w);
+        const self: *ScrolledWindow = @fieldParentPtr("base", w);
         self.destroy(allocator);
     }
 
@@ -191,7 +311,7 @@ pub const ScrollView = struct {
 
     /// 自定义布局: flexbox 排布子项 → 计算内容尺寸 → 夹紧滚动 → 应用偏移
     fn performLayoutCustom(w: *Widget, ctx: *PaintContext) void {
-        const self: *ScrollView = @fieldParentPtr("base", w);
+        const self: *ScrolledWindow = @fieldParentPtr("base", w);
         const pad = w.layout_style.padding;
         const is_row = w.layout_style.direction == .row or w.layout_style.direction == .row_reverse;
         const gap: f32 = if (is_row) w.layout_style.gap.width else w.layout_style.gap.height;
@@ -267,7 +387,7 @@ pub const ScrollView = struct {
         self.applyClip();
     }
 
-    fn layoutAbsoluteChild(self: *ScrollView, child: *Widget, ctx: *PaintContext) void {
+    fn layoutAbsoluteChild(self: *ScrolledWindow, child: *Widget, ctx: *PaintContext) void {
         const cs = child.layout_style;
         const child_size = child.vtable.measure(child, ctx, .{
             .max_width = self.base.rect.width,
@@ -285,35 +405,74 @@ pub const ScrollView = struct {
     }
 
     fn paint(w: *Widget, ctx: *PaintContext) void {
-        const self: *ScrollView = @fieldParentPtr("base", w);
+        const self: *ScrolledWindow = @fieldParentPtr("base", w);
         const rx = ctx.offset_x + w.rect.x;
         const ry = ctx.offset_y + w.rect.y;
 
-        // 垂直滚动条
-        if (self.scroll_enabled_y and self.content_height > w.rect.height) {
-            const bar = self.verticalBarRect();
-            const thumb = self.thumbRect(true);
-            ctx.renderer.fillRoundedRect(
-                .{ .x = rx + thumb.x, .y = ry + thumb.y, .width = thumb.width, .height = thumb.height },
+        // 边框 (GTK4: has_frame)
+        if (self.has_frame and self.frame_width > 0) {
+            ctx.renderer.strokeRoundedRect(
+                .{ .x = rx, .y = ry, .width = w.rect.width, .height = w.rect.height },
                 self.corner_radius,
-                if (self.dragging_v) self.scrollbar_active_color else self.scrollbar_color,
+                self.frame_width,
+                self.frame_color,
             ) catch {};
-            _ = bar;
+        }
+
+        // 垂直滚动条
+        const show_v = switch (self.vscrollbar_policy) {
+            .never, .external => false,
+            .always => true,
+            .automatic => self.content_height > w.rect.height,
+        };
+        if (self.scroll_enabled_y and show_v) {
+            const bar = self.verticalBarRect();
+            // always policy 时画轨道背景
+            if (self.vscrollbar_policy == .always) {
+                ctx.renderer.fillRoundedRect(
+                    .{ .x = rx + bar.x, .y = ry + bar.y, .width = bar.width, .height = bar.height },
+                    self.corner_radius,
+                    math.Color.rgba(self.scrollbar_color.r, self.scrollbar_color.g, self.scrollbar_color.b, 0x22),
+                ) catch {};
+            }
+            const thumb = self.thumbRect(true);
+            if (thumb.height > 0 or self.vscrollbar_policy == .always) {
+                ctx.renderer.fillRoundedRect(
+                    .{ .x = rx + thumb.x, .y = ry + thumb.y, .width = thumb.width, .height = @max(2, thumb.height) },
+                    self.corner_radius,
+                    if (self.dragging_v) self.scrollbar_active_color else self.scrollbar_color,
+                ) catch {};
+            }
         }
 
         // 水平滚动条
-        if (self.scroll_enabled_x and self.content_width > w.rect.width) {
+        const show_h = switch (self.hscrollbar_policy) {
+            .never, .external => false,
+            .always => true,
+            .automatic => self.content_width > w.rect.width,
+        };
+        if (self.scroll_enabled_x and show_h) {
+            const bar = self.horizontalBarRect();
+            if (self.hscrollbar_policy == .always) {
+                ctx.renderer.fillRoundedRect(
+                    .{ .x = rx + bar.x, .y = ry + bar.y, .width = bar.width, .height = bar.height },
+                    self.corner_radius,
+                    math.Color.rgba(self.scrollbar_color.r, self.scrollbar_color.g, self.scrollbar_color.b, 0x22),
+                ) catch {};
+            }
             const thumb = self.thumbRect(false);
-            ctx.renderer.fillRoundedRect(
-                .{ .x = rx + thumb.x, .y = ry + thumb.y, .width = thumb.width, .height = thumb.height },
-                self.corner_radius,
-                if (self.dragging_h) self.scrollbar_active_color else self.scrollbar_color,
-            ) catch {};
+            if (thumb.width > 0 or self.hscrollbar_policy == .always) {
+                ctx.renderer.fillRoundedRect(
+                    .{ .x = rx + thumb.x, .y = ry + thumb.y, .width = @max(2, thumb.width), .height = thumb.height },
+                    self.corner_radius,
+                    if (self.dragging_h) self.scrollbar_active_color else self.scrollbar_color,
+                ) catch {};
+            }
         }
     }
 
     fn onEvent(w: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {
-        const self: *ScrollView = @fieldParentPtr("base", w);
+        const self: *ScrolledWindow = @fieldParentPtr("base", w);
         _ = ectx;
         const abs = w.absoluteRect();
 
@@ -401,10 +560,12 @@ pub const ScrollView = struct {
     }
 };
 
+pub const ScrollView = ScrolledWindow;
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 test "scroll_view clamps scroll offset" {
-    const sv = try ScrollView.create(std.testing.allocator, .{
+    const sv = try ScrolledWindow.create(std.testing.allocator, .{
         .width = 200,
         .height = 100,
     });
@@ -423,7 +584,7 @@ test "scroll_view clamps scroll offset" {
 }
 
 test "scroll_view disabled axis has zero max scroll" {
-    const sv = try ScrollView.create(std.testing.allocator, .{
+    const sv = try ScrolledWindow.create(std.testing.allocator, .{
         .scroll_enabled_x = false,
         .scroll_enabled_y = true,
     });
@@ -437,7 +598,7 @@ test "scroll_view disabled axis has zero max scroll" {
 }
 
 test "scroll_view thumb hidden when content fits" {
-    const sv = try ScrollView.create(std.testing.allocator, .{});
+    const sv = try ScrolledWindow.create(std.testing.allocator, .{});
     defer sv.destroy(std.testing.allocator);
     sv.content_height = 50;
     sv.base.rect.height = 100;
@@ -445,7 +606,7 @@ test "scroll_view thumb hidden when content fits" {
     try std.testing.expectEqual(@as(f32, 0), t.height); // 内容未溢出 → 无滑块
 }
 
-test "scroll wheel routes to ScrollView under mouse" {
+test "scroll wheel routes to ScrolledWindow under mouse" {
     const alloc = std.testing.allocator;
     const Container = @import("container.zig").Container;
 
@@ -453,27 +614,27 @@ test "scroll wheel routes to ScrollView under mouse" {
     defer root.destroy(alloc);
     root.base.rect = .{ .x = 0, .y = 0, .width = 400, .height = 400 };
 
-    const sv = try ScrollView.create(alloc, .{ .width = 200, .height = 100 });
+    const sv = try ScrolledWindow.create(alloc, .{ .width = 200, .height = 100 });
     try root.base.addChild(alloc, &sv.base);
     sv.base.rect = .{ .x = 10, .y = 10, .width = 200, .height = 100 };
     sv.content_height = 500; // 内容溢出 → 可滚动
 
     const ev = pal.Event{ .scroll = .{ .window_id = 0, .axis = .vertical, .delta = -1 } }; // 负 delta = 滚轮向下 (与 Wayland 约定一致)
 
-    // 鼠标在 ScrollView 范围内 (绝对坐标 50,50) → 滚轮生效
+    // 鼠标在 ScrolledWindow 范围内 (绝对坐标 50,50) → 滚轮生效
     var ectx_in = widget_mod.EventContext{ .mouse_x = 50, .mouse_y = 50 };
     const res = root.base.dispatchEvent(&ev, &ectx_in);
     try std.testing.expectEqual(widget_mod.EventResult.handled, res);
     try std.testing.expect(sv.scroll_y != 0);
 
-    // 鼠标在 ScrollView 范围外 (绝对坐标 300,300) → 不滚动
+    // 鼠标在 ScrolledWindow 范围外 (绝对坐标 300,300) → 不滚动
     const before = sv.scroll_y;
     var ectx_out = widget_mod.EventContext{ .mouse_x = 300, .mouse_y = 300 };
     _ = root.base.dispatchEvent(&ev, &ectx_out);
     try std.testing.expectEqual(before, sv.scroll_y);
 }
 
-test "keyboard routes to focused ScrollView" {
+test "keyboard routes to focused ScrolledWindow" {
     const alloc = std.testing.allocator;
     const Container = @import("container.zig").Container;
 
@@ -481,7 +642,7 @@ test "keyboard routes to focused ScrollView" {
     defer root.destroy(alloc);
     root.base.rect = .{ .x = 0, .y = 0, .width = 400, .height = 400 };
 
-    const sv = try ScrollView.create(alloc, .{ .width = 200, .height = 100 });
+    const sv = try ScrolledWindow.create(alloc, .{ .width = 200, .height = 100 });
     try root.base.addChild(alloc, &sv.base);
     sv.base.rect = .{ .x = 0, .y = 0, .width = 200, .height = 100 };
     sv.content_height = 500;

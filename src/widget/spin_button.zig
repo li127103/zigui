@@ -6,11 +6,13 @@ const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
 const styled_text = @import("../text/styled_text.zig");
+const adj_mod = @import("../model/adjustment.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
+const Adjustment = adj_mod.Adjustment;
 
 pub const SpinButton = struct {
     pub const ButtonKind = enum { none, up, down };
@@ -24,6 +26,10 @@ pub const SpinButton = struct {
     digits: u8,
     editable: bool,
     on_change: ?*const fn (self: *SpinButton, value: f64) void,
+    /// 关联 Adjustment（f32 值会自动和 f64 内部互转）
+    adjustment: ?*Adjustment = null,
+    _saved_adj_vc: ?*const fn (userdata: ?*anyopaque, value: f32) void = null,
+    _saved_adj_vc_userdata: ?*anyopaque = null,
     // 样式
     bg_color: math.Color,
     text_color: math.Color,
@@ -44,6 +50,10 @@ pub const SpinButton = struct {
     input_buf: [64]u8 = undefined,
     input_buf_len: usize = 0,
     editing: bool = false,
+    // GTK4 兼容选项
+    numeric_only: bool = false,
+    wrap: bool = false,
+    snap_to_ticks: bool = false,
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         value: f64 = 0,
@@ -101,17 +111,57 @@ pub const SpinButton = struct {
     }
 
     pub fn destroy(self: *SpinButton, allocator: std.mem.Allocator) void {
+        self.adjustment = null;
+        self._saved_adj_vc = null;
+        self._saved_adj_vc_userdata = null;
         self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
     }
 
+    pub fn setAdjustment(self: *SpinButton, adj: ?*Adjustment) void {
+        if (self.adjustment == adj) return;
+        self.adjustment = adj;
+        if (adj) |a| {
+            self.value = @floatCast(a.value);
+            self.min = @floatCast(a.lower);
+            self.max = @floatCast(a.upper);
+            self.step = @floatCast(a.step_increment);
+            self._saved_adj_vc = a.on_value_changed;
+            self._saved_adj_vc_userdata = a.on_value_changed_userdata;
+            a.on_value_changed = &onAdjValueChanged;
+            a.on_value_changed_userdata = @ptrCast(self);
+            self.syncInputBuf();
+        }
+        self.base.markDirty();
+    }
+
+    pub inline fn getAdjustment(self: *const SpinButton) ?*Adjustment {
+        return self.adjustment;
+    }
+
     pub fn setValue(self: *SpinButton, v: f64) void {
+        if (self.adjustment) |a| {
+            a.setValue(@floatCast(v));
+            return;
+        }
         const clamped = std.math.clamp(v, self.min, self.max);
         if (clamped != self.value) {
             self.value = clamped;
             self.syncInputBuf();
             self.base.markDirty();
+        }
+    }
+
+    fn onAdjValueChanged(userdata: ?*anyopaque, value_f32: f32) void {
+        const self: *SpinButton = @ptrCast(@alignCast(userdata orelse return));
+        const v: f64 = @floatCast(value_f32);
+        const clamped = std.math.clamp(v, self.min, self.max);
+        if (clamped != self.value) {
+            self.value = clamped;
+            self.syncInputBuf();
+            self.base.markDirty();
+            self.fireChange();
         }
     }
 
@@ -149,6 +199,28 @@ pub const SpinButton = struct {
             self.fireChange();
         }
         self.syncInputBuf();
+    }
+
+    // ── GTK4 兼容 setter ────────────────────────────────────────────────────
+
+    pub fn setDigits(self: *SpinButton, n: u32) void {
+        self.digits = @intCast(n);
+        self.base.markDirty();
+    }
+
+    pub fn setNumeric(self: *SpinButton, v: bool) void {
+        self.numeric_only = v;
+        self.base.markDirty();
+    }
+
+    pub fn setWrap(self: *SpinButton, v: bool) void {
+        self.wrap = v;
+        self.base.markDirty();
+    }
+
+    pub fn setSnapToTicks(self: *SpinButton, v: bool) void {
+        self.snap_to_ticks = v;
+        self.base.markDirty();
     }
 
     // ── VTable ──────────────────────────────────────────────────────────────

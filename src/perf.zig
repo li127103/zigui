@@ -93,7 +93,7 @@ pub const FrameStats = struct {
 };
 
 /// 单调时钟纳秒 (Linux: clock_gettime(MONOTONIC); macOS: mach_absolute_time 近似)
-fn nowNs() u64 {
+pub fn nowNs() u64 {
     if (comptime is_linux) {
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
@@ -106,6 +106,11 @@ fn nowNs() u64 {
     } else {
         @compileError("perf: unsupported platform clock");
     }
+}
+
+/// 单调时钟毫秒（跨平台）
+pub fn nowMs() u64 {
+    return nowNs() / std.time.ns_per_ms;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

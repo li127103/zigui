@@ -13,6 +13,12 @@ const EventResult = widget_mod.EventResult;
 
 pub const EllipsizeMode = enum { none, end };
 
+/// GTK4: PangoWrapMode (简化)
+pub const WrapMode = enum { word, char, word_char };
+
+/// GTK4: GtkJustification
+pub const Justification = enum { left, right, center, fill };
+
 pub const Label = struct {
     base: Widget,
     text: []const u8,
@@ -25,10 +31,22 @@ pub const Label = struct {
     use_markup: bool = false,
     /// 是否自动换行 (按容器宽度)
     wrap: bool = false,
+    /// 换行模式 (GTK4: gtk_label_set_wrap_mode)
+    wrap_mode: WrapMode = .word,
     /// 省略模式 (none=不截断, end=末尾加省略号)
     ellipsize: EllipsizeMode = .none,
     /// 最大行数 (0=无限; 仅 wrap 时生效)
     max_lines: u32 = 0,
+    /// GTK4: gtk_label_set_xalign (0.0=左, 0.5=中, 1.0=右)
+    xalign: f32 = 0.0,
+    /// GTK4: gtk_label_set_yalign (0.0=上, 0.5=中, 1.0=下)
+    yalign: f32 = 0.5,
+    /// GTK4: gtk_label_set_justify
+    justify: Justification = .left,
+    /// GTK4: gtk_label_set_max_width_chars (0=不限)
+    max_width_chars: u32 = 0,
+    /// GTK4: gtk_label_set_track_visited_links
+    track_visited_links: bool = true,
     /// 解析后的 span 缓存
     cached_spans: ?[]styled_text.TextSpan = null,
     cached_spans_allocator: ?std.mem.Allocator = null,
@@ -89,6 +107,68 @@ pub const Label = struct {
         self.invalidateSpans();
         self.base.markDirty();
         self.base.markLayoutDirty();
+    }
+
+    // ── GTK4 对齐 setter ──────────────────────────────────────────────────
+
+    /// GTK4: gtk_label_set_wrap
+    pub fn setWrap(self: *Label, v: bool) void {
+        self.wrap = v;
+        self.base.markDirty();
+        self.base.markLayoutDirty();
+    }
+
+    /// GTK4: gtk_label_set_wrap_mode (简化为 word/char/word_char)
+    pub fn setWrapMode(self: *Label, mode: WrapMode) void {
+        self.wrap_mode = mode;
+        self.base.markDirty();
+        self.base.markLayoutDirty();
+    }
+
+    /// GTK4: gtk_label_set_xalign (0.0=左, 0.5=中, 1.0=右)
+    pub fn setXalign(self: *Label, v: f32) void {
+        self.xalign = std.math.clamp(v, 0.0, 1.0);
+        self.base.markDirty();
+    }
+
+    /// GTK4: gtk_label_set_yalign (0.0=上, 0.5=中, 1.0=下)
+    pub fn setYalign(self: *Label, v: f32) void {
+        self.yalign = std.math.clamp(v, 0.0, 1.0);
+        self.base.markDirty();
+    }
+
+    /// GTK4: gtk_label_set_justify
+    pub fn setJustify(self: *Label, j: Justification) void {
+        self.justify = j;
+        self.base.markDirty();
+        self.base.markLayoutDirty();
+    }
+
+    /// GTK4: gtk_label_set_ellipsize
+    pub fn setEllipsize(self: *Label, mode: EllipsizeMode) void {
+        self.ellipsize = mode;
+        self.base.markDirty();
+        self.base.markLayoutDirty();
+    }
+
+    /// GTK4: gtk_label_set_lines
+    pub fn setLines(self: *Label, n: u32) void {
+        self.max_lines = n;
+        self.base.markDirty();
+        self.base.markLayoutDirty();
+    }
+
+    /// GTK4: gtk_label_set_max_width_chars
+    pub fn setMaxWidthChars(self: *Label, n: u32) void {
+        self.max_width_chars = n;
+        self.base.markDirty();
+        self.base.markLayoutDirty();
+    }
+
+    /// GTK4: gtk_label_set_track_visited_links
+    pub fn setTrackVisitedLinks(self: *Label, v: bool) void {
+        self.track_visited_links = v;
+        self.base.markDirty();
     }
 
     fn invalidateSpans(self: *Label) void {

@@ -24,6 +24,24 @@ pub const StackTransition = enum {
     slide_down,
 };
 
+/// GTK4 对齐的过渡类型 (gtk_stack_set_transition_type 接受此枚举)
+/// crossfade 对应内部 StackTransition.fade
+pub const TransitionType = enum {
+    none,
+    crossfade,
+    slide_left,
+    slide_right,
+    slide_up,
+    slide_down,
+};
+
+/// Stack 页面元数据 (对应 GTK4 GtkStackPage: name/title 等附加信息)
+/// 与 base.children 同序, 每个条目对应一个子页面。
+pub const StackPage = struct {
+    name: ?[]const u8 = null,
+    title: ?[]const u8 = null,
+};
+
 pub const Stack = struct {
     base: Widget,
     allocator: std.mem.Allocator,
@@ -33,6 +51,7 @@ pub const Stack = struct {
     anim_progress: f32 = 1.0,
     prev_index: usize = 0,
     anim_running: bool = false,
+    pages: std.ArrayListUnmanaged(StackPage) = .empty,
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         bg_color: ?math.Color = null,
@@ -71,18 +90,78 @@ pub const Stack = struct {
             child.vtable.destroy(child, allocator);
         }
         self.base.children.deinit(allocator);
+        self.pages.deinit(allocator);
         allocator.destroy(self);
     }
 
     /// 添加子页面
     pub fn addChild(self: *Stack, child: *Widget) !void {
         const index = self.base.children.items.len;
+        try self.pages.append(self.allocator, .{});
         try self.base.addChild(self.allocator, child);
         if (index == self.visible_index) {
             child.state.visible = true;
         } else {
             child.state.visible = false;
         }
+    }
+
+    /// 按名称添加子页面, 返回索引 (GTK4: gtk_stack_add_named)
+    pub fn addNamed(self: *Stack, child: *Widget, name: []const u8) !usize {
+        const index = self.base.children.items.len;
+        try self.addChild(child);
+        self.pages.items[index].name = name;
+        return index;
+    }
+
+    /// 按名称和标题添加子页面, 返回索引 (GTK4: gtk_stack_add_titled)
+    pub fn addTitled(self: *Stack, child: *Widget, name: []const u8, title: []const u8) !usize {
+        const index = self.base.children.items.len;
+        try self.addChild(child);
+        self.pages.items[index].name = name;
+        self.pages.items[index].title = title;
+        return index;
+    }
+
+    /// 按控件指针切换可见页面 (GTK4: gtk_stack_set_visible_child)
+    pub fn setVisibleChild(self: *Stack, child: *Widget) void {
+        for (self.base.children.items, 0..) |c, i| {
+            if (c == child) {
+                self.setVisibleIndex(i);
+                return;
+            }
+        }
+    }
+
+    /// 按名称切换可见页面 (GTK4: gtk_stack_set_visible_child_name)
+    pub fn setVisibleChildName(self: *Stack, name: []const u8) void {
+        for (self.pages.items, 0..) |page, i| {
+            if (page.name) |n| {
+                if (std.mem.eql(u8, n, name)) {
+                    self.setVisibleIndex(i);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// 设置过渡类型 (GTK4: gtk_stack_set_transition_type)
+    pub fn setTransitionType(self: *Stack, tt: TransitionType) void {
+        self.transition_type = switch (tt) {
+            .none => .none,
+            .crossfade => .fade,
+            .slide_left => .slide_left,
+            .slide_right => .slide_right,
+            .slide_up => .slide_up,
+            .slide_down => .slide_down,
+        };
+        self.base.markDirty();
+    }
+
+    /// 设置过渡时长 (GTK4: gtk_stack_set_transition_duration)
+    pub fn setTransitionDuration(self: *Stack, ms: u32) void {
+        self.transition_duration_ms = ms;
+        self.base.markDirty();
     }
 
     /// 切换到指定索引的页面

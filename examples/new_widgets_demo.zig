@@ -1,12 +1,12 @@
 //! zigui 新控件综合示例 - 演示阶段1补齐的控件 (跨平台)
 //!
 //! 展示: Checkbox / Radio(+RadioGroup) / Switch / ProgressBar / Spinner /
-//!       Image / ScrollView(+内置滚动条与裁剪) / ScrollBar 几何。
+//!       Image / ScrolledWindow(+内置滚动条与裁剪) / ScrollBar 几何。
 //!
 //! 交互:
 //!   - 点击 Checkbox / Radio / Switch 切换状态
 //!   - 拖动 Slider 调节 ProgressBar 进度
-//!   - 滚轮 / 方向键 / PageUp/Down 滚动右侧列表 (ScrollView 裁剪溢出内容)
+//!   - 滚轮 / 方向键 / PageUp/Down 滚动右侧列表 (ScrolledWindow 裁剪溢出内容)
 //!   - Spinner 每帧 tick 旋转动画
 
 const std = @import("std");
@@ -18,14 +18,14 @@ const pal = zigui.pal;
 
 const Container = zigui.container.Container;
 const Label = zigui.label.Label;
-const Checkbox = zigui.checkbox.Checkbox;
-const Radio = zigui.radio.Radio;
-const RadioGroup = zigui.radio.RadioGroup;
+const CheckButton = zigui.check_button.CheckButton;
+const RadioButton = zigui.radio_button.RadioButton;
+const RadioGroup = zigui.radio_button.RadioGroup;
 const Switch = zigui.switch_widget.Switch;
 const ProgressBar = zigui.progress_bar.ProgressBar;
 const Spinner = zigui.spinner.Spinner;
 const Image = zigui.image_widget.Image;
-const ScrollView = zigui.scroll_view.ScrollView;
+const ScrolledWindow = zigui.scrolled_window.ScrolledWindow;
 const Slider = zigui.slider.Slider;
 
 const logo_png = @embedFile("assets/zigui_logo.png");
@@ -38,7 +38,7 @@ var g_root: ?*Container = null;
 var g_alloc: ?std.mem.Allocator = null;
 var g_progress: ?*ProgressBar = null;
 var g_spinner: ?*Spinner = null;
-var g_scroll: ?*ScrollView = null;
+var g_scroll: ?*ScrolledWindow = null;
 var g_status_label: ?*Label = null;
 var g_status_buf: [64]u8 = undefined;
 var g_frame: u32 = 0;
@@ -66,7 +66,7 @@ pub fn main() !void {
     try buildTree(allocator);
     defer destroyTree();
 
-    // ScrollView 默认获得焦点以支持键盘滚动
+    // ScrolledWindow 默认获得焦点以支持键盘滚动
     if (g_scroll) |sv| sv.base.state.focused = true;
 
     try app.run(&drawFrame);
@@ -135,15 +135,15 @@ fn buildLeftPanel(body: *Container, alloc: std.mem.Allocator) !void {
     try panel.base.addChild(alloc, &img.base);
 
     try addSection(panel, alloc, "Checkbox");
-    const cb1 = try Checkbox.create(alloc, "Enable notifications", .{ .checked = true });
+    const cb1 = try CheckButton.create(alloc, "Enable notifications", .{ .checked = true });
     try panel.base.addChild(alloc, &cb1.base);
-    const cb2 = try Checkbox.create(alloc, "Auto-save documents", .{});
+    const cb2 = try CheckButton.create(alloc, "Auto-save documents", .{});
     try panel.base.addChild(alloc, &cb2.base);
 
     try addSection(panel, alloc, "Radio Group");
-    const r0 = try Radio.create(alloc, &g_radio_group, 0, "Small", .{});
-    const r1 = try Radio.create(alloc, &g_radio_group, 1, "Medium", .{});
-    const r2 = try Radio.create(alloc, &g_radio_group, 2, "Large", .{});
+    const r0 = try RadioButton.create(alloc, &g_radio_group, 0, "Small", .{});
+    const r1 = try RadioButton.create(alloc, &g_radio_group, 1, "Medium", .{});
+    const r2 = try RadioButton.create(alloc, &g_radio_group, 2, "Large", .{});
     try panel.base.addChild(alloc, &r0.base);
     try panel.base.addChild(alloc, &r1.base);
     try panel.base.addChild(alloc, &r2.base);
@@ -184,7 +184,7 @@ fn buildLeftPanel(body: *Container, alloc: std.mem.Allocator) !void {
 }
 
 fn buildScrollArea(body: *Container, alloc: std.mem.Allocator) !void {
-    const sv = try ScrollView.create(alloc, .{
+    const sv = try ScrolledWindow.create(alloc, .{
         .bg_color = math.Color.hex(0x1E293BFF),
         .corner_radius = 12,
         .direction = .column,
@@ -314,7 +314,7 @@ fn dispatchInput(app: *zigui.app.App) void {
         _ = root.base.dispatchEvent(&ev, &ectx);
     }
 
-    // 键盘 (方向键/PageUp/Down 滚动 ScrollView)
+    // 键盘 (方向键/PageUp/Down 滚动 ScrolledWindow)
     if (app.key_hit) |key| {
         // Tab 焦点导航 (无障碍): Shift+Tab 后退, Tab 前进
         if (key == .tab) {

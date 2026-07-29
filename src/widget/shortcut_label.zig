@@ -108,19 +108,25 @@ pub const ShortcutLabel = struct {
     }
 
     fn formatShortcut(self: *Self, allocator: std.mem.Allocator) ![]const u8 {
-        var buf = std.ArrayList(u8).init(allocator);
-        errdefer buf.deinit();
-
-        const writer = buf.writer();
-
+        var total_len: usize = self.shortcut.key.len;
         for (self.shortcut.modifiers) |mod| {
-            try writer.writeAll(modToString(mod));
-            try writer.writeAll("+");
+            total_len += modToString(mod).len + 1;
         }
 
-        try writer.writeAll(self.shortcut.key);
+        const result = try allocator.alloc(u8, total_len);
+        var offset: usize = 0;
 
-        return try buf.toOwnedSlice();
+        for (self.shortcut.modifiers) |mod| {
+            const s = modToString(mod);
+            @memcpy(result[offset .. offset + s.len], s);
+            offset += s.len;
+            result[offset] = '+';
+            offset += 1;
+        }
+
+        @memcpy(result[offset .. offset + self.shortcut.key.len], self.shortcut.key);
+
+        return result;
     }
 
     const vtable = Widget.VTable{

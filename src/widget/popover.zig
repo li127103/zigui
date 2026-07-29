@@ -32,6 +32,10 @@ pub const Popover = struct {
     arrow_size: f32 = 8,
     /// 点击外部时是否自动关闭
     auto_close: bool = true,
+    /// 是否显示箭头
+    has_arrow: bool = true,
+    /// 指向矩形 (setPointingTo 设置)
+    pointing_rect: ?struct { x: f32, y: f32, w: f32, h: f32 } = null,
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         relative_to: ?*Widget = null,
@@ -98,6 +102,33 @@ pub const Popover = struct {
 
     pub fn addChild(self: *Popover, child: *Widget) !void {
         try self.base.addChild(self.allocator, child);
+    }
+
+    // ── GTK4 兼容 setter ────────────────────────────────────────────────────
+
+    pub fn setChild(self: *Popover, child: *Widget) !void {
+        // 清除旧的子控件
+        for (self.base.children.items) |c| {
+            c.vtable.destroy(c, self.allocator);
+        }
+        self.base.children.clearRetainingCapacity();
+        try self.base.addChild(self.allocator, child);
+        self.base.markDirty();
+    }
+
+    pub fn setPointingTo(self: *Popover, x: f32, y: f32, w: f32, h: f32) void {
+        self.pointing_rect = .{ .x = x, .y = y, .w = w, .h = h };
+        self.base.markDirty();
+    }
+
+    pub fn setAutohide(self: *Popover, v: bool) void {
+        self.auto_close = v;
+        self.base.markDirty();
+    }
+
+    pub fn setHasArrow(self: *Popover, v: bool) void {
+        self.has_arrow = v;
+        self.base.markDirty();
     }
 
     fn updatePosition(self: *Popover) void {

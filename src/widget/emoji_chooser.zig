@@ -10,8 +10,8 @@ const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
 const styled_text = @import("../text/styled_text.zig");
 const button_mod = @import("button.zig");
-const scroll_view_mod = @import("scroll_view.zig");
-const text_input_mod = @import("text_input.zig");
+const scrolled_window_mod = @import("scrolled_window.zig");
+const entry_mod = @import("entry.zig");
 const grid_mod = @import("grid.zig");
 
 const Widget = widget_mod.Widget;
@@ -19,8 +19,8 @@ const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 const Button = button_mod.Button;
-const ScrollView = scroll_view_mod.ScrollView;
-const TextInput = text_input_mod.TextInput;
+const ScrolledWindow = scrolled_window_mod.ScrolledWindow;
+const Entry = entry_mod.Entry;
 
 /// 表情分类
 pub const EmojiCategory = enum {
@@ -340,8 +340,8 @@ pub const EmojiChooser = struct {
     corner_radius: f32 = 12.0,
 
     category_buttons: std.ArrayListUnmanaged(*Button) = .{ .items = &.{}, .capacity = 0 },
-    search_input: ?*TextInput = null,
-    scroll_view: ?*ScrollView = null,
+    search_input: ?*Entry = null,
+    scroll_view: ?*ScrolledWindow = null,
 
     hovered_emoji: ?usize = null,
     emoji_gap: f32 = 4.0,
@@ -425,7 +425,7 @@ pub const EmojiChooser = struct {
             try self.base.addChild(self.allocator, btn);
         }
 
-        const search = try TextInput.create(self.allocator, .{
+        const search = try Entry.create(self.allocator, .{
             .placeholder = "搜索表情...",
             .on_text_changed = onSearchChanged,
             .bg_color = math.Color.hex(0x0F172AFF),
@@ -447,7 +447,7 @@ pub const EmojiChooser = struct {
         self.base.markDirty();
     }
 
-    fn onSearchChanged(input: *TextInput, text: []const u8) void {
+    fn onSearchChanged(input: *Entry, text: []const u8) void {
         const self: *Self = @fieldParentPtr("base", input.base.parent.?);
         if (self.search_query.len > 0) {
             self.allocator.free(self.search_query);

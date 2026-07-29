@@ -34,6 +34,10 @@ pub const Button = struct {
     corner_radius: f32,
     padding_h: f32,
     padding_v: f32,
+    /// 自定义子控件 (setChild 设置)
+    custom_child: ?*Widget = null,
+    /// 是否解析助记符下划线
+    use_underline: bool = false,
 
     pub fn create(allocator: std.mem.Allocator, label_text: []const u8, opts: struct {
         font_size: f32 = 14.0,
@@ -48,8 +52,15 @@ pub const Button = struct {
         corner_radius: f32 = 8.0,
         padding_h: f32 = 16.0,
         padding_v: f32 = 10.0,
+        min_width: ?f32 = null,
+        width: ?f32 = null,
+        min_height: ?f32 = null,
+        height: ?f32 = null,
+        padding: ?math.EdgeInsets = null,
     }) !*Button {
         const self = try allocator.create(Button);
+        const eff_padding_h = if (opts.padding) |p| (p.left + p.right) / 2.0 else opts.padding_h;
+        const eff_padding_v = if (opts.padding) |p| (p.top + p.bottom) / 2.0 else opts.padding_v;
         self.* = .{
             .base = .{
                 .vtable = &vtable,
@@ -67,18 +78,77 @@ pub const Button = struct {
             .bg_pressed = opts.bg_pressed,
             .text_color = opts.text_color,
             .corner_radius = opts.corner_radius,
-            .padding_h = opts.padding_h,
-            .padding_v = opts.padding_v,
+            .padding_h = eff_padding_h,
+            .padding_v = eff_padding_v,
         };
+        if (opts.min_width) |w| self.base.layout_style.min_width = .{ .px = w };
+        if (opts.width) |w| self.base.layout_style.width = .{ .px = w };
+        if (opts.min_height) |h| self.base.layout_style.min_height = .{ .px = h };
+        if (opts.height) |h| self.base.layout_style.height = .{ .px = h };
         self.base.accessibility = .{ .role = .button, .label = label_text };
         self.base.cursor = .pointing_hand;
         return self;
+    }
+
+    // ── GTK4 兼容构造 (gtk_button_new_with_label / new_from_icon_name) ────────
+
+    /// GTK4: gtk_button_new_with_label
+    pub fn newWithLabel(allocator: std.mem.Allocator, label_text: []const u8) !*Button {
+        return create(allocator, label_text, .{});
+    }
+    /// GTK4: gtk_button_new_with_mnemonic (下划线助记，简化版与 with_label 同)
+    pub fn newWithMnemonic(allocator: std.mem.Allocator, label_text: []const u8) !*Button {
+        return create(allocator, label_text, .{});
+    }
+    /// GTK4: gtk_button_new_from_icon_name — 图标按钮 (label="")
+    pub fn newFromIconName(allocator: std.mem.Allocator, icon_name: icons.IconName, icon_size: f32) !*Button {
+        return create(allocator, "", .{ .icon = icon_name, .icon_size = icon_size });
+    }
+
+    /// GTK4: gtk_button_set_label
+    pub fn setLabel(self: *Button, label: []const u8) void {
+        self.label = label;
+        self.base.accessibility.label = label;
+        self.base.markLayoutDirty();
+        self.base.markDirty();
+    }
+    /// GTK4: gtk_button_get_label
+    pub fn getLabel(self: *const Button) []const u8 {
+        return self.label;
+    }
+
+    /// GTK4: gtk_button_set_icon_name (setIcon 的别名)
+    pub fn setIconName(self: *Button, name: ?icons.IconName) void {
+        self.setIcon(name);
+    }
+    /// GTK4: gtk_button_get_icon_name
+    pub fn getIconName(self: *const Button) ?icons.IconName {
+        return self.icon;
     }
 
     /// 设置/清除图标 (运行时切换)
     pub fn setIcon(self: *Button, icon: ?icons.IconName) void {
         self.icon = icon;
         self.base.markLayoutDirty();
+        self.base.markDirty();
+    }
+
+    // ── GTK4 兼容 setter ────────────────────────────────────────────────────
+
+    /// GTK4: gtk_button_set_child - 设置任意子控件
+    pub fn setChild(self: *Button, child: *Widget) void {
+        self.custom_child = child;
+        self.base.markDirty();
+    }
+
+    /// GTK4: gtk_button_get_child - 获取子控件
+    pub fn getChild(self: *Button) ?*Widget {
+        return self.custom_child;
+    }
+
+    /// GTK4: gtk_button_set_use_underline - 设置助记符下划线解析
+    pub fn setUseUnderline(self: *Button, v: bool) void {
+        self.use_underline = v;
         self.base.markDirty();
     }
 

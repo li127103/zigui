@@ -38,6 +38,8 @@ pub const IconName = enum {
     warning,
     err,
     question,
+    eye,
+    eye_off,
 };
 
 /// 单个绘制基元 (16×16 坐标系)
@@ -260,6 +262,34 @@ const icon_question = [_]Primitive{
     question_dot,
 };
 
+const eye_outer = [_][2]f32{
+    .{ 1, 8 },
+    .{ 4, 3.5 },
+    .{ 8, 2.5 },
+    .{ 12, 3.5 },
+    .{ 15, 8 },
+    .{ 12, 12.5 },
+    .{ 8, 13.5 },
+    .{ 4, 12.5 },
+};
+
+const eye_inner = circle(8, 8, 3);
+
+const icon_eye = [_]Primitive{
+    .{ .polygon = &eye_outer },
+    eye_inner,
+};
+
+const eye_off_line1 = line(2, 3, 14, 13, 1.2);
+const eye_off_line2 = line(14, 3, 2, 13, 1.2);
+
+const icon_eye_off = [_]Primitive{
+    .{ .polygon = &eye_outer },
+    eye_inner,
+    poly(&eye_off_line1),
+    poly(&eye_off_line2),
+};
+
 /// 获取图标的基元列表 (16×16 坐标系)
 pub fn getIcon(name: IconName) []const Primitive {
     return switch (name) {
@@ -287,6 +317,8 @@ pub fn getIcon(name: IconName) []const Primitive {
         .warning => &icon_warning,
         .err => &icon_err,
         .question => &icon_question,
+        .eye => &icon_eye,
+        .eye_off => &icon_eye_off,
     };
 }
 
@@ -342,7 +374,7 @@ test "getIcon 返回非空基元列表 (除 none 外)" {
         .close,    .search,     .menu,       .settings,    .plus,    .minus, .check,
         .arrow_up, .arrow_down, .arrow_left, .arrow_right, .refresh, .edit,  .trash,
         .save,     .home,       .user,       .star,        .heart,   .info,  .warning,
-        .err,      .question,
+        .err,      .question,   .eye,        .eye_off,
     };
     for (names) |n| {
         const prims = getIcon(n);

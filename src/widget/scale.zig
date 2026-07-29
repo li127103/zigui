@@ -11,11 +11,21 @@ const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
 const styled_text = @import("../text/styled_text.zig");
+const adj_mod = @import("../model/adjustment.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
+const Adjustment = adj_mod.Adjustment;
+
+pub const ValuePosition = enum { top, bottom };
+
+pub const ScaleMark = struct {
+    value: f32,
+    position: ValuePosition,
+    label: []const u8,
+};
 
 pub const Scale = struct {
     base: Widget,
@@ -25,6 +35,10 @@ pub const Scale = struct {
     step: f32,
     on_change: ?*const fn (self: *Scale, value: f32) void,
     dragging: bool = false,
+    /// 关联 Adjustment（设置后所有值/范围/步长委托给 adjustment）
+    adjustment: ?*Adjustment = null,
+    _saved_adj_vc: ?*const fn (userdata: ?*anyopaque, value: f32) void = null,
+    _saved_adj_vc_userdata: ?*anyopaque = null,
 
     tick_count: u32 = 5,
     show_value: bool = true,
@@ -42,6 +56,9 @@ pub const Scale = struct {
     thumb_radius: f32 = 9.0,
     tick_height: f32 = 8.0,
     scale_padding_bottom: f32 = 24.0,
+
+    has_origin: bool = true,
+    marks: std.ArrayListUnmanaged(ScaleMark) = .{},
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         value: f32 = 0,
@@ -75,12 +92,40 @@ pub const Scale = struct {
     }
 
     pub fn destroy(self: *Scale, allocator: std.mem.Allocator) void {
+        self.adjustment = null;
+        self._saved_adj_vc = null;
+        self._saved_adj_vc_userdata = null;
         self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
+        self.marks.deinit(allocator);
         allocator.destroy(self);
     }
 
+    pub fn setAdjustment(self: *Scale, adj: ?*Adjustment) void {
+        if (self.adjustment == adj) return;
+        self.adjustment = adj;
+        if (adj) |a| {
+            self.value = a.value;
+            self.min = a.lower;
+            self.max = a.upper;
+            self.step = a.step_increment;
+            self._saved_adj_vc = a.on_value_changed;
+            self._saved_adj_vc_userdata = a.on_value_changed_userdata;
+            a.on_value_changed = &onAdjValueChanged;
+            a.on_value_changed_userdata = @ptrCast(self);
+        }
+        self.base.markDirty();
+    }
+
+    pub inline fn getAdjustment(self: *const Scale) ?*Adjustment {
+        return self.adjustment;
+    }
+
     pub fn setValue(self: *Scale, v: f32) void {
+        if (self.adjustment) |a| {
+            a.setValue(v);
+            return;
+        }
         const clamped = std.math.clamp(v, self.min, self.max);
         const stepped = if (self.step > 0) blk: {
             const steps = @round((clamped - self.min) / self.step);
@@ -91,6 +136,58 @@ pub const Scale = struct {
             self.base.markDirty();
             if (self.on_change) |cb| cb(self, self.value);
         }
+    }
+
+    pub fn setDrawValue(self: *Scale, v: bool) void {
+        self.show_value = v;
+        self.base.markDirty();
+        self.base.markLayoutDirty();
+    }
+
+    pub fn setValuePos(self: *Scale, pos: ValuePosition) void {
+        _ = pos;
+        self.base.markDirty();
+        self.base.markLayoutDirty();
+    }
+
+    pub fn setHasOrigin(self: *Scale, v: bool) void {
+        self.has_origin = v;
+        self.base.markDirty();
+        self.base.markLayoutDirty();
+    }
+
+    pub fn setDigits(self: *Scale, n: u32) void {
+        self.decimal_places = @intCast(n);
+        self.base.markDirty();
+        self.base.markLayoutDirty();
+    }
+
+    pub fn addMark(self: *Scale, value: f32, position: ValuePosition, label: []const u8) void {
+        self.marks.append(std.heap.page_allocator, .{
+            .value = value,
+            .position = position,
+            .label = label,
+        }) catch {};
+        self.base.markDirty();
+        self.base.markLayoutDirty();
+    }
+
+    pub fn clearMarks(self: *Scale) void {
+        self.marks.clearRetainingCapacity();
+        self.base.markDirty();
+        self.base.markLayoutDirty();
+    }
+
+    fn onAdjValueChanged(userdata: ?*anyopaque, value: f32) void {
+        const self: *Scale = @ptrCast(@alignCast(userdata orelse return));
+        self.value = value;
+        if (self.adjustment) |a| {
+            self.min = a.lower;
+            self.max = a.upper;
+            self.step = a.step_increment;
+        }
+        self.base.markDirty();
+        if (self.on_change) |cb| cb(self, self.value);
     }
 
     pub fn normalized(self: *const Scale) f32 {

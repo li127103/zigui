@@ -56,19 +56,67 @@ pub const CenterBox = struct {
         allocator.destroy(self);
     }
 
-    pub fn setStart(self: *CenterBox, child: *Widget) !void {
+    /// GTK4: gtk_center_box_set_start_widget
+    pub fn setStartWidget(self: *CenterBox, child: ?*Widget) !void {
+        // 移除旧的 start_child
+        if (self.start_child) |old| {
+            self.base.removeChild(self.allocator, old);
+        }
         self.start_child = child;
-        try self.base.addChild(self.allocator, child);
+        if (child) |c| try self.base.addChild(self.allocator, c);
+    }
+    /// 旧 API 兼容
+    pub fn setStart(self: *CenterBox, child: *Widget) !void {
+        try self.setStartWidget(child);
     }
 
-    pub fn setCenter(self: *CenterBox, child: *Widget) !void {
+    /// GTK4: gtk_center_box_set_center_widget
+    pub fn setCenterWidget(self: *CenterBox, child: ?*Widget) !void {
+        if (self.center_child) |old| {
+            self.base.removeChild(self.allocator, old);
+        }
         self.center_child = child;
-        try self.base.addChild(self.allocator, child);
+        if (child) |c| try self.base.addChild(self.allocator, c);
+    }
+    pub fn setCenter(self: *CenterBox, child: *Widget) !void {
+        try self.setCenterWidget(child);
     }
 
-    pub fn setEnd(self: *CenterBox, child: *Widget) !void {
+    /// GTK4: gtk_center_box_set_end_widget
+    pub fn setEndWidget(self: *CenterBox, child: ?*Widget) !void {
+        if (self.end_child) |old| {
+            self.base.removeChild(self.allocator, old);
+        }
         self.end_child = child;
-        try self.base.addChild(self.allocator, child);
+        if (child) |c| try self.base.addChild(self.allocator, c);
+    }
+    pub fn setEnd(self: *CenterBox, child: *Widget) !void {
+        try self.setEndWidget(child);
+    }
+
+    /// GTK4: gtk_center_box_get_start_widget
+    pub fn getStartWidget(self: *const CenterBox) ?*Widget {
+        return self.start_child;
+    }
+    /// GTK4: gtk_center_box_get_center_widget
+    pub fn getCenterWidget(self: *const CenterBox) ?*Widget {
+        return self.center_child;
+    }
+    /// GTK4: gtk_center_box_get_end_widget
+    pub fn getEndWidget(self: *const CenterBox) ?*Widget {
+        return self.end_child;
+    }
+
+    /// GTK4: gtk_orientable_set_orientation (映射到 direction)
+    pub fn setOrientation(self: *CenterBox, orientation: enum { horizontal, vertical }) void {
+        self.direction = switch (orientation) {
+            .horizontal => .row,
+            .vertical => .column,
+        };
+        self.base.markLayoutDirty();
+    }
+    pub fn getOrientation(self: *const CenterBox) enum { horizontal, vertical } {
+        return if (self.direction == .row or self.direction == .row_reverse) .horizontal else .vertical;
     }
 
     // ── VTable 实现 ──────────────────────────────────────────────────────────

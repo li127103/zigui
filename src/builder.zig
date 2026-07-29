@@ -22,9 +22,9 @@ const Widget = @import("widget/widget.zig").Widget;
 const Container = @import("widget/container.zig").Container;
 const Label = @import("widget/label.zig").Label;
 const Button = @import("widget/button.zig").Button;
-const TextInput = @import("widget/text_input.zig").TextInput;
-const ScrollView = @import("widget/scroll_view.zig").ScrollView;
-const CheckBox = @import("widget/checkbox.zig").Checkbox;
+const Entry = @import("widget/entry.zig").Entry;
+const ScrolledWindow = @import("widget/scrolled_window.zig").ScrolledWindow;
+const CheckButton = @import("widget/check_button.zig").CheckButton;
 const Switch = @import("widget/switch.zig").Switch;
 const Slider = @import("widget/slider.zig").Slider;
 const ProgressBar = @import("widget/progress_bar.zig").ProgressBar;
@@ -125,11 +125,11 @@ pub const Builder = struct {
         } else if (std.mem.eql(u8, type_name, "button")) {
             return try self.buildButton(obj);
         } else if (std.mem.eql(u8, type_name, "text_input")) {
-            return try self.buildTextInput(obj);
+            return try self.buildEntry(obj);
         } else if (std.mem.eql(u8, type_name, "scroll_view")) {
             return try self.buildScrollView(obj);
         } else if (std.mem.eql(u8, type_name, "checkbox")) {
-            return try self.buildCheckBox(obj);
+            return try self.buildCheckButton(obj);
         } else if (std.mem.eql(u8, type_name, "switch")) {
             return try self.buildSwitch(obj);
         } else if (std.mem.eql(u8, type_name, "slider")) {
@@ -247,12 +247,12 @@ pub const Builder = struct {
         return &b.base;
     }
 
-    fn buildTextInput(self: *Builder, obj: std.json.ObjectMap) !*Widget {
+    fn buildEntry(self: *Builder, obj: std.json.ObjectMap) !*Widget {
         const placeholder = getString(obj, "placeholder", "");
         const max_length: u32 = @intFromFloat(getFloat(obj, "max_length", 0));
         const visibility = getBool(obj, "visibility", true);
 
-        const ti = try TextInput.create(self.allocator, .{
+        const ti = try Entry.create(self.allocator, .{
             .placeholder = placeholder,
             .max_length = max_length,
             .visibility = visibility,
@@ -264,7 +264,7 @@ pub const Builder = struct {
         const width = getFloat(obj, "width", 200);
         const height = getFloat(obj, "height", 200);
 
-        const sv = try ScrollView.create(self.allocator, .{
+        const sv = try ScrolledWindow.create(self.allocator, .{
             .width = width,
             .height = height,
         });
@@ -282,10 +282,10 @@ pub const Builder = struct {
         return &sv.base;
     }
 
-    fn buildCheckBox(self: *Builder, obj: std.json.ObjectMap) !*Widget {
+    fn buildCheckButton(self: *Builder, obj: std.json.ObjectMap) !*Widget {
         const label = getString(obj, "label", "");
         const checked = getBool(obj, "checked", false);
-        const cb = try CheckBox.create(self.allocator, label, .{ .checked = checked });
+        const cb = try CheckButton.create(self.allocator, label, .{ .checked = checked });
         return &cb.base;
     }
 
@@ -431,7 +431,7 @@ test "Builder: text_input with placeholder" {
     const root = try builder.buildFromString(json_str);
     defer root.vtable.destroy(root, alloc);
 
-    const ti = builder.findTyped(TextInput, "input1");
+    const ti = builder.findTyped(Entry, "input1");
     try std.testing.expect(ti != null);
 }
 

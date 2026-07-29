@@ -1,5 +1,14 @@
 //! DropDown 控件 - 轻量下拉选择 (对标 GtkDropDown)
 //! 比 ComboBox 更现代: 用 Popover 弹出列表, 支持搜索/高亮
+//!
+//! GTK4 模型层:
+//!   - 旧 API: addItem(label, id) / items (DropDownItem 数组)
+//!   - 新 API: setModel(ListModel) + [setFactory(ListItemFactory)]
+//!     model item 类型:
+//!       - []const u8 指针   (当作字符串)
+//!       - DropDownItem      (取 .label)
+//!       - StringObject*     (取 .string)
+//!       - 自定义 + setFactory (用 ListItem.userdata 当 label)
 
 const std = @import("std");
 const math = @import("../math.zig");
@@ -7,11 +16,18 @@ const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
 const styled_text = @import("../text/styled_text.zig");
+const list_mod = @import("../model/list_model.zig");
+const fact_mod = @import("../model/list_item_factory.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
+
+const ListModel = list_mod.ListModel;
+const ListItemFactory = fact_mod.ListItemFactory;
+const ListItem = fact_mod.ListItem;
+const StringObject = @import("../model/string_list.zig").StringObject;
 
 pub const DropDownItem = struct {
     label: []const u8,
@@ -21,7 +37,15 @@ pub const DropDownItem = struct {
 pub const DropDown = struct {
     base: Widget,
     allocator: std.mem.Allocator,
+
+    /// 旧 API: DropDownItem 数组
     items: std.ArrayListUnmanaged(DropDownItem) = .{ .items = &.{}, .capacity = 0 },
+
+    /// GTK4 模型层 API
+    model: ?ListModel = null,
+    factory: ?ListItemFactory = null,
+    _item_cache: std.AutoHashMapUnmanaged(usize, ListItem) = .{},
+
     selected: usize = 0,
     is_open: bool = false,
     hovered_item: i32 = -1,
@@ -41,6 +65,10 @@ pub const DropDown = struct {
     arrow_size: f32 = 6.0,
     item_height: f32 = 32.0,
     max_visible_items: u32 = 8,
+    // GTK4 兼容选项
+    expression: ?*anyopaque = null,
+    enable_search: bool = false,
+    show_arrow: bool = true,
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         font_size: f32 = 14.0,
@@ -63,6 +91,13 @@ pub const DropDown = struct {
 
     pub fn destroy(self: *DropDown, allocator: std.mem.Allocator) void {
         self.items.deinit(allocator);
+        // 清理 listitem cache
+        var it = self._item_cache.iterator();
+        while (it.next()) |entry| {
+            var li = entry.value_ptr.*;
+            if (self.factory) |f| f.teardown(&li);
+        }
+        self._item_cache.deinit(allocator);
         self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
@@ -74,8 +109,108 @@ pub const DropDown = struct {
         self.base.markDirty();
     }
 
+    // ── GTK4 模型层 API (对标 GtkDropDown) ──────────────────────────────────
+
+    /// 设置 ListModel (GtkDropDown: set_model)
+    pub fn setModel(self: *DropDown, m: ?ListModel) void {
+        self.model = m;
+        self._clearItemCache();
+        if (self.selected >= self.effectiveItemCount()) self.selected = 0;
+        self.base.markLayoutDirty();
+        self.base.markDirty();
+    }
+
+    /// 设置 ListItemFactory (GtkDropDown: set_factory)
+    pub fn setFactory(self: *DropDown, factory: ?ListItemFactory) void {
+        // teardown 旧的
+        if (self.factory) |old| {
+            var it = self._item_cache.iterator();
+            while (it.next()) |entry| {
+                var li = entry.value_ptr.*;
+                old.teardown(&li);
+            }
+        }
+        self.factory = factory;
+        self._clearItemCache();
+        self.base.markDirty();
+    }
+
+    /// 获取当前有效 item 数
+    pub fn effectiveItemCount(self: *const DropDown) usize {
+        if (self.model) |m| return m.nItems();
+        return self.items.items.len;
+    }
+
+    /// 获取有效 item 的字符串标签（兼容多种 model item 类型）
+    pub fn effectiveLabelAt(self: *DropDown, idx: usize) ?[]const u8 {
+        if (idx >= self.effectiveItemCount()) return null;
+
+        // 1) factory: 从 ListItem.userdata 拿字符串 (SimpleTextFactory 规范)
+        if (self.factory) |_| {
+            const li = self._getOrBind(idx) catch null;
+            if (li) |l| {
+                if (l.userdata) |ud| {
+                    const p: *[]const u8 = @ptrCast(@alignCast(ud));
+                    return p.*;
+                }
+            }
+        }
+
+        // 2) model 原始 item: 按类型尝试解析
+        if (self.model) |m| {
+            const raw = m.iface.getItemFn(m.userdata, idx);
+            if (raw) |p| {
+                // 尝试多种常见结构
+                if (@as(*StringObject, @ptrCast(@alignCast(p))).string.len > 0) {
+                    return @as(*StringObject, @ptrCast(@alignCast(p))).string;
+                }
+                // 尝试 DropDownItem
+                const dd: *DropDownItem = @ptrCast(@alignCast(p));
+                if (dd.label.len > 0) return dd.label;
+                // 尝试 []const u8 指针
+                const s: *[]const u8 = @ptrCast(@alignCast(p));
+                return s.*;
+            }
+        }
+
+        // 3) 旧 API
+        if (idx < self.items.items.len) return self.items.items[idx].label;
+        return null;
+    }
+
+    // ── 内部 ───────────────────────────────────────────────────────────────
+
+    fn _clearItemCache(self: *DropDown) void {
+        var it = self._item_cache.iterator();
+        while (it.next()) |entry| {
+            var li = entry.value_ptr.*;
+            if (self.factory) |f| f.teardown(&li);
+        }
+        self._item_cache.clearRetainingCapacity();
+    }
+
+    fn _getOrBind(self: *DropDown, idx: usize) !?ListItem {
+        const factory = self.factory orelse return null;
+        const gop = try self._item_cache.getOrPut(self.allocator, idx);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{ .position = idx };
+            var li = gop.value_ptr.*;
+            factory.setup(&li);
+            gop.value_ptr.* = li;
+        }
+        var li = gop.value_ptr.*;
+        li.position = idx;
+        if (self.model) |m| {
+            li.item = m.iface.getItemFn(m.userdata, idx);
+        }
+        li.selected = (idx == self.selected);
+        factory.bind(&li);
+        gop.value_ptr.* = li;
+        return li;
+    }
+
     pub fn setSelected(self: *DropDown, index: usize) void {
-        if (index >= self.items.items.len) return;
+        if (index >= self.effectiveItemCount()) return;
         if (index == self.selected) return;
         self.selected = index;
         self.base.markDirty();
@@ -83,8 +218,44 @@ pub const DropDown = struct {
     }
 
     pub fn getSelectedText(self: *const DropDown) []const u8 {
-        if (self.selected < self.items.items.len) return self.items.items[self.selected].label;
+        // 为了绕开 "const self 不能调用非 const 方法"，直接手动实现
+        if (self.selected >= self.effectiveItemCount()) return "";
+        const idx = self.selected;
+        // 尝试 model
+        if (self.model) |m| {
+            const raw = m.iface.getItemFn(m.userdata, idx);
+            if (raw) |p| {
+                const so: *StringObject = @ptrCast(@alignCast(p));
+                if (so.string.len > 0) return so.string;
+                const dd: *DropDownItem = @ptrCast(@alignCast(p));
+                if (dd.label.len > 0) return dd.label;
+                const s: *[]const u8 = @ptrCast(@alignCast(p));
+                return s.*;
+            }
+        }
+        if (idx < self.items.items.len) return self.items.items[idx].label;
         return "";
+    }
+
+    // ── GTK4 兼容 setter ────────────────────────────────────────────────────
+
+    pub fn getSelected(self: *const DropDown) u32 {
+        return @intCast(self.selected);
+    }
+
+    pub fn setExpression(self: *DropDown, expr: anytype) void {
+        _ = expr;
+        self.base.markDirty();
+    }
+
+    pub fn setEnableSearch(self: *DropDown, v: bool) void {
+        self.enable_search = v;
+        self.base.markDirty();
+    }
+
+    pub fn setShowArrow(self: *DropDown, v: bool) void {
+        self.show_arrow = v;
+        self.base.markDirty();
     }
 
     fn headerHeight(self: *const DropDown) f32 {
@@ -111,10 +282,26 @@ pub const DropDown = struct {
         const self: *DropDown = @fieldParentPtr("base", w);
         _ = constraints;
 
-        // 测量最长项
+        // 测量最长项 (兼容旧 API + model API)
         var max_w: f32 = 0;
-        for (self.items.items) |item| {
-            const ts = styled_text.measureText(ctx.allocator, item.label, .{
+        const n = self.effectiveItemCount();
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const label: []const u8 = blk: {
+                if (self.model) |m| {
+                    const raw = m.iface.getItemFn(m.userdata, i);
+                    if (raw) |p| {
+                        const so: *StringObject = @ptrCast(@alignCast(p));
+                        if (so.string.len > 0) break :blk so.string;
+                        const dd: *DropDownItem = @ptrCast(@alignCast(p));
+                        if (dd.label.len > 0) break :blk dd.label;
+                        const s: *[]const u8 = @ptrCast(@alignCast(p));
+                        break :blk s.*;
+                    }
+                }
+                break :blk if (i < self.items.items.len) self.items.items[i].label else "";
+            };
+            const ts = styled_text.measureText(ctx.allocator, label, .{
                 .font_size = self.font_size,
             });
             if (ts.width > max_w) max_w = ts.width;
@@ -125,7 +312,7 @@ pub const DropDown = struct {
         // 打开时扩大高度包含弹出列表
         var total_h = header_h;
         if (self.is_open) {
-            const visible_count = @min(self.items.items.len, self.max_visible_items);
+            const visible_count = @min(n, self.max_visible_items);
             total_h += 8 + @as(f32, @floatFromInt(visible_count)) * self.item_height + 4;
         }
         return .{
@@ -180,7 +367,8 @@ pub const DropDown = struct {
     }
 
     fn paintPopup(self: *DropDown, ctx: *PaintContext, rx: f32, ry: f32, rw: f32, hh: f32) void {
-        const visible_count = @min(self.items.items.len, self.max_visible_items);
+        const n = self.effectiveItemCount();
+        const visible_count = @min(n, self.max_visible_items);
         const popup_h = @as(f32, @floatFromInt(visible_count)) * self.item_height;
         const popup_x = rx;
         const popup_w = rw;
@@ -194,7 +382,8 @@ pub const DropDown = struct {
 
         // 列表项
         const item_y_start = ry + hh + 8;
-        for (self.items.items, 0..) |item, i| {
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
             if (i >= visible_count) break;
             const item_y = item_y_start + @as(f32, @floatFromInt(i)) * self.item_height;
 
@@ -218,10 +407,11 @@ pub const DropDown = struct {
                 math.Color.hex(0xFFFFFFFF)
             else
                 self.text_color;
+            const label: []const u8 = self.effectiveLabelAt(i) orelse "";
             _ = styled_text.drawTextClipped(
                 ctx.renderer,
                 ctx.allocator,
-                item.label,
+                label,
                 popup_x + self.padding_h,
                 text_y,
                 .{ .font_size = self.font_size, .color = item_color },
@@ -256,7 +446,7 @@ pub const DropDown = struct {
                         const item_y_start = hh + 8;
                         if (my >= item_y_start) {
                             const idx = @as(usize, @intFromFloat((my - item_y_start) / self.item_height));
-                            if (idx < self.items.items.len) {
+                            if (idx < self.effectiveItemCount()) {
                                 self.setSelected(idx);
                             }
                         } else if (my >= 0 and my < hh) {
@@ -275,7 +465,7 @@ pub const DropDown = struct {
                     const item_y_start = hh + 8;
                     if (my >= item_y_start) {
                         const idx = @as(i32, @intFromFloat((my - item_y_start) / self.item_height));
-                        const visible = @min(self.items.items.len, self.max_visible_items);
+                        const visible = @min(self.effectiveItemCount(), self.max_visible_items);
                         if (idx >= 0 and idx < @as(i32, @intCast(visible))) {
                             if (self.hovered_item != idx) {
                                 self.hovered_item = idx;

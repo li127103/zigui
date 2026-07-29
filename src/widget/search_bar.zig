@@ -39,6 +39,8 @@ pub const SearchBar = struct {
     show_close_button: bool = true,
     on_search_changed: ?*const fn (self: *SearchBar, text: []const u8) void = null,
     on_close: ?*const fn (self: *SearchBar) void = null,
+    // GTK4 新增字段
+    search_mode_enabled: bool = true,
 
     container: ?*Container = null,
     close_button: ?*Button = null,
@@ -96,6 +98,56 @@ pub const SearchBar = struct {
 
     pub fn getRevealChild(self: *const Self) bool {
         return self.reveal_child;
+    }
+
+    // ── GTK4 SearchBar 新增 API ────────────────────────────────────────────
+
+    /// GTK4: gtk_search_bar_set_search_mode
+    pub fn setSearchMode(self: *Self, mode: bool) void {
+        self.search_mode_enabled = mode;
+        if (mode) {
+            self.setRevealChild(true);
+        }
+    }
+
+    /// GTK4: gtk_search_bar_get_search_mode
+    pub fn getSearchMode(self: *const Self) bool {
+        return self.search_mode_enabled and self.reveal_child;
+    }
+
+    /// GTK4: gtk_search_bar_connect_entry — 关联外部 SearchEntry
+    pub fn connectEntry(self: *Self, entry: *SearchEntry) !void {
+        // 解绑旧的 search_entry 回调
+        self.search_entry.on_search = null;
+        self.search_entry.base.user_data = null;
+        // 绑定新的
+        self.search_entry = entry;
+        entry.base.user_data = self;
+        entry.on_search = onEntrySearch;
+    }
+
+    /// GTK4: gtk_search_bar_get_search_entry
+    pub fn getSearchEntry(self: *const Self) *SearchEntry {
+        return self.search_entry;
+    }
+
+    /// GTK4: gtk_search_bar_set_search_entry
+    pub fn setSearchEntry(self: *Self, entry: *SearchEntry) !void {
+        try self.connectEntry(entry);
+    }
+
+    /// GTK4: gtk_search_bar_set_show_close_button
+    pub fn setShowCloseButton(self: *Self, show: bool) void {
+        self.show_close_button = show;
+        if (self.close_button) |btn| {
+            btn.base.visible = show;
+            self.base.markDirty();
+        }
+    }
+
+    /// GTK4: gtk_search_bar_get_show_close_button
+    pub fn getShowCloseButton(self: *const Self) bool {
+        return self.show_close_button;
     }
 
     pub fn setText(self: *Self, text: []const u8) void {
@@ -194,6 +246,18 @@ pub const SearchBar = struct {
 
     fn onEvent(w: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {
         const self: *Self = @fieldParentPtr("base", w);
+
+        // ── P34.3: Ctrl+F 切换搜索栏显示（即使 reveal_child=false 也可激活）──
+        if (event.* == .key and event.key.state == .pressed and event.key.modifiers.ctrl) {
+            const ke = event.key;
+            // 归一化 key → 0x00-0x7F ASCII 比较 'F'/'f'
+            const code = @as(u32, ke.keycode_normalized);
+            if (code == 'F' or code == 'f') {
+                self.setSearchMode(true);
+                return .handled;
+            }
+        }
+
         if (!self.reveal_child) return .ignored;
 
         if (self.container) |cc| {
@@ -205,8 +269,15 @@ pub const SearchBar = struct {
 
         if (event.* == .key and event.key.state == .pressed) {
             if (event.key.key == .escape) {
+                // ── P34.4: ESC 分级关闭（GTK4 默认交互）──
+                // 1) 若搜索框有文本 → 先清空，不关闭
+                if (self.search_entry.getText().len > 0) {
+                    self.setText("");
+                    if (self.on_search_changed) |cb| cb(self, "");
+                    return .handled;
+                }
+                // 2) 无文本 → 真正关闭 SearchBar
                 self.setRevealChild(false);
-                self.setText("");
                 if (self.on_close) |cb| cb(self);
                 return .handled;
             }

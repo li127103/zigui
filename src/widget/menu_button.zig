@@ -8,12 +8,26 @@ const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
 const styled_text = @import("../text/styled_text.zig");
 const popover_mod = @import("popover.zig");
+const menu_widget_mod = @import("menu.zig");
+const menu_model_mod = @import("../model/menu_model.zig");
+const action_mod = @import("../model/action.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 const Popover = popover_mod.Popover;
+const ModelMenu = menu_model_mod.Menu;
+const ActionGroup = action_mod.ActionGroup;
+const ActionValue = action_mod.ActionValue;
+const WidgetMenu = menu_widget_mod.Menu;
+const Allocator = std.mem.Allocator;
+
+const ClickCtx = struct {
+    action_group: ActionGroup,
+    action_name: []const u8,
+    action_target: ActionValue,
+};
 
 pub const MenuButton = struct {
     base: Widget,
@@ -32,6 +46,13 @@ pub const MenuButton = struct {
     padding_v: f32 = 10.0,
     arrow_size: f32 = 6.0,
     label_arrow_gap: f32 = 8.0,
+
+    // MenuModel 支持
+    menu_model: ?*ModelMenu = null,
+    action_group: ?ActionGroup = null,
+    owned_popover: ?*Popover = null, // 由 setMenuModel 分配
+    owned_menu: ?*WidgetMenu = null,
+    owned_ctxs: std.ArrayListUnmanaged(*ClickCtx) = .{ .items = &.{}, .capacity = 0 },
 
     pub fn create(allocator: std.mem.Allocator, label_text: []const u8, opts: struct {
         font_size: f32 = 14.0,
@@ -63,16 +84,131 @@ pub const MenuButton = struct {
     }
 
     pub fn destroy(self: *MenuButton, allocator: std.mem.Allocator) void {
+        // 释放自己分配的资源
+        for (self.owned_ctxs.items) |c| allocator.destroy(c);
+        self.owned_ctxs.deinit(allocator);
+        if (self.owned_menu) |m| m.destroy(allocator);
+        if (self.owned_popover) |p| p.destroy(allocator);
         self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
     }
 
-    /// 关联 Popover (Popover 需已设置 relative_to 为本控件)
+    pub fn setActionGroup(self: *MenuButton, ag: ?ActionGroup) void {
+        self.action_group = ag;
+    }
+
     pub fn setPopover(self: *MenuButton, popover: *Popover) void {
         self.popover = popover;
         popover.setRelativeTo(&self.base);
     }
+
+    /// 声明式设置菜单模型 (自动构建 Popover + WidgetMenu 并绑定 action)
+    pub fn setMenuModel(self: *MenuButton, allocator: Allocator, menu: ?*ModelMenu) !void {
+        // 清旧资源
+        for (self.owned_ctxs.items) |c| allocator.destroy(c);
+        self.owned_ctxs.clearRetainingCapacity();
+        if (self.owned_menu) |m| {
+            m.destroy(allocator);
+            self.owned_menu = null;
+        }
+        if (self.owned_popover) |p| {
+            p.destroy(allocator);
+            self.owned_popover = null;
+        }
+        self.popover = null;
+
+        self.menu_model = menu;
+        if (menu) |m| {
+            const wm = try self.buildWidgetMenu(allocator, m);
+            self.owned_menu = wm;
+            const pop = try Popover.create(allocator, .{ .relative_to = &self.base, .position = .bottom });
+            try pop.addChild(&wm.base);
+            self.owned_popover = pop;
+            self.popover = pop;
+        }
+    }
+
+    fn buildWidgetMenu(self: *MenuButton, a: Allocator, mm: *ModelMenu) !*WidgetMenu {
+        const wm = try WidgetMenu.create(a, .{});
+        const n = mm.len();
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const mi = mm.get(i) orelse continue;
+            if (mi.isSeparator()) {
+                try wm.addSeparator();
+                continue;
+            }
+            var sub: ?*WidgetMenu = null;
+            if (mi.submenu) |sp| {
+                const sm: *ModelMenu = @ptrCast(@alignCast(sp));
+                sub = try self.buildWidgetMenu(a, sm);
+            }
+            var on_click: ?*const fn (ctx: ?*anyopaque) void = null;
+            var ctx_ptr: ?*anyopaque = null;
+            if (mi.action_name) |an| {
+                on_click = struct {
+                    fn wrapper(p: ?*anyopaque) void {
+                        const c: *ClickCtx = @ptrCast(@alignCast(p orelse return));
+                        _ = c.action_group.activateAction(c.action_name, c.action_target);
+                    }
+                }.wrapper;
+                const ag = self.action_group orelse ActionGroup{
+                    .iface = &empty_ag,
+                    .userdata = null,
+                };
+                const ctx = try a.create(ClickCtx);
+                ctx.* = .{ .action_group = ag, .action_name = an, .action_target = mi.action_target };
+                try self.owned_ctxs.append(a, ctx);
+                ctx_ptr = @ptrCast(ctx);
+            }
+            try wm.addItem(.{
+                .label = mi.label,
+                .is_separator = false,
+                .disabled = !mi.enabled,
+                .submenu = sub,
+                .on_click = on_click,
+                .ctx = ctx_ptr,
+            });
+        }
+        return wm;
+    }
+
+    const empty_ag: action_mod.ActionGroupIface = .{
+        .listActionsFn = struct {
+            fn f(_: ?*anyopaque, _: *std.ArrayListUnmanaged([]const u8)) void {}
+        }.f,
+        .queryActionFn = struct {
+            fn f(_: ?*anyopaque, _: []const u8) ?action_mod.Action {
+                return null;
+            }
+        }.f,
+        .hasActionFn = struct {
+            fn f(_: ?*anyopaque, _: []const u8) bool {
+                return false;
+            }
+        }.f,
+        .activateActionFn = struct {
+            fn f(_: ?*anyopaque, _: []const u8, _: ActionValue) bool {
+                return false;
+            }
+        }.f,
+        .changeActionStateFn = struct {
+            fn f(_: ?*anyopaque, _: []const u8, _: ActionValue) bool {
+                return false;
+            }
+        }.f,
+        .actionGetEnabledFn = struct {
+            fn f(_: ?*anyopaque, _: []const u8) ?bool {
+                return null;
+            }
+        }.f,
+        .actionGetStateFn = struct {
+            fn f(_: ?*anyopaque, _: []const u8) ?ActionValue {
+                return null;
+            }
+        }.f,
+    };
 
     pub fn isOpen(self: *MenuButton) bool {
         return self.is_open;

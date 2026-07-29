@@ -19,10 +19,10 @@ const pal = @import("../pal/pal.zig");
 const container_mod = @import("container.zig");
 const label_mod = @import("label.zig");
 const button_mod = @import("button.zig");
-const scroll_view_mod = @import("scroll_view.zig");
+const scrolled_window_mod = @import("scrolled_window.zig");
 const list_view_mod = @import("list_view.zig");
 const separator_mod = @import("separator.zig");
-const checkbox_mod = @import("checkbox.zig");
+const check_button_mod = @import("check_button.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
@@ -32,10 +32,10 @@ const EventResult = widget_mod.EventResult;
 const Container = container_mod.Container;
 const Label = label_mod.Label;
 const Button = button_mod.Button;
-const ScrollView = scroll_view_mod.ScrollView;
+const ScrolledWindow = scrolled_window_mod.ScrolledWindow;
 const ListView = list_view_mod.ListView;
 const Separator = separator_mod.Separator;
-const Checkbox = checkbox_mod.Checkbox;
+const CheckButton = check_button_mod.CheckButton;
 
 /// 应用信息
 pub const AppInfo = struct {
@@ -57,7 +57,7 @@ pub const AppChooserDialog = struct {
 
     content_container: ?*Container = null,
     app_list: ?*ListView = null,
-    default_check: ?*Checkbox = null,
+    default_check: ?*CheckButton = null,
 
     overlay_color: math.Color = math.Color.hex(0x000000AA),
     bg_color: math.Color = math.Color.hex(0x1E293BFF),
@@ -130,27 +130,27 @@ pub const AppChooserDialog = struct {
     }
 
     fn loadAppsLinux(self: *Self) void {
-        var app_dirs = std.ArrayList([]const u8).init(self.allocator);
-        defer app_dirs.deinit();
+        var app_dirs: std.ArrayList([]const u8) = .empty;
+        defer app_dirs.deinit(self.allocator);
 
         const data_home = std.c.getenv("XDG_DATA_HOME") orelse {
             const home = std.c.getenv("HOME") orelse "/";
             const path = std.fmt.allocPrint(self.allocator, "{s}/.local/share/applications", .{home}) catch return;
-            app_dirs.append(path) catch return;
+            app_dirs.append(self.allocator, path) catch return;
             const sys_path = "/usr/share/applications";
-            app_dirs.append(sys_path) catch return;
+            app_dirs.append(self.allocator, sys_path) catch return;
             self.scanDesktopFiles(app_dirs.items);
             return;
         };
         const data_home_path = std.fmt.allocPrint(self.allocator, "{s}/applications", .{data_home}) catch return;
-        app_dirs.append(data_home_path) catch return;
+        app_dirs.append(self.allocator, data_home_path) catch return;
 
         const data_dirs = std.c.getenv("XDG_DATA_DIRS") orelse "/usr/share:/usr/local/share";
         var it = std.mem.split(u8, data_dirs, ":");
         while (it.next()) |dir| {
             if (dir.len == 0) continue;
             const path = std.fmt.allocPrint(self.allocator, "{s}/applications", .{dir}) catch continue;
-            app_dirs.append(path) catch {
+            app_dirs.append(self.allocator, path) catch {
                 self.allocator.free(path);
                 continue;
             };
@@ -294,7 +294,7 @@ pub const AppChooserDialog = struct {
         });
         try content.base.addChild(alloc, &desc.base);
 
-        const sv = try ScrollView.create(alloc, .{
+        const sv = try ScrolledWindow.create(alloc, .{
             .width = 460,
             .height = 280,
         });
@@ -316,7 +316,7 @@ pub const AppChooserDialog = struct {
             };
         }
 
-        const default_check = try Checkbox.create(alloc, "设为默认应用", .{});
+        const default_check = try CheckButton.create(alloc, "设为默认应用", .{});
         try content.base.addChild(alloc, &default_check.base);
         self.default_check = default_check;
         default_check.base.user_data = self;

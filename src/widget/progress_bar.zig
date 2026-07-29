@@ -27,8 +27,14 @@ pub const ProgressBar = struct {
     fraction: f32 = 0,
     show_text: bool = false,
     text: []const u8 = "",
-    pulse: bool = false,
+    pulse_mode: bool = false,
     pulse_pos: f32 = 0,
+    pulse_step: f32 = 0.1,
+    pulse_position: f32 = 0.0,
+    inverted: bool = false,
+    // 兼容 min/max/value API
+    min: f32 = 0,
+    max: f32 = 1,
 
     track_color: math.Color = math.Color.hex(0x334155FF),
     fill_color: math.Color = math.Color.hex(0x3B82F6FF),
@@ -41,25 +47,40 @@ pub const ProgressBar = struct {
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         fraction: f32 = 0,
+        value: ?f32 = null,
+        min: f32 = 0,
+        max: f32 = 1,
         show_text: bool = false,
+        show_label: ?bool = null,
         text: []const u8 = "",
         pulse: bool = false,
+        indeterminate: ?bool = null,
         track_color: ?math.Color = null,
         fill_color: ?math.Color = null,
         corner_radius: f32 = 4.0,
         min_height: f32 = 18.0,
     }) !*ProgressBar {
+        const show_text_final = opts.show_label orelse opts.show_text;
+        const frac: f32 = if (opts.value) |v| blk: {
+            const range = opts.max - opts.min;
+            const normalized = if (range > 0) (v - opts.min) / range else 0;
+            break :blk std.math.clamp(normalized, 0, 1);
+        } else std.math.clamp(opts.fraction, 0, 1);
+        const pulse_final = opts.indeterminate orelse opts.pulse;
+
         const self = try allocator.create(ProgressBar);
         self.* = .{
             .base = .{
                 .vtable = &vtable,
                 .id = widget_mod.genWidgetId(),
             },
-            .fraction = std.math.clamp(opts.fraction, 0, 1),
-            .show_text = opts.show_text,
-            .pulse = opts.pulse,
+            .fraction = frac,
+            .show_text = show_text_final,
+            .pulse_mode = pulse_final,
             .corner_radius = opts.corner_radius,
             .min_height = opts.min_height,
+            .min = opts.min,
+            .max = opts.max,
             .track_color = opts.track_color orelse self.track_color,
             .fill_color = opts.fill_color orelse self.fill_color,
         };
@@ -86,13 +107,23 @@ pub const ProgressBar = struct {
         }
     }
 
+    pub fn setValue(self: *Self, v: f32) void {
+        const range = self.max - self.min;
+        const frac = if (range > 0) (v - self.min) / range else 0;
+        self.setFraction(frac);
+    }
+
+    pub fn getValue(self: *const Self) f32 {
+        return self.min + (self.max - self.min) * self.fraction;
+    }
+
     pub fn getFraction(self: *const Self) f32 {
         return self.fraction;
     }
 
     pub fn setPulse(self: *Self, enabled: bool) void {
-        if (self.pulse != enabled) {
-            self.pulse = enabled;
+        if (self.pulse_mode != enabled) {
+            self.pulse_mode = enabled;
             self.pulse_pos = 0;
             self.base.markDirty();
         }
@@ -110,11 +141,34 @@ pub const ProgressBar = struct {
     }
 
     pub fn pulseStep(self: *Self, delta: f32) void {
-        if (!self.pulse) return;
+        if (!self.pulse_mode) return;
         self.pulse_pos += delta;
         if (self.pulse_pos > 1.2) {
             self.pulse_pos = -0.2;
         }
+        self.base.markDirty();
+    }
+
+    // ── GTK4 兼容 setter ────────────────────────────────────────────────────
+
+    pub fn setPulseStep(self: *Self, v: f32) void {
+        self.pulse_step = v;
+        self.base.markDirty();
+    }
+
+    pub fn pulse(self: *Self) void {
+        self.pulse_position += self.pulse_step;
+        if (self.pulse_position > 1.0) self.pulse_position = 0.0;
+        self.base.markDirty();
+    }
+
+    pub fn setShowText(self: *Self, v: bool) void {
+        self.show_text = v;
+        self.base.markDirty();
+    }
+
+    pub fn setInverted(self: *Self, v: bool) void {
+        self.inverted = v;
         self.base.markDirty();
     }
 
@@ -152,7 +206,7 @@ pub const ProgressBar = struct {
         const track_rect = math.Rect(f32){ .x = rx, .y = ry, .width = rw, .height = rh };
         ctx.renderer.fillRoundedRect(track_rect, self.corner_radius, self.track_color) catch {};
 
-        if (self.pulse) {
+        if (self.pulse_mode) {
             const pulse_w = rw * 0.3;
             const pulse_x = rx + (rw + pulse_w) * self.pulse_pos - pulse_w;
             const clamped_x = @max(rx, pulse_x);

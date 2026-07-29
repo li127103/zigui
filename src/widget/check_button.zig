@@ -1,4 +1,4 @@
-//! Checkbox 控件 - 复选框 (可勾选/取消)
+//! CheckButton 控件 - 复选框 (可勾选/取消)
 
 const std = @import("std");
 const math = @import("../math.zig");
@@ -12,13 +12,18 @@ const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
+const RadioGroup = @import("radio_button.zig").RadioGroup;
 
-pub const Checkbox = struct {
+pub const CheckButton = struct {
     base: Widget,
     checked: bool,
     label: []const u8,
     font_size: f32,
-    on_change: ?*const fn (self: *Checkbox, checked: bool) void,
+    on_change: ?*const fn (self: *CheckButton, checked: bool) void,
+    /// GTK4: gtk_check_button_set_group — 若设置, CheckButton 行为为单选
+    /// (同一 RadioGroup 中互斥, 与 RadioButton 使用同组类型)
+    group: ?*RadioGroup = null,
+    group_index: usize = 0,
     // 样式
     box_size: f32,
     box_color: math.Color, // 未选中底色
@@ -33,7 +38,9 @@ pub const Checkbox = struct {
     pub fn create(allocator: std.mem.Allocator, label_text: []const u8, opts: struct {
         checked: bool = false,
         font_size: f32 = 14.0,
-        on_change: ?*const fn (self: *Checkbox, checked: bool) void = null,
+        on_change: ?*const fn (self: *CheckButton, checked: bool) void = null,
+        group: ?*RadioGroup = null,
+        group_index: usize = 0,
         box_size: f32 = 18.0,
         box_color: math.Color = math.Color.hex(0x1E293BFF),
         box_checked_color: math.Color = math.Color.hex(0x3B82F6FF),
@@ -43,8 +50,8 @@ pub const Checkbox = struct {
         text_disabled_color: math.Color = math.Color.hex(0x64748BFF),
         corner_radius: f32 = 4.0,
         gap: f32 = 8.0,
-    }) !*Checkbox {
-        const self = try allocator.create(Checkbox);
+    }) !*CheckButton {
+        const self = try allocator.create(CheckButton);
         self.* = .{
             .base = .{
                 .vtable = &vtable,
@@ -54,6 +61,8 @@ pub const Checkbox = struct {
             .label = label_text,
             .font_size = opts.font_size,
             .on_change = opts.on_change,
+            .group = opts.group,
+            .group_index = opts.group_index,
             .box_size = opts.box_size,
             .box_color = opts.box_color,
             .box_checked_color = opts.box_checked_color,
@@ -69,13 +78,13 @@ pub const Checkbox = struct {
         return self;
     }
 
-    pub fn destroy(self: *Checkbox, allocator: std.mem.Allocator) void {
+    pub fn destroy(self: *CheckButton, allocator: std.mem.Allocator) void {
         self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
     }
 
-    pub fn setChecked(self: *Checkbox, v: bool) void {
+    pub fn setChecked(self: *CheckButton, v: bool) void {
         if (v != self.checked) {
             self.checked = v;
             self.base.markDirty();
@@ -83,8 +92,58 @@ pub const Checkbox = struct {
         }
     }
 
-    pub fn toggle(self: *Checkbox) void {
-        self.setChecked(!self.checked);
+    pub fn toggle(self: *CheckButton) void {
+        if (self.group) |g| {
+            // 单选模式: 点击后强制选中本项 (组内其他项自动非选中)
+            const old = g.selected_index;
+            g.select(self.group_index);
+            const now_checked = g.selected_index == self.group_index;
+            if (now_checked != self.checked) {
+                self.checked = now_checked;
+                self.base.markDirty();
+                if (self.on_change) |cb| cb(self, self.checked);
+                // 单选: 其他按钮也需要刷新 (父级 mark dirty)
+                if (old != g.selected_index) {
+                    if (self.base.parent) |p| p.markDirty();
+                }
+            }
+        } else {
+            self.setChecked(!self.checked);
+        }
+    }
+
+    // ── GTK4 兼容 API ─────────────────────────────────────────────────────
+
+    /// GTK4: gtk_check_button_get_active
+    pub fn getActive(self: *const CheckButton) bool {
+        return self.checked;
+    }
+    /// GTK4: gtk_check_button_set_active
+    pub fn setActive(self: *CheckButton, v: bool) void {
+        self.setChecked(v);
+    }
+    /// GTK4: gtk_check_button_set_group — 加入单选组并设置组内 index
+    pub fn setGroup(self: *CheckButton, group: ?*RadioGroup, index: usize) void {
+        self.group = group;
+        self.group_index = index;
+        // 同步当前 checked 状态 (若已有组选中项)
+        if (group) |g| {
+            const should_check = g.selected_index == index;
+            if (should_check != self.checked) {
+                self.checked = should_check;
+                self.base.markDirty();
+                if (self.on_change) |cb| cb(self, self.checked);
+            }
+        }
+    }
+    pub fn setLabel(self: *CheckButton, label: []const u8) void {
+        self.label = label;
+        self.base.accessibility.label = label;
+        self.base.markLayoutDirty();
+        self.base.markDirty();
+    }
+    pub fn getLabel(self: *const CheckButton) []const u8 {
+        return self.label;
     }
 
     // ── VTable 实现 ──────────────────────────────────────────────────────────
@@ -99,12 +158,12 @@ pub const Checkbox = struct {
     };
 
     fn destroyVTable(w: *Widget, allocator: std.mem.Allocator) void {
-        const self: *Checkbox = @fieldParentPtr("base", w);
+        const self: *CheckButton = @fieldParentPtr("base", w);
         self.destroy(allocator);
     }
 
     fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
-        const self: *Checkbox = @fieldParentPtr("base", w);
+        const self: *CheckButton = @fieldParentPtr("base", w);
         _ = constraints;
 
         const text_size = styled_text.measureText(ctx.allocator, self.label, .{
@@ -118,7 +177,7 @@ pub const Checkbox = struct {
     }
 
     fn paint(w: *Widget, ctx: *PaintContext) void {
-        const self: *Checkbox = @fieldParentPtr("base", w);
+        const self: *CheckButton = @fieldParentPtr("base", w);
         const rx = ctx.offset_x + w.rect.x;
         const ry = ctx.offset_y + w.rect.y;
         const disabled = w.state.disabled;
@@ -178,7 +237,7 @@ pub const Checkbox = struct {
     }
 
     fn onEvent(w: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {
-        const self: *Checkbox = @fieldParentPtr("base", w);
+        const self: *CheckButton = @fieldParentPtr("base", w);
         _ = ectx;
         if (w.state.disabled) return .ignored;
 
@@ -256,7 +315,7 @@ fn drawPolyline(renderer: *r2d.Renderer2D, x0: f32, y0: f32, x1: f32, y1: f32, t
 
 var cb_change_count: usize = 0;
 var cb_last_checked: bool = false;
-fn cbOnChange(c: *Checkbox, checked: bool) void {
+fn cbOnChange(c: *CheckButton, checked: bool) void {
     _ = c;
     cb_change_count += 1;
     cb_last_checked = checked;
@@ -264,7 +323,7 @@ fn cbOnChange(c: *Checkbox, checked: bool) void {
 
 test "checkbox toggle fires on_change once" {
     cb_change_count = 0;
-    const cb = try Checkbox.create(std.testing.allocator, "opt", .{ .on_change = cbOnChange });
+    const cb = try CheckButton.create(std.testing.allocator, "opt", .{ .on_change = cbOnChange });
     defer cb.destroy(std.testing.allocator);
 
     try std.testing.expect(!cb.checked);
@@ -279,7 +338,7 @@ test "checkbox toggle fires on_change once" {
 }
 
 test "checkbox click toggles state" {
-    const cb = try Checkbox.create(std.testing.allocator, "opt", .{});
+    const cb = try CheckButton.create(std.testing.allocator, "opt", .{});
     defer cb.destroy(std.testing.allocator);
     cb.base.rect = .{ .x = 0, .y = 0, .width = 100, .height = 20 };
     var ectx = EventContext{};
@@ -295,7 +354,7 @@ test "checkbox click toggles state" {
 }
 
 test "checkbox space key toggles when focused" {
-    const cb = try Checkbox.create(std.testing.allocator, "opt", .{});
+    const cb = try CheckButton.create(std.testing.allocator, "opt", .{});
     defer cb.destroy(std.testing.allocator);
     cb.base.state.focused = true;
     var ectx = EventContext{};
@@ -306,7 +365,7 @@ test "checkbox space key toggles when focused" {
 }
 
 test "checkbox disabled ignores events" {
-    const cb = try Checkbox.create(std.testing.allocator, "opt", .{});
+    const cb = try CheckButton.create(std.testing.allocator, "opt", .{});
     defer cb.destroy(std.testing.allocator);
     cb.base.state.disabled = true;
     var ectx = EventContext{};

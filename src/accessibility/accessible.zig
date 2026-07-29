@@ -144,6 +144,44 @@ pub const AccessibleRelation = enum {
     error_for,
 };
 
+/// GTK4: GtkAccessibleProperty - 无障碍属性键
+pub const AccessibleProperty = enum {
+    autocomplete,
+    description,
+    has_popup,
+    key_shortcuts,
+    label,
+    level,
+    modal,
+    multi_line,
+    multi_selectable,
+    orientation,
+    placeholder,
+    read_only,
+    required,
+    role_description,
+    expanded,
+    busy,
+    current,
+    disabled,
+    hidden,
+    invalid,
+    pressed,
+    selected,
+    value_max,
+    value_min,
+    value_now,
+    value_text,
+};
+
+/// GTK4: GtkAccessibleTristate - 三态布尔值
+pub const AccessibleTristate = enum {
+    false_,
+    true_,
+    mixed,
+    undefined,
+};
+
 /// 无障碍属性集合
 pub const Accessible = struct {
     allocator: std.mem.Allocator,
@@ -376,6 +414,124 @@ pub const AccessibleEvent = struct {
 pub const AccessibleListener = struct {
     on_event: *const fn (event: *const AccessibleEvent) void,
     user_data: ?*anyopaque = null,
+};
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ATContext (GTK4: GtkATContext)
+// 辅助技术上下文：桥接 Accessible 对象到平台 AT-SPI / NSAccessibility / UIAutomation
+// 每个 Accessible 持有一个 ATContext，负责将无障碍状态变化通知给系统 AT 服务
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// AT 后端平台类型
+pub const ATPlatform = enum {
+    none, // 无 AT 服务
+    atspi, // Linux AT-SPI2
+    cocoa, // macOS NSAccessibility
+    uia, // Windows UIAutomation
+};
+
+/// ATContext 接口（类型擦除）
+pub const ATContextIface = struct {
+    /// 平台类型
+    platform: ATPlatform = .none,
+    /// 实现：分配平台 AT 资源
+    realize: ?*const fn (self: ?*anyopaque, accessible: ?*Accessible) void = null,
+    /// 取消实现：释放平台 AT 资源
+    unrealize: ?*const fn (self: ?*anyopaque) void = null,
+    /// 通知状态变化
+    state_change: ?*const fn (
+        self: ?*anyopaque,
+        accessible: ?*Accessible,
+        state: AccessibleState,
+        old_value: bool,
+        new_value: bool,
+    ) void = null,
+    /// 通知属性变化
+    property_change: ?*const fn (
+        self: ?*anyopaque,
+        accessible: ?*Accessible,
+        property: AccessibleProperty,
+        old_value: ?[]const u8,
+        new_value: ?[]const u8,
+    ) void = null,
+    /// 通知焦点变化
+    focus_change: ?*const fn (
+        self: ?*anyopaque,
+        accessible: ?*Accessible,
+        focused: bool,
+    ) void = null,
+};
+
+/// ATContext 实例
+pub const ATContext = struct {
+    iface: ATContextIface,
+    self_ptr: ?*anyopaque = null,
+    /// 关联的 Accessible
+    accessible: ?*Accessible = null,
+    /// 是否已 realize
+    realized: bool = false,
+
+    const Self = @This();
+
+    /// GTK4: gtk_at_context_realize
+    pub fn realize(self: *Self) void {
+        if (self.realized) return;
+        if (self.iface.realize) |f| f(self.self_ptr, self.accessible);
+        self.realized = true;
+    }
+
+    /// GTK4: gtk_at_context_unrealize
+    pub fn unrealize(self: *Self) void {
+        if (!self.realized) return;
+        if (self.iface.unrealize) |f| f(self.self_ptr);
+        self.realized = false;
+    }
+
+    /// 通知状态变化
+    pub fn stateChange(self: *Self, state: AccessibleState, old: bool, new: bool) void {
+        if (self.iface.state_change) |f| f(self.self_ptr, self.accessible, state, old, new);
+    }
+
+    /// 通知属性变化
+    pub fn propertyChange(
+        self: *Self,
+        property: AccessibleProperty,
+        old_val: ?[]const u8,
+        new_val: ?[]const u8,
+    ) void {
+        if (self.iface.property_change) |f| f(self.self_ptr, self.accessible, property, old_val, new_val);
+    }
+
+    /// 通知焦点变化
+    pub fn focusChange(self: *Self, focused: bool) void {
+        if (self.iface.focus_change) |f| f(self.self_ptr, self.accessible, focused);
+    }
+
+    /// 获取平台类型
+    pub fn getPlatform(self: *const Self) ATPlatform {
+        return self.iface.platform;
+    }
+
+    /// 创建默认的 no-op ATContext
+    pub fn createDefault(allocator: std.mem.Allocator) !*ATContext {
+        const ctx = try allocator.create(ATContext);
+        ctx.* = .{
+            .iface = .{ .platform = detectPlatform() },
+        };
+        return ctx;
+    }
+
+    fn detectPlatform() ATPlatform {
+        if (@import("builtin").os.tag == .linux) return .atspi;
+        if (@import("builtin").os.tag == .macos) return .cocoa;
+        if (@import("builtin").os.tag == .windows) return .uia;
+        return .none;
+    }
+
+    pub fn destroy(self: *Self, allocator: std.mem.Allocator) void {
+        self.unrealize();
+        allocator.destroy(self);
+    }
 };
 
 /// 无障碍管理器 - 全局无障碍事件分发

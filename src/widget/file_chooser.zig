@@ -20,8 +20,8 @@ const pal = @import("../pal/pal.zig");
 const container_mod = @import("container.zig");
 const label_mod = @import("label.zig");
 const button_mod = @import("button.zig");
-const text_input_mod = @import("text_input.zig");
-const scroll_view_mod = @import("scroll_view.zig");
+const entry_mod = @import("entry.zig");
+const scrolled_window_mod = @import("scrolled_window.zig");
 const list_view_mod = @import("list_view.zig");
 const separator_mod = @import("separator.zig");
 
@@ -33,23 +33,18 @@ const EventResult = widget_mod.EventResult;
 const Container = container_mod.Container;
 const Label = label_mod.Label;
 const Button = button_mod.Button;
-const TextInput = text_input_mod.TextInput;
-const ScrollView = scroll_view_mod.ScrollView;
+const Entry = entry_mod.Entry;
+const ScrolledWindow = scrolled_window_mod.ScrolledWindow;
 const ListView = list_view_mod.ListView;
 const Separator = separator_mod.Separator;
 const SeparatorOrientation = separator_mod.SeparatorOrientation;
+
+const ModelFileFilter = @import("../model/file_filter.zig").FileFilter;
 
 /// 文件选择器模式
 pub const FileChooserMode = enum {
     open,
     save,
-};
-
-/// 文件过滤规则
-pub const FileFilter = struct {
-    name: []const u8,
-    /// 文件扩展名列表 (不含点, 如 &.{ "txt", "png" })
-    extensions: []const []const u8,
 };
 
 pub const FileChooser = struct {
@@ -62,8 +57,8 @@ pub const FileChooser = struct {
     current_dir: []const u8,
     /// 选中的文件名 (owned)
     selected_file: []const u8,
-    /// 文件过滤器 (可选)
-    filter: ?FileFilter = null,
+    /// 文件过滤器 (可选, 指针形式, 由调用者管理生命周期)
+    filter: ?*ModelFileFilter = null,
     on_file_selected: ?*const fn (self: *FileChooser, path: []const u8) void = null,
     on_cancel: ?*const fn (self: *FileChooser) void = null,
 
@@ -71,7 +66,7 @@ pub const FileChooser = struct {
     content_container: ?*Container = null,
     path_label: ?*Label = null,
     file_list: ?*ListView = null,
-    filename_input: ?*TextInput = null,
+    filename_input: ?*Entry = null,
 
     // 样式
     overlay_color: math.Color = math.Color.hex(0x000000AA),
@@ -89,7 +84,7 @@ pub const FileChooser = struct {
         mode: FileChooserMode = .open,
         title: []const u8 = "选择文件",
         initial_path: []const u8 = "/",
-        filter: ?FileFilter = null,
+        filter: ?*ModelFileFilter = null,
         on_file_selected: ?*const fn (self: *FileChooser, path: []const u8) void = null,
         on_cancel: ?*const fn (self: *FileChooser) void = null,
     }) !*FileChooser {
@@ -135,6 +130,52 @@ pub const FileChooser = struct {
         self.base.markDirty();
     }
 
+    // ── GTK4 兼容 API ─────────────────────────────────────────────────────
+
+    /// GTK4: gtk_file_chooser_set_filter
+    pub fn setFilter(self: *Self, filter: ?*ModelFileFilter) void {
+        self.filter = filter;
+        if (self.visible) self.refreshFileList();
+    }
+    /// GTK4: gtk_file_chooser_get_filter
+    pub fn getFilter(self: *const Self) ?*ModelFileFilter {
+        return self.filter;
+    }
+    /// GTK4: gtk_file_chooser_set_current_folder (简化版)
+    pub fn setCurrentFolder(self: *Self, path: []const u8) void {
+        self.setCurrentDir(path);
+    }
+    /// GTK4: gtk_file_chooser_get_current_folder
+    pub fn getCurrentFolder(self: *const Self) []const u8 {
+        return self.current_dir;
+    }
+    /// GTK4: gtk_file_chooser_get_filename
+    pub fn getFilename(self: *Self) ?[]const u8 {
+        if (self.selected_file.len == 0) return null;
+        // 拼接完整路径
+        const dir = self.current_dir;
+        const has_slash = dir.len > 0 and dir[dir.len - 1] == '/';
+        const total_len = dir.len + self.selected_file.len + @as(usize, if (has_slash) 0 else 1);
+        const buf = self.allocator.alloc(u8, total_len) catch return null;
+        @memcpy(buf[0..dir.len], dir);
+        var pos = dir.len;
+        if (!has_slash) {
+            buf[pos] = '/';
+            pos += 1;
+        }
+        @memcpy(buf[pos..], self.selected_file);
+        return buf; // 调用者负责 free
+    }
+    /// GTK4: gtk_file_chooser_set_title
+    pub fn setTitle(self: *Self, title: []const u8) void {
+        self.title = title;
+        self.base.markDirty();
+    }
+    /// GTK4: gtk_file_chooser_get_title
+    pub fn getTitle(self: *const Self) []const u8 {
+        return self.title;
+    }
+
     /// 构建对话框 UI
     fn buildUI(self: *Self) !void {
         const alloc = self.allocator;
@@ -176,8 +217,8 @@ pub const FileChooser = struct {
         try path_row.base.addChild(alloc, &path_lbl.base);
         self.path_label = path_lbl;
 
-        // 文件列表区域 (用 ScrollView 包裹 ListView)
-        const sv = try ScrollView.create(alloc, .{
+        // 文件列表区域 (用 ScrolledWindow 包裹 ListView)
+        const sv = try ScrolledWindow.create(alloc, .{
             .width = self.dialog_width - 32,
             .height = self.dialog_height - 200,
         });
@@ -209,7 +250,7 @@ pub const FileChooser = struct {
         });
         try file_row.base.addChild(alloc, &file_lbl.base);
 
-        const fi = try TextInput.create(alloc, .{
+        const fi = try Entry.create(alloc, .{
             .placeholder = if (self.mode == .save) "输入文件名" else "选择文件",
         });
         try file_row.base.addChild(alloc, &fi.base);
@@ -269,7 +310,7 @@ pub const FileChooser = struct {
             // 过滤文件 (目录不过滤)
             if (!is_dir) {
                 if (self.filter) |filt| {
-                    if (!matchFilter(name, filt.extensions)) continue;
+                    if (!filt.match(name, null)) continue;
                 }
             }
 
@@ -321,19 +362,6 @@ pub const FileChooser = struct {
         if (a_is_dir != b_is_dir) return a_is_dir;
         // 按名称比较
         return std.mem.lessThan(u8, a, b);
-    }
-
-    fn matchFilter(filename: []const u8, extensions: []const []const u8) bool {
-        for (extensions) |ext| {
-            if (filename.len > ext.len + 1) {
-                const dot_pos = filename.len - ext.len - 1;
-                if (filename[dot_pos] == '.') {
-                    const file_ext = filename[dot_pos + 1 ..];
-                    if (std.ascii.eqlIgnoreCase(file_ext, ext)) return true;
-                }
-            }
-        }
-        return false;
     }
 
     /// 进入指定子目录或选中文件

@@ -20,12 +20,12 @@ const pal = @import("../pal/pal.zig");
 const container_mod = @import("container.zig");
 const label_mod = @import("label.zig");
 const button_mod = @import("button.zig");
-const text_input_mod = @import("text_input.zig");
-const scroll_view_mod = @import("scroll_view.zig");
+const entry_mod = @import("entry.zig");
+const scrolled_window_mod = @import("scrolled_window.zig");
 const list_view_mod = @import("list_view.zig");
 const separator_mod = @import("separator.zig");
 const slider_mod = @import("slider.zig");
-const checkbox_mod = @import("checkbox.zig");
+const check_button_mod = @import("check_button.zig");
 const styled_text = @import("../text/styled_text.zig");
 
 const Widget = widget_mod.Widget;
@@ -36,12 +36,12 @@ const EventResult = widget_mod.EventResult;
 const Container = container_mod.Container;
 const Label = label_mod.Label;
 const Button = button_mod.Button;
-const TextInput = text_input_mod.TextInput;
-const ScrollView = scroll_view_mod.ScrollView;
+const Entry = entry_mod.Entry;
+const ScrolledWindow = scrolled_window_mod.ScrolledWindow;
 const ListView = list_view_mod.ListView;
 const Separator = separator_mod.Separator;
 const Slider = slider_mod.Slider;
-const Checkbox = checkbox_mod.Checkbox;
+const CheckButton = check_button_mod.CheckButton;
 
 /// 字体描述符
 pub const FontDesc = struct {
@@ -64,10 +64,10 @@ pub const FontChooserDialog = struct {
 
     content_container: ?*Container = null,
     family_list: ?*ListView = null,
-    size_input: ?*TextInput = null,
+    size_input: ?*Entry = null,
     size_slider: ?*Slider = null,
-    bold_check: ?*Checkbox = null,
-    italic_check: ?*Checkbox = null,
+    bold_check: ?*CheckButton = null,
+    italic_check: ?*CheckButton = null,
     preview_label: ?*Label = null,
 
     overlay_color: math.Color = math.Color.hex(0x000000AA),
@@ -220,7 +220,7 @@ pub const FontChooserDialog = struct {
         });
         try left_col.base.addChild(alloc, &fam_lbl.base);
 
-        const sv = try ScrollView.create(alloc, .{
+        const sv = try ScrolledWindow.create(alloc, .{
             .width = 300,
             .height = 280,
         });
@@ -262,7 +262,7 @@ pub const FontChooserDialog = struct {
         });
         try right_col.base.addChild(alloc, &size_row.base);
 
-        const si = try TextInput.create(alloc, .{
+        const si = try Entry.create(alloc, .{
             .placeholder = "14",
         });
         si.base.layout_style.flex_grow = 1;
@@ -277,14 +277,14 @@ pub const FontChooserDialog = struct {
         });
         try right_col.base.addChild(alloc, &style_lbl.base);
 
-        const bold = try Checkbox.create(alloc, "粗体", .{
+        const bold = try CheckButton.create(alloc, "粗体", .{
             .checked = self.bold,
         });
         try right_col.base.addChild(alloc, &bold.base);
         self.bold_check = bold;
         bold.base.user_data = self;
 
-        const italic = try Checkbox.create(alloc, "斜体", .{
+        const italic = try CheckButton.create(alloc, "斜体", .{
             .checked = self.italic,
         });
         try right_col.base.addChild(alloc, &italic.base);

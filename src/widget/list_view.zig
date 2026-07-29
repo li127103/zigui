@@ -1,4 +1,8 @@
-//! ListView 控件 - 虚拟化列表
+//! ListView 控件 - 虚拟化列表（兼容旧 items API + 新 GTK4 模型层）
+//!
+//! GTK4 对应: GtkListView
+//!   - 旧 API: `addItem(str)` / `clearItems()` (直接字符串数组)
+//!   - 新 API: `setModel(m)` + `setSelectionModel(sel)` + `setFactory(factory)` (模型层)
 
 const std = @import("std");
 const math = @import("../math.zig");
@@ -6,16 +10,37 @@ const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
 const styled_text = @import("../text/styled_text.zig");
+const list_mod = @import("../model/list_model.zig");
+const sel_mod = @import("../model/selection_model.zig");
+const fact_mod = @import("../model/list_item_factory.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 
+const ListModel = list_mod.ListModel;
+const SelectionModel = sel_mod.SelectionModel;
+const ListItemFactory = fact_mod.ListItemFactory;
+const ListItem = fact_mod.ListItem;
+
 pub const ListView = struct {
     base: Widget,
     allocator: std.mem.Allocator,
+
+    /// ── 旧 API：字符串数组 ──
     items: std.ArrayListUnmanaged([]const u8),
+
+    /// ── GTK4 模型层 API ──
+    /// ListModel (设置后优先使用 model 取数据)
+    model: ?ListModel = null,
+    /// SelectionModel (设置后选中状态由它管理)
+    selection_model: ?*SelectionModel = null,
+    /// ListItemFactory (若存在则调用 setup/bind)
+    factory: ?ListItemFactory = null,
+    /// ListItem 缓存: row_idx -> ListItem
+    _listitem_cache: std.AutoHashMapUnmanaged(usize, ListItem) = .{},
+
     selected: ?usize = null,
     hovered: ?usize = null,
     scroll_offset: f32 = 0,
@@ -56,6 +81,13 @@ pub const ListView = struct {
     pub fn destroy(self: *ListView, allocator: std.mem.Allocator) void {
         self.base.background.deinit(allocator);
         self.items.deinit(allocator);
+        // 清理 listitem cache (teardown)
+        var cache_it = self._listitem_cache.iterator();
+        while (cache_it.next()) |entry| {
+            var li = entry.value_ptr.*;
+            if (self.factory) |f| f.teardown(&li);
+        }
+        self._listitem_cache.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
     }
@@ -70,11 +102,112 @@ pub const ListView = struct {
         self.selected = null;
         self.hovered = null;
         self.scroll_offset = 0;
+        self._clearListItemCache();
         self.base.markDirty();
     }
 
+    // ──────────────────────────────────────────────
+    // GTK4 模型层 API (setModel / setSelectionModel / setFactory)
+    // ──────────────────────────────────────────────
+
+    /// 设置 ListModel (GtkListView: set_model)
+    pub fn setModel(self: *ListView, m: ?ListModel) void {
+        self.model = m;
+        self._clearListItemCache();
+        self.base.markLayoutDirty();
+        self.base.markDirty();
+    }
+
+    /// 设置 SelectionModel (GtkListView: set_model)
+    pub fn setSelectionModel(self: *ListView, sel: ?*SelectionModel) void {
+        self.selection_model = sel;
+        if (sel) |s| {
+            // 自动同步 model
+            self.model = s.model();
+        }
+        self._clearListItemCache();
+        self.base.markDirty();
+    }
+
+    /// 设置 ListItemFactory (GtkListView: set_factory)
+    pub fn setFactory(self: *ListView, factory: ?ListItemFactory) void {
+        // teardown 旧的
+        if (self.factory) |old_f| {
+            var it = self._listitem_cache.iterator();
+            while (it.next()) |entry| {
+                var li = entry.value_ptr.*;
+                old_f.teardown(&li);
+            }
+        }
+        self.factory = factory;
+        self._clearListItemCache();
+        self.base.markDirty();
+    }
+
+    /// 有效行数 (有 model 取 model，否则取旧 items)
+    pub fn effectiveRowCount(self: *const ListView) usize {
+        if (self.model) |m| return m.nItems();
+        return self.items.items.len;
+    }
+
+    /// 判断第 pos 行是否选中 (兼容 selection_model)
+    pub fn effectiveIsSelected(self: *const ListView, pos: usize) bool {
+        if (self.selection_model) |sm| return sm.isSelected(pos);
+        if (self.selected) |s| return s == pos;
+        return false;
+    }
+
+    /// 设置第 pos 行选中 (兼容 selection_model，自动 exclusive 模式)
+    pub fn effectiveSelect(self: *ListView, pos: ?usize) void {
+        if (self.selection_model) |sm| {
+            if (pos) |p| {
+                _ = sm.selectItem(p, true);
+            } else {
+                // 取消所有选中: 逐行 unselect (简化)
+                for (0..self.effectiveRowCount()) |i| {
+                    _ = sm.unselectItem(i);
+                }
+            }
+        } else {
+            self.selected = pos;
+        }
+    }
+
+    // ── 内部: ListItem cache ──────────────────────────────────────────────
+
+    fn _clearListItemCache(self: *ListView) void {
+        var it = self._listitem_cache.iterator();
+        while (it.next()) |entry| {
+            var li = entry.value_ptr.*;
+            if (self.factory) |f| f.teardown(&li);
+        }
+        self._listitem_cache.clearRetainingCapacity();
+    }
+
+    fn _getOrBindListItem(self: *ListView, row_idx: usize) !?ListItem {
+        const factory = self.factory orelse return null;
+        const gop = try self._listitem_cache.getOrPut(self.allocator, row_idx);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{ .position = row_idx };
+            var li = gop.value_ptr.*;
+            factory.setup(&li);
+            gop.value_ptr.* = li;
+        }
+        var li = gop.value_ptr.*;
+        li.position = row_idx;
+        if (self.model) |m| {
+            li.item = if (m.iface.getItemFn(m.userdata, row_idx)) |p| p else null;
+        }
+        li.selected = self.effectiveIsSelected(row_idx);
+        // bind (即使没变化也 bind，factory 自己决定)
+        factory.bind(&li);
+        // 保存回 cache (因为 bind 可能修改 userdata 等字段)
+        gop.value_ptr.* = li;
+        return li;
+    }
+
     fn totalHeight(self: *const ListView) f32 {
-        return @as(f32, @floatFromInt(self.items.items.len)) * (self.item_height + self.padding);
+        return @as(f32, @floatFromInt(self.effectiveRowCount())) * (self.item_height + self.padding);
     }
 
     fn maxScroll(self: *const ListView) f32 {
@@ -86,7 +219,8 @@ pub const ListView = struct {
     fn visibleRange(self: *const ListView) struct { start: usize, end: usize } {
         const start: usize = @intFromFloat(@max(0, @floor(self.scroll_offset / (self.item_height + self.padding))));
         const visible_count: usize = @as(usize, @intFromFloat(@ceil(self.base.rect.height / (self.item_height + self.padding)))) + 1;
-        const end = @min(self.items.items.len, start + visible_count);
+        const n = self.effectiveRowCount();
+        const end = @min(n, start + visible_count);
         return .{ .start = start, .end = end };
     }
 
@@ -132,14 +266,17 @@ pub const ListView = struct {
             // 裁剪: 跳过不可见的
             if (item_y + self.item_height < ry or item_y > ry + rh) continue;
 
+            const is_sel = self.effectiveIsSelected(i);
+            const is_hover = (self.hovered != null and self.hovered.? == i);
+
             // 项背景
-            if (self.selected != null and self.selected.? == i) {
+            if (is_sel) {
                 ctx.renderer.fillRoundedRect(
                     .{ .x = rx + self.padding, .y = item_y, .width = rw - self.padding * 2 - 6, .height = self.item_height },
                     6,
                     self.item_selected_bg,
                 ) catch {};
-            } else if (self.hovered != null and self.hovered.? == i) {
+            } else if (is_hover) {
                 ctx.renderer.fillRoundedRect(
                     .{ .x = rx + self.padding, .y = item_y, .width = rw - self.padding * 2 - 6, .height = self.item_height },
                     6,
@@ -147,15 +284,45 @@ pub const ListView = struct {
                 ) catch {};
             }
 
-            // 文本
-            self.drawLabel(ctx, self.items.items[i], rx + self.padding + 12, item_y + (self.item_height - self.font_size * 1.2) / 2.0, self.text_color);
+            // 文本: factory -> userdata; model -> item; old -> items[i]
+            const tc: math.Color = if (is_sel) math.Color.hex(0xFFFFFFFF) else self.text_color;
+            var maybe_text: ?[]const u8 = null;
+
+            // 1) factory 模式：bind 后从 ListItem.userdata 拿 (SimpleTextFactory 把 userdata 指向字符串)
+            if (self.factory != null) {
+                const li = self._getOrBindListItem(i) catch null;
+                if (li) |l| {
+                    if (l.userdata) |ud| {
+                        // SimpleTextFactory 默认把 userdata 当 *[]const u8
+                        const p: *[]const u8 = @ptrCast(@alignCast(ud));
+                        maybe_text = p.*;
+                    }
+                }
+            }
+
+            // 2) model 模式
+            if (maybe_text == null) {
+                if (self.model) |m| {
+                    const raw = m.iface.getItemFn(m.userdata, i);
+                    if (raw) |p| {
+                        const as_bytes: *[]const u8 = @ptrCast(@alignCast(p));
+                        maybe_text = as_bytes.*;
+                    }
+                }
+            }
+
+            // 3) old API items
+            const text: []const u8 = maybe_text orelse if (i < self.items.items.len) self.items.items[i] else "";
+
+            self.drawLabel(ctx, text, rx + self.padding + 12, item_y + (self.item_height - self.font_size * 1.2) / 2.0, tc);
         }
 
         // 滚动条
         const total = self.totalHeight();
         if (total > rh) {
             const scrollbar_h = @max(20.0, rh * (rh / total));
-            const scrollbar_y = ry + (self.scroll_offset / self.maxScroll()) * (rh - scrollbar_h);
+            const bar_max = self.maxScroll();
+            const scrollbar_y = ry + if (bar_max > 0) (self.scroll_offset / bar_max) * (rh - scrollbar_h) else 0;
             ctx.renderer.fillRoundedRect(
                 .{ .x = rx + rw - 5, .y = scrollbar_y, .width = 3, .height = scrollbar_h },
                 1.5,
@@ -198,7 +365,7 @@ pub const ListView = struct {
                 if (mb.button == .left and mb.state == .pressed) {
                     const my: f32 = @floatFromInt(mb.y);
                     if (self.itemAtY(my)) |idx| {
-                        self.selected = idx;
+                        self.effectiveSelect(idx);
                         self.base.markDirty();
                         if (self.on_select) |cb| cb(self, idx);
                         return .handled;
@@ -209,27 +376,33 @@ pub const ListView = struct {
                 if (k.state != .pressed or !w.state.focused) return .ignored;
                 switch (k.key) {
                     .up => {
-                        if (self.selected) |sel| {
-                            if (sel > 0) {
-                                self.selected = sel - 1;
-                                self.scrollToVisible(self.selected.?);
-                                self.base.markDirty();
-                            }
-                        } else if (self.items.items.len > 0) {
-                            self.selected = 0;
+                        const n = self.effectiveRowCount();
+                        const cur: usize = if (self.selection_model) |sm|
+                            sm.getFirstSelected() orelse std.math.maxInt(usize)
+                        else
+                            self.selected orelse std.math.maxInt(usize);
+                        if (cur != std.math.maxInt(usize) and cur > 0) {
+                            self.effectiveSelect(cur - 1);
+                            self.scrollToVisible(cur - 1);
+                            self.base.markDirty();
+                        } else if (n > 0) {
+                            self.effectiveSelect(0);
                             self.base.markDirty();
                         }
                         return .handled;
                     },
                     .down => {
-                        if (self.selected) |sel| {
-                            if (sel + 1 < self.items.items.len) {
-                                self.selected = sel + 1;
-                                self.scrollToVisible(self.selected.?);
-                                self.base.markDirty();
-                            }
-                        } else if (self.items.items.len > 0) {
-                            self.selected = 0;
+                        const n = self.effectiveRowCount();
+                        const cur: usize = if (self.selection_model) |sm|
+                            sm.getFirstSelected() orelse std.math.maxInt(usize)
+                        else
+                            self.selected orelse std.math.maxInt(usize);
+                        if (cur != std.math.maxInt(usize) and cur + 1 < n) {
+                            self.effectiveSelect(cur + 1);
+                            self.scrollToVisible(cur + 1);
+                            self.base.markDirty();
+                        } else if (n > 0) {
+                            self.effectiveSelect(0);
                             self.base.markDirty();
                         }
                         return .handled;
@@ -245,7 +418,7 @@ pub const ListView = struct {
     fn itemAtY(self: *const ListView, y: f32) ?usize {
         if (y < 0 or y >= self.base.rect.height) return null;
         const idx: usize = @intFromFloat((y + self.scroll_offset) / (self.item_height + self.padding));
-        if (idx < self.items.items.len) return idx;
+        if (idx < self.effectiveRowCount()) return idx;
         return null;
     }
 

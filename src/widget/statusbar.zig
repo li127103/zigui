@@ -55,8 +55,10 @@ pub const Statusbar = struct {
         height: f32 = 28.0,
         font_size: f32 = 12.0,
         initial_text: []const u8 = "",
+        text: []const u8 = "",
     }) !*Statusbar {
         const self = try allocator.create(Statusbar);
+        const actual_text = if (opts.text.len > 0) opts.text else opts.initial_text;
         self.* = .{
             .base = .{
                 .vtable = &vtable,
@@ -68,7 +70,7 @@ pub const Statusbar = struct {
             .height = opts.height,
             .font_size = opts.font_size,
         };
-        try self.buildUI(opts.initial_text);
+        try self.buildUI(actual_text);
         return self;
     }
 
@@ -93,7 +95,6 @@ pub const Statusbar = struct {
             .bg_color = self.bg_color,
             .padding = .{ .left = self.padding, .right = self.padding, .top = 4, .bottom = 4 },
             .gap = .{ .width = 8, .height = 0 },
-            .alignment = .center,
         });
         self.content_container = content;
         try self.base.addChild(alloc, &content.base);
@@ -145,7 +146,7 @@ pub const Statusbar = struct {
 
     pub fn setText(self: *Self, text: []const u8) void {
         if (self.status_label) |lbl| {
-            lbl.setText(text) catch {};
+            lbl.setText(text);
         }
         self.base.markDirty();
     }
@@ -210,3 +211,5 @@ pub const Statusbar = struct {
         }
     }
 };
+
+pub const StatusBar = Statusbar;

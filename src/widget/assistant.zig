@@ -21,11 +21,30 @@ const Button = button_mod.Button;
 const Container = container_mod.Container;
 const Label = label_mod.Label;
 
+const AssistantPageType = enum {
+    /// 常规内容页（默认：有 Back/Next，最后一页 Apply=完成）
+    content,
+    /// 介绍页（无 Back，Next=继续）
+    intro,
+    /// 进度页（Next 需 complete=true；Apply 隐藏）
+    progress,
+    /// 确认页（Apply 文案=确认，调用 on_apply）
+    confirm,
+    /// 汇总页（Back/Next 隐藏，Apply 文案=关闭，点击 hide）
+    summary,
+    /// 自定义（所有按钮默认 hide，由上层控制）
+    custom,
+};
+
 const AssistantPage = struct {
     title: []const u8,
     content: ?*Widget = null,
     complete: bool = true,
+    page_type: AssistantPageType = .content,
 };
+
+// 便捷 GTK 兼容别名：AssistantPageType 作为 Assistant 下的命名空间对外导出
+pub const PageType = AssistantPageType;
 
 pub const Assistant = struct {
     base: Widget,
@@ -39,6 +58,10 @@ pub const Assistant = struct {
     on_apply: ?*const fn (self: *Assistant) void = null,
     on_prepare: ?*const fn (self: *Assistant, page_index: usize) void = null,
     on_close: ?*const fn (self: *Assistant) void = null,
+    /// 自定义下一页跳转函数（GTK4: gtk_assistant_set_forward_page_func）
+    /// 返回 `?usize`：非空 = 跳到该页；null = 不前进
+    forward_page_func: ?*const fn (self: *const Assistant, current_page: usize) ?usize = null,
+    forward_page_data: ?*anyopaque = null,
 
     btn_back: *Button = undefined,
     btn_next: *Button = undefined,
@@ -138,10 +161,16 @@ pub const Assistant = struct {
     }
 
     pub fn addPage(self: *Assistant, title: []const u8, content: ?*Widget) !usize {
+        return self.addPageTyped(title, content, .content);
+    }
+
+    /// GTK4 兼容：append_page (同 addPageTyped，可指定 page_type)
+    pub fn addPageTyped(self: *Assistant, title: []const u8, content: ?*Widget, page_type: AssistantPageType) !usize {
         const idx = self.pages.items.len;
         try self.pages.append(self.allocator, .{
             .title = try self.allocator.dupe(u8, title),
             .content = content,
+            .page_type = page_type,
         });
         if (content) |w| {
             w.state.visible = false;
@@ -150,6 +179,30 @@ pub const Assistant = struct {
             self.updatePageUI();
         }
         return idx;
+    }
+
+    pub fn setPageType(self: *Assistant, page_index: usize, page_type: AssistantPageType) void {
+        if (page_index < self.pages.items.len) {
+            self.pages.items[page_index].page_type = page_type;
+            self.updateButtonStates();
+            self.base.markDirty();
+        }
+    }
+
+    pub fn getPageType(self: *const Assistant, page_index: usize) AssistantPageType {
+        if (page_index < self.pages.items.len)
+            return self.pages.items[page_index].page_type;
+        return .content;
+    }
+
+    /// GTK4 兼容：gtk_assistant_set_forward_page_func
+    pub fn setForwardPageFunc(
+        self: *Assistant,
+        func: ?*const fn (self: *const Assistant, current_page: usize) ?usize,
+        data: ?*anyopaque,
+    ) void {
+        self.forward_page_func = func;
+        self.forward_page_data = data;
     }
 
     pub fn setPageComplete(self: *Assistant, page_index: usize, complete: bool) void {
@@ -184,6 +237,18 @@ pub const Assistant = struct {
     }
 
     fn nextPage(self: *Assistant) void {
+        // GTK4: 先走自定义 forward_page_func
+        if (self.forward_page_func) |func| {
+            if (func(self, self.current_page)) |target| {
+                if (target < self.pages.items.len) {
+                    self.current_page = target;
+                    self.updatePageUI();
+                    if (self.on_prepare) |cb| cb(self, self.current_page);
+                }
+            }
+            return;
+        }
+        // 默认顺序前进
         if (self.current_page + 1 < self.pages.items.len) {
             self.current_page += 1;
             self.updatePageUI();
@@ -215,10 +280,20 @@ pub const Assistant = struct {
             self.pages.items[self.current_page].complete
         else
             true;
+        const page_type = self.getPageType(self.current_page);
 
+        // Back（默认首页禁用；intro/summary/custom 隐藏）
         self.btn_back.base.state.disabled = is_first;
+
+        // Next（progress 需 complete=true；intro/summary/custom 隐藏；末页禁用）
         self.btn_next.base.state.disabled = is_last or !page_complete;
-        self.btn_apply.base.state.disabled = !is_last or !page_complete;
+
+        // Apply（最后一页且 complete 才启用；summary 页允许点击"关闭"，progress 禁用；intro/custom 隐藏）
+        switch (page_type) {
+            .summary => self.btn_apply.base.state.disabled = false,
+            .progress => self.btn_apply.base.state.disabled = true,
+            else => self.btn_apply.base.state.disabled = !is_last or !page_complete,
+        }
     }
 
     fn onBackClicked(btn: *Button) void {
@@ -233,8 +308,19 @@ pub const Assistant = struct {
 
     fn onApplyClicked(btn: *Button) void {
         const self: *Assistant = @ptrCast(@alignCast(btn.base.user_data orelse return));
-        if (self.on_apply) |cb| cb(self);
-        self.hide();
+        const page_type = self.getPageType(self.current_page);
+        switch (page_type) {
+            .summary => {
+                // 汇总页：Apply=关闭 → 走 on_close + hide
+                if (self.on_close) |cb| cb(self);
+                self.hide();
+            },
+            else => {
+                // 其他页：走 on_apply + hide
+                if (self.on_apply) |cb| cb(self);
+                self.hide();
+            },
+        }
     }
 
     fn onCancelClicked(btn: *Button) void {
@@ -395,50 +481,100 @@ pub const Assistant = struct {
             self.border_color,
         ) catch {};
 
-        // 按钮
+        // 按钮：按 page_type 决定显隐 + 文案
         const btn_y = bar_y + (self.button_bar_height - 32) / 2;
         const btn_spacing: f32 = 8;
+        const cur_page_type = self.getPageType(self.current_page);
 
-        // Cancel (左)
-        self.btn_cancel.base.rect.x = dx + 16;
-        self.btn_cancel.base.rect.y = btn_y;
-        self.btn_cancel.base.rect.width = 80;
-        self.btn_cancel.base.rect.height = 32;
-        self.btn_cancel.base.state.visible = true;
-        self.btn_cancel.base.vtable.paint(&self.btn_cancel.base, ctx);
+        // 根据 page_type 动态设置按钮文案（updatePageUI 时也会调，这里每帧同步以防万一）
+        switch (cur_page_type) {
+            .intro => {
+                self.btn_next.setText("继续");
+                self.btn_back.base.state.visible = false; // intro 无 Back
+                self.btn_next.base.state.visible = true;
+                self.btn_apply.base.state.visible = false; // intro 无 Apply
+            },
+            .progress => {
+                self.btn_next.setText("下一步");
+                self.btn_back.base.state.visible = true;
+                self.btn_next.base.state.visible = true;
+                self.btn_apply.base.state.visible = false; // progress 无 Apply
+            },
+            .confirm => {
+                self.btn_next.setText("下一步");
+                self.btn_back.base.state.visible = true;
+                self.btn_next.base.state.visible = self.current_page + 1 < self.pages.items.len;
+                self.btn_apply.base.state.visible = true;
+                self.btn_apply.setText("确认"); // confirm: Apply = 确认
+            },
+            .summary => {
+                self.btn_back.base.state.visible = false; // summary 无 Back/Next
+                self.btn_next.base.state.visible = false;
+                self.btn_apply.base.state.visible = true;
+                self.btn_apply.setText("关闭"); // summary: Apply = 关闭
+            },
+            .custom => {
+                // custom：全部隐藏（上层自行控制）
+                self.btn_back.base.state.visible = false;
+                self.btn_next.base.state.visible = false;
+                self.btn_apply.base.state.visible = false;
+            },
+            .content => {
+                self.btn_next.setText("下一步");
+                self.btn_apply.setText("完成");
+                self.btn_back.base.state.visible = true;
+                self.btn_next.base.state.visible = true;
+                self.btn_apply.base.state.visible = true;
+            },
+        }
+
+        // Cancel (左，始终显示除非 custom)
+        if (cur_page_type != .custom) {
+            self.btn_cancel.base.rect.x = dx + 16;
+            self.btn_cancel.base.rect.y = btn_y;
+            self.btn_cancel.base.rect.width = 80;
+            self.btn_cancel.base.rect.height = 32;
+            self.btn_cancel.base.state.visible = true;
+            self.btn_cancel.base.vtable.paint(&self.btn_cancel.base, ctx);
+        } else {
+            self.btn_cancel.base.state.visible = false;
+        }
 
         // Back / Next / Apply (右对齐)
         const btn_right_x = dx + self.dialog_width - 16;
         var cur_x = btn_right_x;
 
         // Apply (最右)
-        cur_x -= 80;
-        self.btn_apply.base.rect.x = cur_x;
-        self.btn_apply.base.rect.y = btn_y;
-        self.btn_apply.base.rect.width = 80;
-        self.btn_apply.base.rect.height = 32;
-        self.btn_apply.base.state.visible = true;
-        self.btn_apply.base.vtable.paint(&self.btn_apply.base, ctx);
-        cur_x -= btn_spacing;
+        if (self.btn_apply.base.state.visible) {
+            cur_x -= 80;
+            self.btn_apply.base.rect.x = cur_x;
+            self.btn_apply.base.rect.y = btn_y;
+            self.btn_apply.base.rect.width = 80;
+            self.btn_apply.base.rect.height = 32;
+            self.btn_apply.base.vtable.paint(&self.btn_apply.base, ctx);
+            cur_x -= btn_spacing;
+        }
 
         // Next
-        cur_x -= 80;
-        self.btn_next.base.rect.x = cur_x;
-        self.btn_next.base.rect.y = btn_y;
-        self.btn_next.base.rect.width = 80;
-        self.btn_next.base.rect.height = 32;
-        self.btn_next.base.state.visible = true;
-        self.btn_next.base.vtable.paint(&self.btn_next.base, ctx);
-        cur_x -= btn_spacing;
+        if (self.btn_next.base.state.visible) {
+            cur_x -= 80;
+            self.btn_next.base.rect.x = cur_x;
+            self.btn_next.base.rect.y = btn_y;
+            self.btn_next.base.rect.width = 80;
+            self.btn_next.base.rect.height = 32;
+            self.btn_next.base.vtable.paint(&self.btn_next.base, ctx);
+            cur_x -= btn_spacing;
+        }
 
         // Back
-        cur_x -= 80;
-        self.btn_back.base.rect.x = cur_x;
-        self.btn_back.base.rect.y = btn_y;
-        self.btn_back.base.rect.width = 80;
-        self.btn_back.base.rect.height = 32;
-        self.btn_back.base.state.visible = true;
-        self.btn_back.base.vtable.paint(&self.btn_back.base, ctx);
+        if (self.btn_back.base.state.visible) {
+            cur_x -= 80;
+            self.btn_back.base.rect.x = cur_x;
+            self.btn_back.base.rect.y = btn_y;
+            self.btn_back.base.rect.width = 80;
+            self.btn_back.base.rect.height = 32;
+            self.btn_back.base.vtable.paint(&self.btn_back.base, ctx);
+        }
     }
 
     fn onEvent(w: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {
@@ -447,6 +583,8 @@ pub const Assistant = struct {
 
         const dx = (w.rect.width - self.dialog_width) / 2;
         const dy = (w.rect.height - self.dialog_height) / 2;
+        const cur_page_type = self.getPageType(self.current_page);
+        _ = cur_page_type;
 
         // 先给按钮分发事件
         const buttons = [_]*Button{ self.btn_cancel, self.btn_back, self.btn_next, self.btn_apply };
@@ -461,12 +599,13 @@ pub const Assistant = struct {
             }
         }
 
-        // 当前页面内容的事件
+        // 当前页面内容的事件（修复坐标：与 paint 时 content.rect 的 dx+20 / content_y+16 反向对应）
         if (self.current_page < self.pages.items.len) {
             const page = &self.pages.items[self.current_page];
             if (page.content) |content| {
                 if (content.vtable.on_event) |ev_fn| {
-                    const local_ev = translateEvent(event, dx - 20, dy - 16);
+                    const content_y = dy + self.header_height;
+                    const local_ev = translateEvent(event, -(dx + 20), -(content_y + 16));
                     const result = ev_fn(content, &local_ev, ectx);
                     if (result == .handled) return .handled;
                 }

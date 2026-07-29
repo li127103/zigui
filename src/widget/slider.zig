@@ -5,11 +5,13 @@ const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
+const adj_mod = @import("../model/adjustment.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
+const Adjustment = adj_mod.Adjustment;
 
 pub const Slider = struct {
     base: Widget,
@@ -19,6 +21,11 @@ pub const Slider = struct {
     step: f32,
     on_change: ?*const fn (self: *Slider, value: f32) void,
     dragging: bool = false,
+    /// 关联 Adjustment（设置后所有值/范围/步长委托给 adjustment）
+    adjustment: ?*Adjustment = null,
+    // 保存旧的 adjustment 回调（用于解绑时恢复，目前暂未用于完整链式，但保留字段方便扩展）
+    _saved_adj_vc: ?*const fn (userdata: ?*anyopaque, value: f32) void = null,
+    _saved_adj_vc_userdata: ?*anyopaque = null,
     // 样式
     track_color: math.Color = math.Color.hex(0x334155FF),
     fill_color: math.Color = math.Color.hex(0x3B82F6FF),
@@ -50,12 +57,44 @@ pub const Slider = struct {
     }
 
     pub fn destroy(self: *Slider, allocator: std.mem.Allocator) void {
+        // 解绑 adjustment（恢复旧回调，简单起见这里只清空自己保存的指针即可）
+        self.adjustment = null;
+        self._saved_adj_vc = null;
+        self._saved_adj_vc_userdata = null;
         self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
         allocator.destroy(self);
     }
 
+    /// 关联/解绑 Adjustment。传入 null 则恢复为内部独立字段。
+    pub fn setAdjustment(self: *Slider, adj: ?*Adjustment) void {
+        if (self.adjustment == adj) return;
+        self.adjustment = adj;
+        if (adj) |a| {
+            // 从 Adjustment 同步当前值
+            self.value = a.value;
+            self.min = a.lower;
+            self.max = a.upper;
+            self.step = a.step_increment;
+            // 安装桥接回调
+            self._saved_adj_vc = a.on_value_changed;
+            self._saved_adj_vc_userdata = a.on_value_changed_userdata;
+            a.on_value_changed = &onAdjValueChanged;
+            a.on_value_changed_userdata = @ptrCast(self);
+        }
+        self.base.markDirty();
+    }
+
+    pub inline fn getAdjustment(self: *const Slider) ?*Adjustment {
+        return self.adjustment;
+    }
+
     pub fn setValue(self: *Slider, v: f32) void {
+        if (self.adjustment) |a| {
+            // 委托给 adjustment → 触发 onAdjValueChanged → 间接更新自身 + on_change
+            a.setValue(v);
+            return;
+        }
         const clamped = std.math.clamp(v, self.min, self.max);
         const stepped = if (self.step > 0) blk: {
             const steps = @round((clamped - self.min) / self.step);
@@ -66,6 +105,21 @@ pub const Slider = struct {
             self.base.markDirty();
             if (self.on_change) |cb| cb(self, self.value);
         }
+    }
+
+    /// Adjustment value-changed 桥接回调
+    fn onAdjValueChanged(userdata: ?*anyopaque, value: f32) void {
+        const self: *Slider = @ptrCast(@alignCast(userdata orelse return));
+        // 直接更新 value，不要再次调用 adj.setValue 以防死循环
+        self.value = value;
+        if (self.adjustment) |a| {
+            // 若范围有更新（例如 configure 后）也同步下
+            self.min = a.lower;
+            self.max = a.upper;
+            self.step = a.step_increment;
+        }
+        self.base.markDirty();
+        if (self.on_change) |cb| cb(self, self.value);
     }
 
     pub fn normalized(self: *const Slider) f32 {

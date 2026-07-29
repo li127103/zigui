@@ -13,6 +13,38 @@ const pal = @import("../pal/pal.zig");
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
 
+/// FlowBoxChild — FlowBox 的独立子行对象
+///
+/// GTK 对应: GtkFlowBoxChild
+/// 每一个被 add/append 到 FlowBox 的子 Widget 都被包装为 FlowBoxChild。
+pub const FlowBoxChild = struct {
+    child: *Widget,
+    index: ?usize = null,
+    selected: bool = false,
+    selectable: bool = true,
+    user_data: ?*anyopaque = null,
+
+    pub fn getChild(self: *FlowBoxChild) *Widget {
+        return self.child;
+    }
+
+    pub fn getIndex(self: *FlowBoxChild) ?usize {
+        return self.index;
+    }
+
+    pub fn isSelected(self: *FlowBoxChild) bool {
+        return self.selected;
+    }
+
+    pub fn setSelectable(self: *FlowBoxChild, v: bool) void {
+        self.selectable = v;
+    }
+
+    pub fn getSelectable(self: *FlowBoxChild) bool {
+        return self.selectable;
+    }
+};
+
 pub const FlowBox = struct {
     base: Widget,
     allocator: std.mem.Allocator,
@@ -22,6 +54,8 @@ pub const FlowBox = struct {
     padding: math.EdgeInsets,
     justify: layout_mod.JustifyContent,
     align_items: layout_mod.AlignItems,
+    /// FlowBox 子项元数据（与 base.children 顺序一致，用于 GTK4 风格的独立子对象 API）
+    flow_children: std.ArrayListUnmanaged(FlowBoxChild) = .empty,
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         direction: layout_mod.FlexDirection = .row,
@@ -60,6 +94,7 @@ pub const FlowBox = struct {
     }
 
     pub fn destroy(self: *FlowBox, allocator: std.mem.Allocator) void {
+        self.flow_children.deinit(allocator);
         self.base.background.deinit(allocator);
         for (self.base.children.items) |child| {
             child.vtable.destroy(child, allocator);
@@ -69,7 +104,61 @@ pub const FlowBox = struct {
     }
 
     pub fn addChild(self: *FlowBox, child: *Widget) !void {
+        _ = try self.appendChild(child);
+    }
+
+    // ── GTK4 FlowBox 风格：返回 *FlowBoxChild ────────────────────────────────
+
+    pub fn appendChild(self: *FlowBox, child: *Widget) !*FlowBoxChild {
+        const idx: usize = self.flow_children.items.len;
+        const entry: FlowBoxChild = .{ .child = child, .index = idx };
+        try self.flow_children.append(self.allocator, entry);
         try self.base.addChild(self.allocator, child);
+        self.base.markLayoutDirty();
+        return &self.flow_children.items[idx];
+    }
+
+    pub fn prependChild(self: *FlowBox, child: *Widget) !*FlowBoxChild {
+        try self.flow_children.insert(self.allocator, 0, .{ .child = child, .index = 0 });
+        // 后续 index 刷新
+        for (self.flow_children.items[1..], 1..) |*item, i| {
+            item.index = i;
+        }
+        try self.base.addChild(self.allocator, child);
+        self.base.markLayoutDirty();
+        return &self.flow_children.items[0];
+    }
+
+    pub fn insertChild(self: *FlowBox, position: usize, child: *Widget) !*FlowBoxChild {
+        const pos = @min(position, self.flow_children.items.len);
+        try self.flow_children.insert(self.allocator, pos, .{ .child = child, .index = pos });
+        for (self.flow_children.items[pos + 1 ..], pos + 1..) |*item, i| {
+            item.index = i;
+        }
+        try self.base.addChild(self.allocator, child);
+        self.base.markLayoutDirty();
+        return &self.flow_children.items[pos];
+    }
+
+    pub fn removeChild(self: *FlowBox, index: usize) void {
+        if (index >= self.flow_children.items.len) return;
+        const entry = self.flow_children.items[index];
+        self.flow_children.orderedRemove(index);
+        // 重新标定 index
+        for (self.flow_children.items[index..], index..) |*item, i| {
+            item.index = i;
+        }
+        entry.child.vtable.destroy(entry.child, self.allocator);
+        self.base.markLayoutDirty();
+    }
+
+    pub fn getChildAtIndex(self: *FlowBox, index: usize) ?*FlowBoxChild {
+        if (index >= self.flow_children.items.len) return null;
+        return &self.flow_children.items[index];
+    }
+
+    pub fn getChildCount(self: *FlowBox) usize {
+        return self.flow_children.items.len;
     }
 
     // ── VTable 实现 ──────────────────────────────────────────────────────────

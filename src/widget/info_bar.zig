@@ -45,10 +45,13 @@ pub const InfoBar = struct {
     visible: bool = true,
     show_close: bool = true,
     on_close: ?*const fn (self: *InfoBar) void = null,
+    on_response: ?*const fn (self: *InfoBar, response_id: i32) void = null,
 
     content_container: ?*Container = null,
+    action_area: ?*Container = null,
     message_label: ?*Label = null,
     close_button: ?*Button = null,
+    actions: std.ArrayListUnmanaged(*Button) = .{ .items = &.{}, .capacity = 0 },
 
     const Self = @This();
 
@@ -58,6 +61,7 @@ pub const InfoBar = struct {
         show_close: bool = true,
         visible: bool = true,
         on_close: ?*const fn (self: *InfoBar) void = null,
+        on_response: ?*const fn (self: *InfoBar, response_id: i32) void = null,
     }) !*InfoBar {
         const self = try allocator.create(InfoBar);
         self.* = .{
@@ -71,10 +75,66 @@ pub const InfoBar = struct {
             .visible = opts.visible,
             .show_close = opts.show_close,
             .on_close = opts.on_close,
+            .on_response = opts.on_response,
         };
         try self.buildUI();
         return self;
     }
+
+    /// 兼容旧 API: create(allocator, text, message_type, opts)
+    pub fn createLegacy(
+        allocator: std.mem.Allocator,
+        text: []const u8,
+        message_type: InfoBarType,
+        opts: struct {
+            show_close: bool = true,
+            on_close: ?*const fn (self: *InfoBar) void = null,
+            on_response: ?*const fn (self: *InfoBar, response_id: i32) void = null,
+        },
+    ) !*InfoBar {
+        return create(allocator, .{
+            .message_type = message_type,
+            .text = text,
+            .show_close = opts.show_close,
+            .on_close = opts.on_close,
+            .on_response = opts.on_response,
+        });
+    }
+
+    /// GTK 风格: gtk_info_bar_add_button
+    pub fn addButton(self: *Self, text: []const u8, response_id: i32) !*Button {
+        const alloc = self.allocator;
+        const ActionWrapper = struct {
+            info: *Self,
+            response: i32,
+        };
+        const wrapper = try alloc.create(ActionWrapper);
+        wrapper.* = .{ .info = self, .response = response_id };
+        const btn = try Button.create(alloc, text, .{
+            .font_size = 13,
+            .corner_radius = 4,
+            .min_width = 64,
+            .height = 30,
+            .padding = .{ .left = 12, .right = 12, .top = 4, .bottom = 4 },
+        });
+        btn.on_click = struct {
+            fn onActionClick(b: *Button) void {
+                const w: *ActionWrapper = @ptrCast(@alignCast(b.base.user_data orelse return));
+                if (w.info.on_response) |cb| cb(w.info, w.response);
+            }
+        }.onActionClick;
+        btn.base.user_data = wrapper;
+        try self.actions.append(alloc, btn);
+        if (self.action_area) |aa| {
+            try aa.base.addChild(alloc, &btn.base);
+        } else if (self.content_container) |cc| {
+            try cc.base.addChild(alloc, &btn.base);
+        }
+        return btn;
+    }
+
+    /// addAction 是 addButton 的别名（兼容示例）
+    pub const addAction = addButton;
 
     pub fn destroy(self: *Self, allocator: std.mem.Allocator) void {
         allocator.free(self.text);
@@ -152,7 +212,6 @@ pub const InfoBar = struct {
             .bg_color = bg,
             .padding = .{ .left = 16, .right = 12, .top = 10, .bottom = 10 },
             .gap = .{ .width = 12, .height = 0 },
-            .alignment = .center,
         });
         self.content_container = content;
         try self.base.addChild(alloc, &content.base);

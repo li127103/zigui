@@ -3,6 +3,7 @@
 const std = @import("std");
 const math = @import("../math.zig");
 const pal = @import("../pal/pal.zig");
+const perf = @import("../perf.zig");
 const r2d = @import("../render2d/r2d.zig");
 const dirty_mod = @import("../render2d/dirty.zig");
 const theme_mod = @import("../theme/theme.zig");
@@ -92,6 +93,42 @@ pub const EventContext = struct {
     mouse_y: f32 = 0,
 };
 
+/// 通用事件控制器 (GTK4: GtkEventController)
+/// 挂在 Widget.event_controllers 上，事件先于 on_event/冒泡阶段处理。
+/// 通过 self_ptr + handle_event 实现类型擦除，避免 Gesture/其他模块与 Widget 互依赖。
+pub const EventController = struct {
+    /// 控制器自身指针 (指向 GestureClick 等具体对象, 不管理生命周期)
+    self_ptr: *anyopaque,
+    /// 事件处理函数。widget = 事件到达的当前控件, event = 原始事件
+    handle_event: *const fn (self: *anyopaque, widget: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult,
+    /// 每帧 tick (可选；动画 / GestureLongPress 定时等会用到）
+    tick: ?*const fn (self: *anyopaque, delta_ms: u32) void = null,
+    /// 名称 (调试用)
+    name: []const u8 = "event_controller",
+
+    /// 便捷创建：将一个具体 T 类型指针封装为 EventController
+    pub fn wrap(comptime T: type, obj: *T, comptime handleFn: fn (self: *T, widget: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult, comptime tickFn: ?fn (self: *T, delta_ms: u32) void, comptime name: []const u8) EventController {
+        const shim_event = struct {
+            fn shim(s: *anyopaque, w: *Widget, e: *const pal.Event, ec: *EventContext) EventResult {
+                const self_t: *T = @ptrCast(@alignCast(s));
+                return @call(.always_inline, handleFn, .{ self_t, w, e, ec });
+            }
+        }.shim;
+        const shim_tick = if (tickFn) |tf| (struct {
+            fn shim(s: *anyopaque, d: u32) void {
+                const self_t: *T = @ptrCast(@alignCast(s));
+                return @call(.always_inline, tf, .{ self_t, d });
+            }
+        }.shim) else null;
+        return .{
+            .self_ptr = obj,
+            .handle_event = shim_event,
+            .tick = shim_tick,
+            .name = name,
+        };
+    }
+};
+
 pub const Widget = struct {
     vtable: *const VTable,
     id: WidgetId,
@@ -104,7 +141,7 @@ pub const Widget = struct {
     layout_style: layout_mod.LayoutStyle = .{},
     /// 背景样式 (框架在 paintTree 中自动绘制于控件内容之前, 默认无背景)
     background: BackgroundStyle = .{},
-    /// 子树裁剪矩形 (绝对坐标; 非 null 时 paintTree 将子项绘制裁剪到此矩形, 供 ScrollView 等容器使用)
+    /// 子树裁剪矩形 (绝对坐标; 非 null 时 paintTree 将子项绘制裁剪到此矩形, 供 ScrolledWindow 等容器使用)
     clip_children: ?math.Rect(f32) = null,
     /// 无障碍元数据 (role/label/value/hint; 供辅助技术与焦点导航)
     accessibility: Accessibility = .{},
@@ -120,8 +157,13 @@ pub const Widget = struct {
     tooltip_text: ?[]const u8 = null,
     /// 右键菜单 (null = 无右键菜单; 右键点击时自动弹出)
     context_menu: ?*@import("context_menu.zig").ContextMenu = null,
+    /// 事件控制器列表 (GTK4 GtkEventController 概念, 挂接 Gesture/Focus/Motion 等)
+    /// 每个 Widget 可以挂接多个 EventController，事件先由 controllers 预处理再走 on_event/冒泡
+    event_controllers: std.ArrayListUnmanaged(EventController) = .empty,
     // 脏矩形跟踪器 (仅根控件设置, markDirty 时记录绝对脏区)
     dirty_tracker: ?*dirty_mod.DirtyRegion = null,
+    /// 上一次 paintTree 调用时间（ms, 用于计算帧间隔，供 tick 推进动画/定时器；首帧为 null）
+    last_paint_ms: ?u64 = null,
 
     pub const VTable = struct {
         type_name: []const u8,
@@ -139,7 +181,7 @@ pub const Widget = struct {
         on_event: ?*const fn (self: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult = null,
         /// 自定义命中测试 (可选; 如弹出菜单等位置不受布局控制的控件覆盖)
         hit_test: ?*const fn (self: *Widget, x: f32, y: f32) ?*Widget = null,
-        /// 自定义布局 (可选; 容器如 ScrollView 覆盖默认 flexbox 以应用滚动偏移)
+        /// 自定义布局 (可选; 容器如 ScrolledWindow 覆盖默认 flexbox 以应用滚动偏移)
         perform_layout: ?*const fn (self: *Widget, ctx: *PaintContext) void = null,
         /// 帧动画 tick (可选; 动画控件实现, 每帧调用以推进动画)
         tick: ?*const fn (self: *Widget, delta_ms: u32) void = null,
@@ -208,6 +250,32 @@ pub const Widget = struct {
         return r;
     }
 
+    // ── Event Controllers ─────────────────────────────────────────────────
+
+    /// 挂接一个事件控制器 (GTK4: gtk_widget_add_controller)
+    pub fn addEventController(self: *Widget, allocator: std.mem.Allocator, ctrl: EventController) !void {
+        try self.event_controllers.append(allocator, ctrl);
+    }
+
+    /// 移除所有同名或等于 self_ptr 的控制器 (GTK4: gtk_widget_remove_controller)
+    pub fn removeEventController(self: *Widget, ctrl_self: *anyopaque) void {
+        var i: usize = 0;
+        while (i < self.event_controllers.items.len) {
+            if (self.event_controllers.items[i].self_ptr == ctrl_self) {
+                _ = self.event_controllers.orderedRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// 推进所有挂接的 controllers 的 tick 函数 (每帧由 app 主循环调用，或由 Widget.tick 调用)
+    pub fn tickControllers(self: *Widget, delta_ms: u32) void {
+        for (self.event_controllers.items) |*ctrl| {
+            if (ctrl.tick) |t| t(ctrl.self_ptr, delta_ms);
+        }
+    }
+
     // ── 布局 ──────────────────────────────────────────────────────────────
 
     /// 执行子树布局
@@ -235,7 +303,7 @@ pub const Widget = struct {
     }
 
     /// 布局子树: 优先使用 vtable.perform_layout 自定义布局, 否则默认 flexbox
-    /// (pub 供自定义布局容器如 ScrollView 递归布局子项)
+    /// (pub 供自定义布局容器如 ScrolledWindow 递归布局子项)
     pub fn layoutSubtree(self: *Widget, ctx: *PaintContext) void {
         if (self.vtable.perform_layout) |custom| {
             custom(self, ctx);
@@ -722,6 +790,16 @@ pub const Widget = struct {
         if (!self.state.visible) return;
         if (self.opacity <= 0.0) return;
 
+        // 每帧推进：动画/定时器/事件控制器 tick（零侵入，paint 前先让所有 widget 走到 tick）
+        const now_ms: u64 = perf.nowMs();
+        const delta_ms: u32 = if (self.last_paint_ms) |last|
+            @intCast(@min(now_ms -| last, 500)) // 首帧后正常推进，防后台切回跳变最大 500ms
+        else
+            0; // 首帧不推进
+        self.last_paint_ms = now_ms;
+        if (self.vtable.tick) |tick_fn| tick_fn(self, delta_ms);
+        self.tickControllers(delta_ms);
+
         // 脏矩形裁剪: 与脏区不相交的子树整体跳过
         // (阴影等超出自身范围的绘制, 由调用方外扩脏区 margin 保证)
         if (ctx.dirty) |d| {
@@ -745,7 +823,7 @@ pub const Widget = struct {
         // 绘制自身
         self.vtable.paint(self, ctx);
 
-        // 子树裁剪 (容器如 ScrollView 限制子项绘制范围; 先于子项绘制压入, 绘制后恢复)
+        // 子树裁剪 (容器如 ScrolledWindow 限制子项绘制范围; 先于子项绘制压入, 绘制后恢复)
         const prev_clip = if (self.clip_children) |clip_rect| ctx.renderer.pushClip(clip_rect) else null;
 
         // 递归子项 (传递偏移)
@@ -777,6 +855,7 @@ pub const Widget = struct {
         if (self.vtable.tick) |tick_fn| {
             tick_fn(self, delta_ms);
         }
+        self.tickControllers(delta_ms);
 
         for (self.children.items) |child| {
             child.tickTree(delta_ms);
@@ -927,7 +1006,7 @@ pub const Widget = struct {
         const target = switch (event.*) {
             .mouse_button => |mb| self.hitTest(@floatFromInt(mb.x), @floatFromInt(mb.y)),
             .mouse_move => |mm| self.hitTest(@floatFromInt(mm.x), @floatFromInt(mm.y)),
-            // 滚轮事件命中鼠标下方的控件 (使 ScrollView 等在鼠标悬停于其范围内时随滚轮滚动)
+            // 滚轮事件命中鼠标下方的控件 (使 ScrolledWindow 等在鼠标悬停于其范围内时随滚轮滚动)
             .scroll => self.hitTest(ectx.mouse_x, ectx.mouse_y),
             // 键盘 / 文本输入 / IME 事件路由到焦点控件 (聚焦的 TextInput 接收字符与输入法提交),
             // 无焦点时回退根控件
@@ -952,6 +1031,10 @@ pub const Widget = struct {
 
         // 目标处理 (disabled 控件不处理事件, 但仍允许冒泡)
         if (!target.state.disabled) {
+            // 先调用目标自身的 event controllers (GTK4: controllers 先于 widget.on_event)
+            for (target.event_controllers.items) |*ctrl| {
+                if (ctrl.handle_event(ctrl.self_ptr, target, event, ectx) == .handled) return .handled;
+            }
             if (target.vtable.on_event) |handler| {
                 if (handler(target, event, ectx) == .handled) return .handled;
             }
@@ -960,6 +1043,11 @@ pub const Widget = struct {
         // 冒泡到父级
         var current = target.parent;
         while (current) |w| {
+            if (!w.state.disabled) {
+                for (w.event_controllers.items) |*ctrl| {
+                    if (ctrl.handle_event(ctrl.self_ptr, w, event, ectx) == .handled) return .handled;
+                }
+            }
             if (w.vtable.on_event) |handler| {
                 if (handler(w, event, ectx) == .handled) return .handled;
             }

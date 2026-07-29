@@ -21,11 +21,55 @@ pub const ListBoxSelectionMode = enum {
     multiple,
 };
 
+/// ListBoxRow — ListBox 的独立行对象
+///
+/// GTK 对应: GtkListBoxRow
+/// 每个 append 到 ListBox 的子 Widget 都被包装为 ListBoxRow，
+/// 提供 index / header / activatable / selectable 等状态和 GTK4 风格访问 API。
 pub const ListBoxRow = struct {
     child: *Widget,
+    index: ?usize = null,
     selected: bool = false,
     activatable: bool = true,
     selectable: bool = true,
+    header: ?*Widget = null,
+    user_data: ?*anyopaque = null,
+
+    pub fn getChild(self: *ListBoxRow) *Widget {
+        return self.child;
+    }
+
+    pub fn getIndex(self: *ListBoxRow) ?usize {
+        return self.index;
+    }
+
+    pub fn isSelected(self: *ListBoxRow) bool {
+        return self.selected;
+    }
+
+    pub fn setActivatable(self: *ListBoxRow, v: bool) void {
+        self.activatable = v;
+    }
+
+    pub fn getActivatable(self: *ListBoxRow) bool {
+        return self.activatable;
+    }
+
+    pub fn setSelectable(self: *ListBoxRow, v: bool) void {
+        self.selectable = v;
+    }
+
+    pub fn getSelectable(self: *ListBoxRow) bool {
+        return self.selectable;
+    }
+
+    pub fn setHeader(self: *ListBoxRow, header: ?*Widget) void {
+        self.header = header;
+    }
+
+    pub fn getHeader(self: *ListBoxRow) ?*Widget {
+        return self.header;
+    }
 };
 
 pub const ListBox = struct {
@@ -88,19 +132,44 @@ pub const ListBox = struct {
     }
 
     pub fn append(self: *Self, child: *Widget) !void {
-        try self.rows.append(self.allocator, .{
-            .child = child,
-        });
-        try self.base.addChild(self.allocator, child);
-        self.base.markLayoutDirty();
+        _ = try self.appendRow(child);
     }
 
     pub fn insert(self: *Self, index: usize, child: *Widget) !void {
-        try self.rows.insert(self.allocator, index, .{
-            .child = child,
-        });
+        _ = try self.insertRow(index, child);
+    }
+
+    // ── GTK4 ListBox 风格：返回 *ListBoxRow ──────────────────────────────────
+
+    fn reindex(self: *Self, from: usize) void {
+        for (self.rows.items[from..], from..) |*r, i| {
+            r.index = i;
+        }
+    }
+
+    pub fn appendRow(self: *Self, child: *Widget) !*ListBoxRow {
+        const idx: usize = self.rows.items.len;
+        try self.rows.append(self.allocator, .{ .child = child, .index = idx });
         try self.base.addChild(self.allocator, child);
         self.base.markLayoutDirty();
+        return &self.rows.items[idx];
+    }
+
+    pub fn prependRow(self: *Self, child: *Widget) !*ListBoxRow {
+        try self.rows.insert(self.allocator, 0, .{ .child = child, .index = 0 });
+        self.reindex(1);
+        try self.base.addChild(self.allocator, child);
+        self.base.markLayoutDirty();
+        return &self.rows.items[0];
+    }
+
+    pub fn insertRow(self: *Self, position: usize, child: *Widget) !*ListBoxRow {
+        const pos = @min(position, self.rows.items.len);
+        try self.rows.insert(self.allocator, pos, .{ .child = child, .index = pos });
+        self.reindex(pos + 1);
+        try self.base.addChild(self.allocator, child);
+        self.base.markLayoutDirty();
+        return &self.rows.items[pos];
     }
 
     pub fn remove(self: *Self, index: usize) void {
@@ -108,12 +177,22 @@ pub const ListBox = struct {
         const row = self.rows.items[index];
         row.child.vtable.destroy(row.child, self.allocator);
         self.rows.orderedRemove(index);
+        self.reindex(index);
         self.base.markLayoutDirty();
+    }
+
+    pub fn removeRow(self: *Self, row: *ListBoxRow) void {
+        if (row.index) |i| self.remove(i);
     }
 
     pub fn getRowAtIndex(self: *Self, index: usize) ?*Widget {
         if (index >= self.rows.items.len) return null;
         return self.rows.items[index].child;
+    }
+
+    pub fn getRowPtrAtIndex(self: *Self, index: usize) ?*ListBoxRow {
+        if (index >= self.rows.items.len) return null;
+        return &self.rows.items[index];
     }
 
     pub fn getRowCount(self: *Self) usize {

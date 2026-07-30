@@ -156,6 +156,12 @@ pub const X11Backend = struct {
             self.screen.white_pixel,
         };
 
+        // 窗口按 *物理* 像素创建: 逻辑尺寸 × 缩放因子 (HiDPI 清晰化).
+        // 框架内部 fb_width/fb_height 仍保持逻辑语义, Vulkan 会把逻辑缓冲放大到
+        // 物理 swapchain (逻辑 × content_scale). 这样 X11 与 Wayland 行为一致.
+        const phys_w: u32 = @intFromFloat(@as(f32, @floatFromInt(desc.width)) * self.scale_factor);
+        const phys_h: u32 = @intFromFloat(@as(f32, @floatFromInt(desc.height)) * self.scale_factor);
+
         _ = xcb.xcb_create_window(
             self.conn,
             xcb.XCB_COPY_FROM_PARENT,
@@ -163,8 +169,8 @@ pub const X11Backend = struct {
             self.screen.root,
             0,
             0,
-            @intCast(desc.width),
-            @intCast(desc.height),
+            @intCast(phys_w),
+            @intCast(phys_h),
             0,
             xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT,
             self.screen.root_visual,
@@ -202,15 +208,15 @@ pub const X11Backend = struct {
             var hints: [18]u32 = .{0} ** 18;
             // flags: PSize | PMinSize | PMaxSize
             hints[0] = 0x08 | 0x10 | 0x20;
-            // width, height (index 2, 3)
-            hints[2] = desc.width;
-            hints[3] = desc.height;
+            // width, height (index 2, 3) - 物理像素 (与窗口创建一致)
+            hints[2] = phys_w;
+            hints[3] = phys_h;
             if (!desc.resizable) {
-                // 固定大小: min = max = 窗口尺寸
-                hints[4] = desc.width; // min_width
-                hints[5] = desc.height; // min_height
-                hints[6] = desc.width; // max_width
-                hints[7] = desc.height; // max_height
+                // 固定大小: min = max = 窗口尺寸 (物理)
+                hints[4] = phys_w; // min_width
+                hints[5] = phys_h; // min_height
+                hints[6] = phys_w; // max_width
+                hints[7] = phys_h; // max_height
             } else {
                 hints[4] = desc.min_width orelse 1;
                 hints[5] = desc.min_height orelse 1;
@@ -265,6 +271,10 @@ pub const X11Backend = struct {
             self.screen.*.white_pixel,
         };
 
+        // 子窗口同样按物理像素创建 (逻辑 × scale), 与主窗口一致
+        const sub_phys_w: u32 = @intFromFloat(@as(f32, @floatFromInt(width)) * self.scale_factor);
+        const sub_phys_h: u32 = @intFromFloat(@as(f32, @floatFromInt(height)) * self.scale_factor);
+
         _ = xcb.xcb_create_window(
             self.conn,
             xcb.XCB_COPY_FROM_PARENT,
@@ -272,8 +282,8 @@ pub const X11Backend = struct {
             self.screen.*.root,
             100,
             100,
-            @intCast(width),
-            @intCast(height),
+            @intCast(sub_phys_w),
+            @intCast(sub_phys_h),
             0,
             xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT,
             self.screen.*.root_visual,

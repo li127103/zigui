@@ -8,6 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const is_linux = builtin.os.tag == .linux;
 const is_macos = builtin.os.tag == .macos;
+const is_windows = builtin.os.tag == .windows;
 
 /// 帧时间统计 (滚动窗口)
 pub const FrameStats = struct {
@@ -103,6 +104,14 @@ pub fn nowNs() u64 {
     } else if (comptime is_macos) {
         // mach_absolute_time 为固定频率计数; 用于帧间隔测量 (比例一致即可)
         return std.c.mach_absolute_time();
+    } else if (comptime is_windows) {
+        var counter: std.os.windows.LARGE_INTEGER = undefined;
+        var freq: std.os.windows.LARGE_INTEGER = undefined;
+        _ = std.os.windows.ntdll.RtlQueryPerformanceCounter(&counter);
+        _ = std.os.windows.ntdll.RtlQueryPerformanceFrequency(&freq);
+        const c: u64 = @bitCast(counter);
+        const f: u64 = @bitCast(freq);
+        return (c * std.time.ns_per_s) / f;
     } else {
         @compileError("perf: unsupported platform clock");
     }

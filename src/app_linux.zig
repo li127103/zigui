@@ -298,7 +298,8 @@ pub const App = struct {
                 // Vulkan + Wayland Surface
                 const wl_display = self.backend.wayland.getDisplay();
                 const wl_surface = self.backend.wayland.getSurface();
-                self.vk_device = try vulkan.VulkanDevice.initWayland(allocator, wl_display, wl_surface, config.width, config.height);
+                const wl_scale = self.backend.wayland.getScaleFactor();
+                self.vk_device = try vulkan.VulkanDevice.initWayland(allocator, wl_display, wl_surface, config.width, config.height, wl_scale);
 
                 self.glyph_atlas = try atlas_mod.GlyphAtlas.init(allocator, 2048, 2048);
                 try self.glyph_atlas.createTexture(&self.vk_device);
@@ -308,7 +309,7 @@ pub const App = struct {
 
                 // 设置 Wayland 事件队列
                 self.backend.wayland.event_queue = &self.event_queue;
-                self.scale_factor = self.backend.wayland.getScaleFactor();
+                self.scale_factor = wl_scale;
                 self.vk_device.setContentScale(self.scale_factor);
             },
             .x11 => {
@@ -340,13 +341,14 @@ pub const App = struct {
                         }) catch return error.BackendInitFailed;
                         const wl_display = self.backend.wayland.getDisplay();
                         const wl_surface = self.backend.wayland.getSurface();
-                        self.vk_device = try vulkan.VulkanDevice.initWayland(allocator, wl_display, wl_surface, config.width, config.height);
+                        const wl_scale = self.backend.wayland.getScaleFactor();
+                        self.vk_device = try vulkan.VulkanDevice.initWayland(allocator, wl_display, wl_surface, config.width, config.height, wl_scale);
                         self.glyph_atlas = try atlas_mod.GlyphAtlas.init(allocator, 2048, 2048);
                         try self.glyph_atlas.createTexture(&self.vk_device);
                         self.renderer = renderer2d.Renderer2D.init(allocator, &self.vk_device);
                         self.renderer.glyph_atlas = &self.glyph_atlas;
                         self.backend.wayland.event_queue = &self.event_queue;
-                        self.scale_factor = self.backend.wayland.getScaleFactor();
+                        self.scale_factor = wl_scale;
                         self.vk_device.setContentScale(self.scale_factor);
                         return self;
                     }
@@ -372,7 +374,8 @@ pub const App = struct {
 
         const conn = x11_backend.getConnection();
         const window_id = x11_backend.getWindowId();
-        var vk_device = try vulkan.VulkanDevice.init(allocator, @ptrCast(conn), window_id, config.width, config.height);
+        const x11_scale = x11_backend.getScaleFactor();
+        var vk_device = try vulkan.VulkanDevice.init(allocator, @ptrCast(conn), window_id, config.width, config.height, x11_scale);
 
         var glyph_atlas = try atlas_mod.GlyphAtlas.init(allocator, 2048, 2048);
         try glyph_atlas.createTexture(&vk_device);
@@ -396,7 +399,7 @@ pub const App = struct {
         };
         self.renderer.device = &self.vk_device;
         self.renderer.glyph_atlas = &self.glyph_atlas;
-        self.scale_factor = self.backend.x11.getScaleFactor();
+        self.scale_factor = x11_scale;
         self.vk_device.setContentScale(self.scale_factor);
     }
 
@@ -628,7 +631,7 @@ pub const App = struct {
             const win = win_ptr.*;
             if (!win.visible) continue;
             // 开始帧
-            const size = win.vk_device.beginFrame() orelse continue;
+            const size = win.gpu_device.beginFrame() orelse continue;
             win.width = size[0];
             win.height = size[1];
 
@@ -646,7 +649,7 @@ pub const App = struct {
             win.frame_stats.endFrame();
 
             // 结束帧
-            win.vk_device.endFrame();
+            win.gpu_device.endFrame();
         }
     }
 
@@ -701,9 +704,20 @@ pub const App = struct {
                 switch (ev) {
                     .close_requested => self.running = false,
                     .resize => |r| {
-                        self.fb_width = r.width;
-                        self.fb_height = r.height;
-                        self.vk_device.setDrawableSize(r.width, r.height);
+                        // X11 的 configure 事件给出的是物理窗口尺寸 (窗口按物理像素创建),
+                        // 需除以 scale_factor 还原为逻辑尺寸, 与 fb_width 的逻辑语义一致;
+                        // Wayland 的 configure 已是逻辑尺寸 (buffer_scale 由合成器处理), 无需换算。
+                        const logical_w: u32 = switch (self.backend_kind) {
+                            .x11 => @intFromFloat(@as(f32, @floatFromInt(r.width)) / self.scale_factor),
+                            .wayland => r.width,
+                        };
+                        const logical_h: u32 = switch (self.backend_kind) {
+                            .x11 => @intFromFloat(@as(f32, @floatFromInt(r.height)) / self.scale_factor),
+                            .wayland => r.height,
+                        };
+                        self.fb_width = logical_w;
+                        self.fb_height = logical_h;
+                        self.vk_device.setDrawableSize(logical_w, logical_h);
                         self.invalidate();
                     },
                     .maximize => |m| {

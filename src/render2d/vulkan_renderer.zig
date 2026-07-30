@@ -1,10 +1,13 @@
 //! 基础 2D 渲染器 (Linux Vulkan 路径)
 
 const std = @import("std");
+const builtin = @import("builtin");
+const is_windows = builtin.os.tag == .windows;
+const is_linux = builtin.os.tag == .linux;
 const vulkan = @import("../gpu/vulkan.zig");
 const math = @import("../math.zig");
-const atlas_mod = @import("../text/atlas_vulkan.zig");
-const text_layout_ft = @import("../text/layout_ft.zig");
+const atlas_mod = if (is_windows) @import("../text/atlas_vulkan_win32.zig") else @import("../text/atlas_vulkan.zig");
+const text_layout_ft = if (is_linux) @import("../text/layout_ft.zig") else void;
 const png = @import("../image/png.zig");
 
 const Vertex2D = vulkan.Vertex2D;
@@ -358,11 +361,17 @@ pub const Renderer2D = struct {
     }
 
     /// 绘制文本布局 (多行, 镜像 Metal renderer.drawText)
-    pub fn drawTextLayout(self: *Renderer2D, tl: *const text_layout_ft.TextLayout, origin_x: f32, origin_y: f32, color: math.Color) !void {
-        for (tl.lines.items) |line| {
-            const baseline_y = origin_y + line.baseline_y;
-            try self.drawText(line.glyphs.items, origin_x, baseline_y, color);
+    /// tl 在 Linux 上为 *const text_layout_ft.TextLayout; 其他平台 (Windows) 暂未实现多行布局。
+    pub fn drawTextLayout(self: *Renderer2D, tl: *const anyopaque, origin_x: f32, origin_y: f32, color: math.Color) !void {
+        if (comptime is_linux) {
+            const real = @as(*const text_layout_ft.TextLayout, @alignCast(@ptrCast(tl)));
+            for (real.lines.items) |line| {
+                const baseline_y = origin_y + line.baseline_y;
+                try self.drawText(line.glyphs.items, origin_x, baseline_y, color);
+            }
+            return;
         }
+        return;
     }
 
     // ── 纹理 (RGBA 图片) ───────────────────────────────────────────────

@@ -1,5 +1,5 @@
 //! zigui - 跨平台 GPU 加速 GUI 框架
-//! 支持 Windows (Win32+D3D11) / Linux (X11+Wayland+Vulkan) / macOS (Cocoa+Metal)
+//! 支持 Windows (Win32+D3D12/D3D11) / Linux (X11+Wayland+Vulkan) / macOS (Cocoa+Metal)
 
 const builtin = @import("builtin");
 const is_linux = builtin.os.tag == .linux;
@@ -92,16 +92,19 @@ pub const text_layout = if (is_macos) @import("text/layout.zig") else void;
 // Linux 平台特定导出
 pub const x11 = if (is_linux) @import("pal/x11.zig") else void;
 pub const wayland = if (is_linux) @import("pal/wayland.zig") else void;
-pub const vulkan = if (is_linux) @import("gpu/vulkan.zig") else void;
+pub const vulkan = if (is_linux or is_windows) @import("gpu/vulkan.zig") else void;
 pub const freetype = if (is_linux) @import("text/freetype.zig") else void;
 pub const atlas_vulkan = if (is_linux) @import("text/atlas_vulkan.zig") else void;
-pub const vulkan_renderer = if (is_linux) @import("render2d/vulkan_renderer.zig") else void;
+pub const atlas_vulkan_win32 = if (is_windows) @import("text/atlas_vulkan_win32.zig") else void;
+pub const vulkan_renderer = if (is_linux or is_windows) @import("render2d/vulkan_renderer.zig") else void;
 pub const text_layout_ft = if (is_linux) @import("text/layout_ft.zig") else void;
 
 // Windows 平台特定导出
 pub const win32 = if (is_windows) @import("pal/win32.zig") else void;
 pub const d3d11 = if (is_windows) @import("gpu/d3d11.zig") else void;
+pub const d3d12 = if (is_windows) @import("gpu/d3d12.zig") else void;
 pub const d3d11_renderer = if (is_windows) @import("render2d/d3d11_renderer.zig") else void;
+pub const d3d_renderer = if (is_windows) @import("render2d/d3d_renderer.zig") else void;
 pub const dwrite = if (is_windows) @import("text/dwrite.zig") else void;
 pub const atlas_d3d11 = if (is_windows) @import("text/atlas_d3d11.zig") else void;
 

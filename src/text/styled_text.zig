@@ -183,7 +183,7 @@ pub fn measureSpans(allocator: std.mem.Allocator, spans: []const TextSpan) math.
 
 /// 绘制 Span 数组 (从左到右, 统一基线)
 pub fn drawSpans(
-    renderer: *r2d.Renderer2D,
+    renderer: anytype,
     allocator: std.mem.Allocator,
     spans: []const TextSpan,
     x: f32,
@@ -296,7 +296,7 @@ pub fn measureText(allocator: std.mem.Allocator, text: []const u8, style: TextSt
 
 /// 绘制文本 (创建字体 → 布局 → 渲染, 一次性调用)
 pub fn drawText(
-    renderer: *r2d.Renderer2D,
+    renderer: anytype,
     allocator: std.mem.Allocator,
     text: []const u8,
     x: f32,
@@ -341,7 +341,7 @@ pub fn drawText(
 
 /// 绘制单行文本并裁剪到 max_width (超出部分不绘制); 返回实际绘制宽度
 pub fn drawTextClipped(
-    renderer: *r2d.Renderer2D,
+    renderer: anytype,
     allocator: std.mem.Allocator,
     text: []const u8,
     x: f32,

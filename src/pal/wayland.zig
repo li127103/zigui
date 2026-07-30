@@ -193,6 +193,16 @@ pub const WaylandBackend = struct {
         _ = wl.xdg_surface_add_listener(xdg_surface, &xdg_surface_listener, self);
         _ = wl.xdg_toplevel_add_listener(toplevel, &xdg_toplevel_listener, self);
 
+        // 必须在首次提交/configure 之前记录 surface 引用:
+        // 否则 xdg_surface configure 回调里 self.surface 仍为 null,
+        // 导致 wl_surface_set_buffer_scale 永不调用 → HiDPI 下窗口被当成
+        // 放大后的 buffer 尺寸 (占满屏幕)
+        self.surface = surface;
+        self.xdg_surface = xdg_surface;
+        self.toplevel = toplevel;
+        self.width = desc.width;
+        self.height = desc.height;
+
         // 提交 surface 以触发首次 configure
         wl.wl_surface_commit(surface);
         _ = wl.wl_display_roundtrip(self.display);
@@ -203,12 +213,6 @@ pub const WaylandBackend = struct {
             wl.xdg_toplevel_set_max_size(toplevel, @intCast(desc.width), @intCast(desc.height));
             wl.wl_surface_commit(surface);
         }
-
-        self.surface = surface;
-        self.xdg_surface = xdg_surface;
-        self.toplevel = toplevel;
-        self.width = desc.width;
-        self.height = desc.height;
 
         // 绑定 seat 的 keyboard 和 pointer
         if (self.seat) |seat| {
@@ -623,7 +627,14 @@ fn outputScale(
     factor: i32,
 ) callconv(.c) void {
     const self: *WaylandBackend = @ptrCast(@alignCast(data.?));
-    if (factor >= 1) self.scale_factor = @floatFromInt(factor);
+    if (factor >= 1) {
+        self.scale_factor = @floatFromInt(factor);
+        // 同步把 buffer_scale 设为 pending 状态 (在下一帧 wl_surface_commit 时生效),
+        // 这样无论 output.scale 与 xdg configure 哪个先到, 窗口缩放都正确 (避免 HiDPI 下窗口过大)
+        if (self.surface) |s| {
+            wl.wl_surface_set_buffer_scale(s, factor);
+        }
+    }
 }
 
 const output_listener = wl.wl_output_listener{

@@ -3,14 +3,22 @@
 
 const std = @import("std");
 const math = @import("../math.zig");
+const builtin = @import("builtin");
+const is_windows = builtin.os.tag == .windows;
 
 const vk = @cImport({
-    @cDefine("VK_USE_PLATFORM_XCB_KHR", "1");
-    @cDefine("VK_USE_PLATFORM_WAYLAND_KHR", "1");
+    if (is_windows) {
+        @cDefine("VK_USE_PLATFORM_WIN32_KHR", "1");
+        // vulkan_win32.h 依赖 windows.h 的类型 (HINSTANCE/HWND 等)
+        @cInclude("windows.h");
+    } else {
+        @cDefine("VK_USE_PLATFORM_XCB_KHR", "1");
+        @cDefine("VK_USE_PLATFORM_WAYLAND_KHR", "1");
+    }
     @cInclude("vulkan/vulkan.h");
 });
 
-const xcb = @cImport({
+const xcb = if (is_windows) void else @cImport({
     @cInclude("xcb/xcb.h");
 });
 
@@ -93,7 +101,8 @@ pub const VulkanDevice = struct {
     /// 内容缩放因子 (HiDPI): 逻辑像素 × scale = 物理像素
     content_scale: f32 = 1.0,
 
-    pub fn init(allocator: std.mem.Allocator, xcb_conn_ptr: *anyopaque, window_id: u32, width: u32, height: u32) !VulkanDevice {
+    pub fn init(allocator: std.mem.Allocator, xcb_conn_ptr: *anyopaque, window_id: u32, width: u32, height: u32, scale: f32) !VulkanDevice {
+        if (comptime is_windows) return error.NotImplemented;
         // 1. 创建 Instance
         const instance = try createInstance(allocator);
 
@@ -110,8 +119,13 @@ pub const VulkanDevice = struct {
         const device = device_result.device;
         const queue = device_result.queue;
 
-        // 5. 创建 Swapchain
-        const swapchain_result = try createSwapchain(allocator, physical_device, device, surface, width, height, null);
+        // 5. 创建 Swapchain (物理缓冲 = 逻辑尺寸 × 缩放因子)
+        //    注意: width/height 是逻辑像素, fb_width/fb_height 也始终保持逻辑语义,
+        //    物理 swapchain 由 recreateSwapchain 用 fb × content_scale 处理; 这里
+        //    初始即按物理尺寸创建, 避免首帧模糊以及与 recreate 行为不一致。
+        const phys_w: u32 = @intFromFloat(@as(f32, @floatFromInt(width)) * scale);
+        const phys_h: u32 = @intFromFloat(@as(f32, @floatFromInt(height)) * scale);
+        const swapchain_result = try createSwapchain(allocator, physical_device, device, surface, phys_w, phys_h, null);
 
         // 6. 创建 Render Pass
         const render_pass = try createRenderPass(device, swapchain_result.format);
@@ -176,27 +190,31 @@ pub const VulkanDevice = struct {
             .image_available = sync.image_available,
             .render_finished = sync.render_finished,
             .in_flight = sync.in_flight,
-            .fb_width = swapchain_result.extent.width,
-            .fb_height = swapchain_result.extent.height,
+            .fb_width = width,
+            .fb_height = height,
+            .content_scale = scale,
         };
     }
 
     /// Wayland 初始化入口
-    pub fn initWayland(allocator: std.mem.Allocator, wl_display_ptr: *anyopaque, wl_surface_ptr: *anyopaque, width: u32, height: u32) !VulkanDevice {
+    pub fn initWayland(allocator: std.mem.Allocator, wl_display_ptr: *anyopaque, wl_surface_ptr: *anyopaque, width: u32, height: u32, scale: f32) !VulkanDevice {
+        if (comptime is_windows) return error.NotImplemented;
         const instance = try createInstance(allocator);
         const surface = try createWaylandSurface(instance, wl_display_ptr, wl_surface_ptr);
-        return initWithSurface(allocator, instance, surface, width, height);
+        return initWithSurface(allocator, instance, surface, width, height, scale);
     }
 
     /// 共享初始化逻辑 (surface 已创建)
-    fn initWithSurface(allocator: std.mem.Allocator, instance: vk.VkInstance, surface: vk.VkSurfaceKHR, width: u32, height: u32) !VulkanDevice {
+    fn initWithSurface(allocator: std.mem.Allocator, instance: vk.VkInstance, surface: vk.VkSurfaceKHR, width: u32, height: u32, scale: f32) !VulkanDevice {
         const phys_result = try selectPhysicalDevice(instance, surface);
         const physical_device = phys_result.device;
         const queue_family = phys_result.queue_family;
         const device_result = try createLogicalDevice(physical_device, queue_family);
         const device = device_result.device;
         const queue = device_result.queue;
-        const swapchain_result = try createSwapchain(allocator, physical_device, device, surface, width, height, null);
+        const phys_w: u32 = @intFromFloat(@as(f32, @floatFromInt(width)) * scale);
+        const phys_h: u32 = @intFromFloat(@as(f32, @floatFromInt(height)) * scale);
+        const swapchain_result = try createSwapchain(allocator, physical_device, device, surface, phys_w, phys_h, null);
         const render_pass = try createRenderPass(device, swapchain_result.format);
         const desc = try createDescriptorSet(device);
         const solid_pipe = try createSolidPipeline(device, render_pass, swapchain_result.extent);
@@ -245,9 +263,18 @@ pub const VulkanDevice = struct {
             .image_available = sync.image_available,
             .render_finished = sync.render_finished,
             .in_flight = sync.in_flight,
-            .fb_width = swapchain_result.extent.width,
-            .fb_height = swapchain_result.extent.height,
+            .fb_width = width,
+            .fb_height = height,
+            .content_scale = scale,
         };
+    }
+
+    /// Win32 初始化入口 (Windows)
+    pub fn initWin32(allocator: std.mem.Allocator, hinstance: *anyopaque, hwnd: *anyopaque, width: u32, height: u32, scale: f32) !VulkanDevice {
+        if (comptime !is_windows) return error.NotImplemented;
+        const instance = try createInstance(allocator);
+        const surface = try createWin32Surface(instance, hinstance, hwnd);
+        return initWithSurface(allocator, instance, surface, width, height, scale);
     }
 
     pub fn deinit(self: *VulkanDevice) void {
@@ -1189,11 +1216,17 @@ fn createInstance(allocator: std.mem.Allocator) !vk.VkInstance {
         .apiVersion = vk.VK_API_VERSION_1_1,
     };
 
-    const extensions = [_][*:0]const u8{
-        "VK_KHR_surface",
-        "VK_KHR_xcb_surface",
-        "VK_KHR_wayland_surface",
-    };
+    const extensions = if (comptime is_windows)
+        [_][*:0]const u8{
+            "VK_KHR_surface",
+            "VK_KHR_win32_surface",
+        }
+    else
+        [_][*:0]const u8{
+            "VK_KHR_surface",
+            "VK_KHR_xcb_surface",
+            "VK_KHR_wayland_surface",
+        };
 
     const create_info = vk.VkInstanceCreateInfo{
         .sType = vk.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -1213,6 +1246,7 @@ fn createInstance(allocator: std.mem.Allocator) !vk.VkInstance {
 }
 
 fn createXcbSurface(instance: vk.VkInstance, xcb_conn_ptr: *anyopaque, window_id: u32) !vk.VkSurfaceKHR {
+    if (comptime is_windows) return error.NotImplemented;
     const create_info = vk.VkXcbSurfaceCreateInfoKHR{
         .sType = vk.VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
         .pNext = null,
@@ -1228,6 +1262,7 @@ fn createXcbSurface(instance: vk.VkInstance, xcb_conn_ptr: *anyopaque, window_id
 }
 
 fn createWaylandSurface(instance: vk.VkInstance, wl_display_ptr: *anyopaque, wl_surface_ptr: *anyopaque) !vk.VkSurfaceKHR {
+    if (comptime is_windows) return error.NotImplemented;
     const create_info = vk.VkWaylandSurfaceCreateInfoKHR{
         .sType = vk.VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
         .pNext = null,
@@ -1238,6 +1273,22 @@ fn createWaylandSurface(instance: vk.VkInstance, wl_display_ptr: *anyopaque, wl_
 
     var surface: vk.VkSurfaceKHR = undefined;
     const result = vk.vkCreateWaylandSurfaceKHR(instance, &create_info, null, &surface);
+    if (result != vk.VK_SUCCESS) return error.SurfaceCreationFailed;
+    return surface;
+}
+
+fn createWin32Surface(instance: vk.VkInstance, hinstance: *anyopaque, hwnd: *anyopaque) !vk.VkSurfaceKHR {
+    if (comptime !is_windows) return error.NotImplemented;
+    const create_info = vk.VkWin32SurfaceCreateInfoKHR{
+        .sType = vk.VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+        .pNext = null,
+        .flags = 0,
+        .hinstance = @alignCast(@ptrCast(hinstance)),
+        .hwnd = @alignCast(@ptrCast(hwnd)),
+    };
+
+    var surface: vk.VkSurfaceKHR = undefined;
+    const result = vk.vkCreateWin32SurfaceKHR(instance, &create_info, null, &surface);
     if (result != vk.VK_SUCCESS) return error.SurfaceCreationFailed;
     return surface;
 }

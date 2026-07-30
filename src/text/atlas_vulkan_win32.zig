@@ -1,17 +1,19 @@
-//! D3D11 Glyph Atlas (Windows)
+//! Vulkan Glyph Atlas (Windows)
 //!
-//! 字形图集缓存, shelf packing 算法, 与 Metal/Vulkan 版 atlas 接口对齐。
-//! 实际绘制时将字形通过 D2D1 光栅化到 WIC 内存位图 (RGBA8), 再作为 RGBA8 纹理上传 D3D11。
-//! 渲染器 textured 管线读取 alpha 通道作为字形覆盖 (我们写入 R=G=B=A=覆盖)。
+//! Windows 上的 Vulkan 字形图集: 用 DirectWrite 做 shaping, D2D1+WIC 光栅化到单通道
+//! alpha 像素 (与 atlas_vulkan 的像素布局一致), 再上传到 Vulkan 纹理。
+//! 接口 (createTexture / getOrRasterize / flush / texture 字段) 与 atlas_vulkan 对齐,
+//! 以便 vulkan_renderer 在 Windows 上直接复用。
 //!
-//! 注意: 仅在 Windows 目标下编译。D2D1/WIC/dwrite 头文件统一 merge 进单个 cImport 命名空间 `dwrite`。
+//! 注意: 仅在 Windows 目标下真正运行; 非 Windows 下 cImport 为 void, 真实逻辑被
+//! `if (comptime is_windows)` 守卫, 仅做类型/结构校验。
 
 const std = @import("std");
 const builtin = @import("builtin");
 const is_windows = builtin.os.tag == .windows;
 
 const math = @import("../math.zig");
-const d3d11_mod = @import("../gpu/d3d11.zig");
+const vulkan = @import("../gpu/vulkan.zig");
 const dwmod = @import("dwrite.zig");
 const dwrite = if (is_windows) @cImport({
     @cDefine("WIN32_LEAN_AND_MEAN", "1");
@@ -45,11 +47,16 @@ pub const GlyphAtlas = struct {
     allocator: std.mem.Allocator,
     width: u32,
     height: u32,
+    /// 单通道 alpha 像素 (与 atlas_vulkan 布局一致)
     pixels: []u8,
-    texture: if (is_windows) ?*d3d11_mod.TextureHandle else void = null,
+    texture: ?vulkan.TextureHandle = null,
     dirty: bool = false,
+    dirty_x0: u32 = 0,
+    dirty_y0: u32 = 0,
+    dirty_x1: u32 = 0,
+    dirty_y1: u32 = 0,
 
-    // D2D1/WIC 光栅化资源 (懒初始化)
+    // D2D1/WIC 光栅化资源 (懒初始化, 仅 Windows)
     d2d_factory: if (is_windows) ?*dwrite.ID2D1Factory else void = null,
     wic_factory: if (is_windows) ?*dwrite.IWICImagingFactory else void = null,
     cell_bitmap: if (is_windows) ?*dwrite.IWICBitmap else void = null,
@@ -58,16 +65,14 @@ pub const GlyphAtlas = struct {
     cell_size: u32 = 64,
     initialized: bool = false,
 
-    // shelf packing 游标
-    pack_x: u32 = 0,
-    pack_y: u32 = 0,
-    row_h: u32 = 0,
+    // shelf packing
+    shelves: std.ArrayListUnmanaged(Shelf) = .{ .items = &.{}, .capacity = 0 },
 
-    // 脏矩形 (用于 flush 增量上传)
-    dirty_x0: u32 = 0,
-    dirty_y0: u32 = 0,
-    dirty_x1: u32 = 0,
-    dirty_y1: u32 = 0,
+    pub const Shelf = struct {
+        y: u32,
+        height: u32,
+        x_cursor: u32,
+    };
 
     pub fn init(allocator: std.mem.Allocator, width: u32, height: u32) !GlyphAtlas {
         const pixels = try allocator.alloc(u8, width * height);
@@ -81,28 +86,24 @@ pub const GlyphAtlas = struct {
     }
 
     pub fn deinit(self: *GlyphAtlas) void {
-        if (!is_windows) {
-            self.allocator.free(self.pixels);
-            return;
+        if (is_windows) {
+            releaseCom(self.brush);
+            releaseCom(self.rt);
+            releaseCom(self.cell_bitmap);
+            releaseCom(self.wic_factory);
+            releaseCom(self.d2d_factory);
         }
-        releaseCom(self.brush);
-        releaseCom(self.rt);
-        releaseCom(self.cell_bitmap);
-        releaseCom(self.wic_factory);
-        releaseCom(self.d2d_factory);
-        if (self.texture) |t| self.allocator.destroy(t);
+        self.shelves.deinit(self.allocator);
         self.allocator.free(self.pixels);
     }
 
-    pub fn createTexture(self: *GlyphAtlas, device: *d3d11_mod.D3D11Device) !void {
+    /// 创建 GPU 纹理 (Vulkan)
+    pub fn createTexture(self: *GlyphAtlas, device: *vulkan.VulkanDevice) !void {
         if (!is_windows) return error.NotImplemented;
-        const handle = device.createTextureRGBA(self.width, self.height) orelse
-            return error.TextureCreationFailed;
-        const boxed = try self.allocator.create(d3d11_mod.TextureHandle);
-        boxed.* = handle;
-        self.texture = boxed;
-        // 初始上传整张 (空) 图集
-        device.updateTextureRegionRGBA(boxed.*, 0, 0, self.width, self.height, self.pixels, self.width);
+        const tex = device.createTexture(self.width, self.height) orelse return error.TextureCreationFailed;
+        self.texture = tex;
+        device.updateTextureRegion(tex, 0, 0, self.width, self.height, self.pixels, self.width);
+        device.prepareTextureForSampling(tex);
     }
 
     fn ensureRenderTargets(self: *GlyphAtlas) !void {
@@ -157,7 +158,7 @@ pub const GlyphAtlas = struct {
 
     pub fn getOrRasterize(
         self: *GlyphAtlas,
-        device: *d3d11_mod.D3D11Device,
+        device: *vulkan.VulkanDevice,
         font: *const dwmod.DwFont,
         glyph_id: u32,
         size: f32,
@@ -179,19 +180,15 @@ pub const GlyphAtlas = struct {
         const top_bearing: f32 = @as(f32, @floatFromInt(gm.topSideBearing)) * scale;
         const ascent = font.metrics.ascent;
 
-        // 在图集里找位置 (shelf packing)
-        if (self.pack_x + cell > self.width) {
-            self.pack_x = 0;
-            self.pack_y += self.row_h;
-            self.row_h = 0;
-        }
-        if (self.pack_y + cell > self.height) return error.AtlasFull;
-        const ox: u32 = self.pack_x;
-        const oy: u32 = self.pack_y;
-        self.pack_x += cell;
-        self.row_h = @max(self.row_h, cell);
+        // shelf packing 分配位置
+        const pos = self.allocateShelf(cell, cell) orelse blk: {
+            try self.grow(device);
+            break :blk self.allocateShelf(cell, cell) orelse return error.AtlasFull;
+        };
+        const ox: u32 = pos.x;
+        const oy: u32 = pos.y;
 
-        // 清单元位图并绘制字形
+        // 光栅化到单元位图 (D2D1/WIC), 取 alpha 通道写入图集
         const rt = self.rt.?;
         _ = rt.*.lpVtbl.*.BeginDraw.?(rt);
         const clear = dwrite.D2D1_COLOR_F{ .r = 0, .g = 0, .b = 0, .a = 0 };
@@ -214,7 +211,7 @@ pub const GlyphAtlas = struct {
         rt.*.lpVtbl.*.DrawGlyphRun.?(rt, origin, &run, self.brush.?, dwrite.D2D1_DRAW_TEXT_OPTIONS_NONE, dwrite.DWRITE_MEASURING_MODE_NATURAL);
         if (rt.*.lpVtbl.*.EndDraw.?(rt, null, null) != dwrite.S_OK) return error.GlyphRenderFailed;
 
-        // 读回单元位图像素 (BGRA premultiplied)
+        // 读回单元位图像素 (BGRA), 取 alpha 通道写入图集单通道缓冲
         var lock: ?*dwrite.IWICBitmapLock = null;
         const rc = dwrite.WICRect{ .X = 0, .Y = 0, .Width = @intCast(cell), .Height = @intCast(cell) };
         if (self.cell_bitmap.?.*.lpVtbl.*.Lock.?(self.cell_bitmap.?, &rc, dwrite.WICBitmapLockRead, &lock) != dwrite.S_OK or lock == null) {
@@ -225,30 +222,15 @@ pub const GlyphAtlas = struct {
         _ = lock.?.*.lpVtbl.*.GetDataPointer.?(lock.?, &data_size, &data_ptr);
         const stride: u32 = cell * 4;
 
-        // 把单元像素 (取 alpha 通道) 拷贝到图集, 同时构造 RGBA 上传缓冲
-        const rgba = try self.allocator.alloc(u8, cell * cell * 4);
-        defer self.allocator.free(rgba);
         var py: u32 = 0;
         while (py < cell) : (py += 1) {
             var px: u32 = 0;
             while (px < cell) : (px += 1) {
-                const src = py * stride + px * 4;
-                const a = data_ptr[src + 3]; // BGRA 中 alpha 在最高字节
-                const dst = (oy + py) * self.width + (ox + px);
-                self.pixels[dst] = a;
-                const ri = (py * cell + px) * 4;
-                rgba[ri] = a;
-                rgba[ri + 1] = a;
-                rgba[ri + 2] = a;
-                rgba[ri + 3] = a;
+                const a = data_ptr[py * stride + px * 4 + 3]; // BGRA 中 alpha 在最高字节
+                self.pixels[(oy + py) * self.width + (ox + px)] = a;
             }
         }
         releaseCom(lock);
-
-        // 上传该单元到 D3D11
-        if (self.texture) |tex| {
-            device.updateTextureRegionRGBA(tex.*, ox, oy, cell, cell, rgba, cell * 4);
-        }
 
         // 扩展脏矩形
         if (!self.dirty) {
@@ -279,32 +261,95 @@ pub const GlyphAtlas = struct {
         };
     }
 
-    pub fn flush(self: *GlyphAtlas, device: *d3d11_mod.D3D11Device) void {
-        if (!is_windows) return;
+    pub fn flush(self: *GlyphAtlas, device: *vulkan.VulkanDevice) void {
         if (!self.dirty) return;
-        if (self.texture) |tex| {
-            const x0 = self.dirty_x0;
-            const y0 = self.dirty_y0;
-            const w = self.dirty_x1 - x0;
-            const h = self.dirty_y1 - y0;
-            if (w == 0 or h == 0) return;
-            // 构造该脏区 RGBA 上传缓冲
-            const rgba = self.allocator.alloc(u8, w * h * 4) catch return;
-            defer self.allocator.free(rgba);
-            var py: u32 = 0;
-            while (py < h) : (py += 1) {
-                var px: u32 = 0;
-                while (px < w) : (px += 1) {
-                    const a = self.pixels[(y0 + py) * self.width + (x0 + px)];
-                    const ri = (py * w + px) * 4;
-                    rgba[ri] = a;
-                    rgba[ri + 1] = a;
-                    rgba[ri + 2] = a;
-                    rgba[ri + 3] = a;
-                }
-            }
-            device.updateTextureRegionRGBA(tex.*, x0, y0, w, h, rgba, w * 4);
+        const tex = self.texture orelse return;
+
+        device.prepareTextureForTransfer(tex);
+
+        const rw = self.dirty_x1 - self.dirty_x0;
+        const rh = self.dirty_y1 - self.dirty_y0;
+        if (rw == 0 or rh == 0) {
+            self.dirty = false;
+            return;
         }
+
+        // 构造脏区单通道上传缓冲
+        const tmp = self.allocator.alloc(u8, rw * rh) catch {
+            self.dirty = false;
+            return;
+        };
+        defer self.allocator.free(tmp);
+        var row: u32 = 0;
+        while (row < rh) : (row += 1) {
+            const src = (self.dirty_y0 + row) * self.width + self.dirty_x0;
+            const dst = row * rw;
+            @memcpy(tmp[dst .. dst + rw], self.pixels[src .. src + rw]);
+        }
+        device.updateTextureRegion(tex, self.dirty_x0, self.dirty_y0, rw, rh, tmp, rw);
+        device.prepareTextureForSampling(tex);
+
+        self.dirty = false;
+    }
+
+    pub const ShelfPos = struct { x: u32, y: u32 };
+
+    fn allocateShelf(self: *GlyphAtlas, w: u32, h: u32) ?ShelfPos {
+        const padding: u32 = 1;
+
+        for (self.shelves.items) |*shelf| {
+            if (shelf.height >= h and shelf.x_cursor + w + padding <= self.width) {
+                const pos = ShelfPos{ .x = shelf.x_cursor, .y = shelf.y };
+                shelf.x_cursor += w + padding;
+                return pos;
+            }
+        }
+
+        var next_y: u32 = 0;
+        for (self.shelves.items) |shelf| {
+            next_y = @max(next_y, shelf.y + shelf.height + padding);
+        }
+
+        if (next_y + h + padding > self.height) return null;
+        if (w + padding > self.width) return null;
+
+        self.shelves.append(self.allocator, .{
+            .y = next_y,
+            .height = h + padding,
+            .x_cursor = w + padding,
+        }) catch return null;
+
+        return ShelfPos{ .x = 0, .y = next_y };
+    }
+
+    /// 扩容: 翻倍宽高 (上限 8192), 迁移像素, 重算缓存 UV, 重建 GPU 纹理
+    fn grow(self: *GlyphAtlas, device: *vulkan.VulkanDevice) !void {
+        const max_dim: u32 = 8192;
+        if (self.width >= max_dim and self.height >= max_dim) return error.AtlasFull;
+
+        const new_width = @min(self.width * 2, max_dim);
+        const new_height = @min(self.height * 2, max_dim);
+
+        const new_pixels = try self.allocator.alloc(u8, new_width * new_height);
+        @memset(new_pixels, 0);
+        var row: usize = 0;
+        while (row < self.height) : (row += 1) {
+            const src = row * self.width;
+            const dst = row * new_width;
+            @memcpy(new_pixels[dst .. dst + self.width], self.pixels[src .. src + self.width]);
+        }
+        self.allocator.free(self.pixels);
+        self.pixels = new_pixels;
+
+        self.width = new_width;
+        self.height = new_height;
+
+        if (self.texture) |old_tex| device.destroyTexture(old_tex);
+        const new_tex = device.createTexture(new_width, new_height) orelse return error.TextureCreationFailed;
+        self.texture = new_tex;
+        device.updateTextureRegion(new_tex, 0, 0, new_width, new_height, self.pixels, new_width);
+        device.prepareTextureForSampling(new_tex);
+
         self.dirty = false;
     }
 };

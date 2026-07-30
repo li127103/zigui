@@ -77,7 +77,7 @@ pub const model = struct {
 pub const application = @import("application.zig");
 
 // 平台特定 App
-pub const app = if (is_windows) @import("app_windows.zig") else if (is_linux) @import("app_linux.zig") else @import("app.zig");
+pub const app = if (is_windows) @import("app_windows.zig") else if (is_linux) @import("app_linux.zig") else @import("app_macos.zig");
 
 // macOS 平台特定导出
 pub const cocoa = if (is_macos) @import("pal/cocoa.zig") else void;

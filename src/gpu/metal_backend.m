@@ -348,14 +348,14 @@ bool zigui_metal_begin_frame_dirty(ZiguiMetalDevice *dev,
         /* 夹紧脏矩形; 无效或首帧 → 全屏 */
         uint32_t sx, sy, sw, sh;
         if (fresh || dirty_w <= 0 || dirty_h <= 0) {
-            sx = 0; sy = 0; sw = dev->fbWidth; sh = dev->fbHeight;
+            sx = 0; sy = 0; sw = (uint32_t)ds.width; sh = (uint32_t)ds.height;
         } else {
             int32_t x0 = dirty_x < 0 ? 0 : dirty_x;
             int32_t y0 = dirty_y < 0 ? 0 : dirty_y;
-            int32_t x1 = dirty_x + dirty_w > (int32_t)dev->fbWidth  ? (int32_t)dev->fbWidth  : dirty_x + dirty_w;
-            int32_t y1 = dirty_y + dirty_h > (int32_t)dev->fbHeight ? (int32_t)dev->fbHeight : dirty_y + dirty_h;
+            int32_t x1 = dirty_x + dirty_w > (int32_t)ds.width  ? (int32_t)ds.width  : dirty_x + dirty_w;
+            int32_t y1 = dirty_y + dirty_h > (int32_t)ds.height ? (int32_t)ds.height : dirty_y + dirty_h;
             if (x1 <= x0 || y1 <= y0) {
-                sx = 0; sy = 0; sw = dev->fbWidth; sh = dev->fbHeight;
+                sx = 0; sy = 0; sw = (uint32_t)ds.width; sh = (uint32_t)ds.height;
             } else {
                 sx = (uint32_t)x0; sy = (uint32_t)y0;
                 sw = (uint32_t)(x1 - x0); sh = (uint32_t)(y1 - y0);

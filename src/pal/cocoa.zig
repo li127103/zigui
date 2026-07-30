@@ -164,12 +164,25 @@ pub const CocoaBackend = struct {
                 .window_id = wid,
                 .codepoint = @intCast(u.text_input.codepoint),
             } },
-            c.ZIGUI_EVENT_IME_COMPOSITION => .{ .ime_composition = .{
-                .cursor_start = u.ime_composition.cursor_start,
-                .cursor_end = u.ime_composition.cursor_end,
+            c.ZIGUI_EVENT_IME_COMPOSITION => .{ .ime_preedit = .{
+                .window_id = wid,
+                .text = undefined,
+                .len = 0,
+                .cursor_begin = @intCast(u.ime_composition.cursor_start),
+                .cursor_end = @intCast(u.ime_composition.cursor_end),
             } },
-            c.ZIGUI_EVENT_IME_COMMIT => .{ .ime_commit = {} },
-            c.ZIGUI_EVENT_IME_CANCEL => .{ .ime_cancel = {} },
+            c.ZIGUI_EVENT_IME_COMMIT => .{ .ime_commit = .{
+                .window_id = wid,
+                .text = undefined,
+                .len = 0,
+            } },
+            c.ZIGUI_EVENT_IME_CANCEL => .{ .ime_preedit = .{
+                .window_id = wid,
+                .text = undefined,
+                .len = 0,
+                .cursor_begin = 0,
+                .cursor_end = 0,
+            } },
             c.ZIGUI_EVENT_FILE_DROP => blk: {
                 var fd: event_mod.FileDrop = .{
                     .x = @intFromFloat(u.file_drop.x),

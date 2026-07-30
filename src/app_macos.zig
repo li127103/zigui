@@ -459,12 +459,12 @@ pub const App = struct {
                         self.invalidate();
                     },
                     .file_drop => |fd| {
-                        self.file_drop = fd;
+                        self.file_drop = fd.file_drop;
                         self.invalidate();
                     },
                     .touch => |t| {
                         if (self.touch_count < self.touches.len) {
-                            self.touches[self.touch_count] = t;
+                            self.touches[self.touch_count] = t.touch;
                             self.touch_count += 1;
                         }
                         self.invalidate();

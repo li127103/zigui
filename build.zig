@@ -72,6 +72,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "gallery-navigation", .path = "examples/gallery_navigation.zig" },
         .{ .name = "gallery-grid", .path = "examples/gallery_grid.zig" },
         .{ .name = "gallery-misc", .path = "examples/gallery_misc.zig" },
+        .{ .name = "gallery-menus2", .path = "examples/gallery_menus2.zig" },
     };
     for (examples) |ex| {
         const exe = b.addExecutable(.{

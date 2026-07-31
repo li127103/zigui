@@ -77,9 +77,9 @@ pub const PopoverMenu = struct {
     /// Action 执行器
     action_group: ?ActionGroup = null,
     /// 由 setMenuModel 分配的子菜单控件
-    owned_widget_menus: std.ArrayListUnmanaged(*Menu) = .{},
+    owned_widget_menus: std.ArrayListUnmanaged(*Menu) = .{ .items = &[_]*Menu{}, .capacity = 0 },
     /// 由 setMenuModel 分配的 ActionClickCtx
-    owned_action_ctxs: std.ArrayListUnmanaged(*ActionClickCtx) = .{},
+    owned_action_ctxs: std.ArrayListUnmanaged(*ActionClickCtx) = .{ .items = &[_]*ActionClickCtx{}, .capacity = 0 },
 
     on_menu_open: ?*const fn (self: *PopoverMenu) void = null,
     on_menu_close: ?*const fn (self: *PopoverMenu) void = null,
@@ -123,7 +123,8 @@ pub const PopoverMenu = struct {
         return self;
     }
 
-    pub fn destroy(self: *Self, allocator: Allocator) void {
+    pub fn destroy(widget: *Widget, allocator: Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(widget));
         // 销毁所有 setMenuModel 分配的资源
         for (self.owned_widget_menus.items) |wm| wm.destroy(allocator);
         self.owned_widget_menus.deinit(allocator);
@@ -266,33 +267,29 @@ pub const PopoverMenu = struct {
     // ── Widget vtable (简单代理 Popover) ─────────────────────────────
     fn measure(
         widget: *Widget,
-        ctx: *const PaintContext,
-        available_w: f32,
-        available_h: f32,
-    ) math.Vec2 {
+        ctx: *PaintContext,
+        constraints: layout_mod.Constraints,
+    ) math.Size(f32) {
         const self: *Self = @ptrCast(@alignCast(widget));
-        return self.popover.base.vtable.measure(&self.popover.base, ctx, available_w, available_h);
+        return self.popover.base.vtable.measure(&self.popover.base, ctx, constraints);
     }
 
-    fn layout(widget: *Widget, rect: math.Rect, ctx: *const PaintContext) void {
+    fn paint(widget: *Widget, ctx: *PaintContext) void {
         const self: *Self = @ptrCast(@alignCast(widget));
-        self.popover.base.vtable.layout(&self.popover.base, rect, ctx);
+        self.popover.base.vtable.paint(&self.popover.base, ctx);
     }
 
-    fn paint(widget: *Widget, ctx: *const PaintContext, rect: math.Rect) void {
+    fn onEvent(widget: *Widget, ev: *const pal.Event, ctx: *EventContext) EventResult {
         const self: *Self = @ptrCast(@alignCast(widget));
-        self.popover.base.vtable.paint(&self.popover.base, ctx, rect);
-    }
-
-    fn onEvent(widget: *Widget, ev: *const Widget.Event, ctx: *const EventContext) EventResult {
-        const self: *Self = @ptrCast(@alignCast(widget));
-        return self.popover.base.vtable.on_event(&self.popover.base, ev, ctx) orelse .ignored;
+        if (self.popover.base.vtable.on_event) |cb| {
+            return cb(&self.popover.base, ev, ctx);
+        }
+        return .ignored;
     }
 
     const vtable = Widget.VTable{
         .type_name = "PopoverMenu",
         .measure = measure,
-        .layout = layout,
         .paint = paint,
         .on_event = onEvent,
         .focusable = false,

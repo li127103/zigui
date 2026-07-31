@@ -20,7 +20,7 @@ const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 const Allocator = std.mem.Allocator;
-const Event = pal.event_mod.Event;
+const Event = pal.Event;
 const Popover = popover_mod.Popover;
 const Menu = menu_mod.Menu;
 
@@ -68,16 +68,16 @@ pub const SplitButton = struct {
         const self = try allocator.create(SplitButton);
         const duped = if (label_text.len > 0) try allocator.dupe(u8, label_text) else &.{};
         self.* = .{
-            .base = .{
-                .vtable = &vtable,
-                .id = widget_mod.genWidgetId(),
-                .cursor = .pointing_hand,
-            },
+        .base = .{
+            .vtable = &vtable,
+            .id = widget_mod.genWidgetId(),
+            .cursor = .pointing_hand,
+        },
             .allocator = allocator,
             .label = duped,
             .label_dup = duped,
         };
-        self.base.accessibility = .{ .role = .split_button, .label = self.label };
+        self.base.accessibility = .{ .role = .button, .label = self.label };
         return self;
     }
 
@@ -133,11 +133,11 @@ pub const SplitButton = struct {
 
     fn togglePopover(self: *SplitButton) void {
         if (self.popover) |p| {
-            if (p.isVisible()) {
-                p.hide();
+            if (p.base.state.visible) {
+                p.popdown();
                 self.is_open = false;
             } else {
-                p.show();
+                p.popup();
                 self.is_open = true;
             }
         } else if (self.menu_model) |_| {
@@ -160,7 +160,7 @@ fn destroyVTable(w: *Widget, allocator: Allocator) void {
     self.destroy(allocator);
 }
 
-fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size {
+fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
     const self: *SplitButton = @fieldParentPtr("base", w);
     var mw: f32 = self.padding_h * 2 + self.arrow_area_w;
     var mh: f32 = self.padding_v * 2;
@@ -192,7 +192,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
     const ry = ctx.offset_y + w.rect.y;
     const rw = w.rect.width;
     const rh = w.rect.height;
-    const enabled = !w.isDisabled();
+    const enabled = !w.state.disabled;
     const arrow_x_val = rw - self.arrow_area_w;
     const divider_x_val = arrow_x_val - self.divider_width;
 
@@ -262,23 +262,16 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
     }
     if (total_cw < content_w) content_x += (content_w - total_cw) / 2;
 
-    const tc: math.Color = if (enabled) self.text_color else self.text_color.withAlpha(0.5);
+    const tc: math.Color = if (enabled) self.text_color else math.Color{ .r = self.text_color.r, .g = self.text_color.g, .b = self.text_color.b, .a = 128 };
     if (has_icon) {
         const iy = content_y + (content_h - self.icon_size) / 2;
-        icons_mod.drawIcon(ctx.allocator, ctx.renderer, self.icon_name.?, .{
-            .x = content_x,
-            .y = iy,
-            .size = self.icon_size,
-            .color = tc,
-        }) catch {};
+        icons_mod.drawIcon(ctx.renderer, content_x, iy, self.icon_size, tc, self.icon_name.?) catch {};
         content_x += self.icon_size + 6;
     }
     if (has_text) {
         const ts = styled_text.measureText(ctx.allocator, self.label, .{ .font_size = self.font_size });
         const ty = content_y + (content_h - ts.height) / 2;
-        styled_text.drawText(ctx, self.label, .{
-            .x = content_x,
-            .y = ty,
+        styled_text.drawText(ctx.renderer, ctx.allocator, self.label, content_x, ty, .{
             .color = tc,
             .font_size = self.font_size,
         });
@@ -288,25 +281,20 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
     const arrow_cx = rx + arrow_x_val + self.arrow_area_w / 2;
     const arrow_cy = ry + rh / 2;
     const arrow_size_val: f32 = 8;
-    const ac: math.Color = if (enabled) tc else tc.withAlpha(0.5);
+    const ac: math.Color = if (enabled) tc else math.Color{ .r = tc.r, .g = tc.g, .b = tc.b, .a = 128 };
     const arrow_icon: icons_mod.IconName = switch (self.arrow_direction) {
-        .down => icons_mod.IconName.chevron_down,
-        .up => icons_mod.IconName.chevron_up,
-        .left => icons_mod.IconName.chevron_left,
-        .right => icons_mod.IconName.chevron_right,
+        .down => icons_mod.IconName.arrow_down,
+        .up => icons_mod.IconName.arrow_up,
+        .left => icons_mod.IconName.arrow_left,
+        .right => icons_mod.IconName.arrow_right,
     };
-    icons_mod.drawIcon(ctx.allocator, ctx.renderer, arrow_icon, .{
-        .x = arrow_cx - arrow_size_val / 2,
-        .y = arrow_cy - arrow_size_val / 2,
-        .size = arrow_size_val,
-        .color = ac,
-    }) catch {};
+    icons_mod.drawIcon(ctx.renderer, arrow_cx - arrow_size_val / 2, arrow_cy - arrow_size_val / 2, arrow_size_val, ac, arrow_icon) catch {};
 }
 
 fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
     const self: *SplitButton = @fieldParentPtr("base", w);
     const abs_rect = w.absoluteRect();
-    const enabled = !w.isDisabled();
+    const enabled = !w.state.disabled;
     if (!enabled) return .ignored;
 
     switch (event.*) {

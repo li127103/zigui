@@ -9,6 +9,7 @@
 //! - 支持缓冲状态、错误状态、结束状态
 
 const std = @import("std");
+const perf = @import("../perf.zig");
 const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
@@ -623,7 +624,7 @@ fn onEvent(w: *Widget, event: *const Event, _: *EventContext) EventResult {
     const self: *Video = @fieldParentPtr("base", w);
     const abs_rect = w.absoluteRect();
 
-    const now_ts = std.time.milliTimestamp();
+    const now_ts = @as(i64, @intCast(perf.nowMs()));
     const now_u: u64 = @intCast(if (now_ts < 0) 0 else now_ts);
 
     switch (event.*) {

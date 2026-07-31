@@ -14,6 +14,7 @@
 //! - 单元格支持 widget 渲染 (不仅仅是字符串)
 
 const std = @import("std");
+const perf = @import("../perf.zig");
 const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
@@ -910,7 +911,7 @@ fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
                     const ri_f = @floor(row_y / self.row_height);
                     if (ri_f < 0 or ri_f >= @as(f32, @floatFromInt(self.effectiveRowCount()))) return .ignored;
                     const ri: usize = @intFromFloat(ri_f);
-                    const now_ts = std.time.milliTimestamp();
+                    const now_ts = @as(i64, @intCast(perf.nowMs()));
                     const now_u: u64 = @intCast(if (now_ts < 0) 0 else now_ts);
 
                     // 双击检测

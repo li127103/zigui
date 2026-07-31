@@ -14,6 +14,7 @@
 //! - 高级用户可替换 Renderer 以直接调用 Vulkan / OpenGL 上下文
 
 const std = @import("std");
+const perf = @import("../perf.zig");
 const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
@@ -278,7 +279,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
 
     // FPS
     if (self.show_debug) {
-        const now = std.time.milliTimestamp();
+        const now = @as(i64, @intCast(perf.nowMs()));
         const now_u: u64 = @intCast(if (now < 0) 0 else now);
         self.frame_count += 1;
         if (now_u - self.last_fps_time >= 1000) {

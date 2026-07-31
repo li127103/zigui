@@ -51,7 +51,7 @@ pub const Place = struct {
 pub const PlacesSidebar = struct {
     base: Widget,
     allocator: std.mem.Allocator,
-    places: std.ArrayListUnmanaged(Place) = .{},
+    places: std.ArrayListUnmanaged(Place) = .{ .items = &[_]Place{}, .capacity = 0 },
     selected_index: ?usize = null,
     hovered_index: ?usize = null,
 
@@ -100,8 +100,8 @@ pub const PlacesSidebar = struct {
             .text_color = opts.text_color,
             .on_location_changed = opts.on_location_changed,
         };
-        self.base.accessibility = .{ .role = .list_box };
-        self.base.cursor = .default;
+        self.base.accessibility = .{ .role = .list };
+        self.base.cursor = .arrow;
 
         if (opts.include_defaults) {
             try self.addDefaultPlaces();
@@ -126,7 +126,7 @@ pub const PlacesSidebar = struct {
 
     /// 添加默认位置
     pub fn addDefaultPlaces(self: *Self) !void {
-        const home = std.posix.getenv("HOME") orelse "/home/user";
+        const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "/home/user";
 
         try self.addPlace("Home", home, .home);
         try self.addPlace("Desktop", tryConcat(home, "/Desktop") catch "/home/user/Desktop", .desktop);
@@ -359,7 +359,6 @@ pub const PlacesSidebar = struct {
                 .font_size = self.header_font_size,
                 .color = self.header_text_color,
                 .font_weight = 600,
-                .font_family = "System",
             },
         );
 
@@ -435,10 +434,10 @@ pub const PlacesSidebar = struct {
                     const cur = self.selected_index orelse 0;
                     const cnt = self.places.items.len;
                     if (cnt == 0) return .ignored;
-                    if (key.key == .up or key.key == .arrow_up) {
+                    if (key.key == .up) {
                         if (cur > 0) self.activatePlace(cur - 1);
                         return .handled;
-                    } else if (key.key == .down or key.key == .arrow_down) {
+                    } else if (key.key == .down) {
                         if (cur < cnt - 1) self.activatePlace(cur + 1);
                         return .handled;
                     } else if (key.key == .home) {

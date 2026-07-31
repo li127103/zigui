@@ -12,6 +12,7 @@
 //! - 更现代的选中样式
 
 const std = @import("std");
+const perf = @import("../perf.zig");
 const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
@@ -614,7 +615,7 @@ fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
                 if (rel_x < 0 or rel_x >= abs_rect.width or rel_y < 0 or rel_y >= abs_rect.height) return .ignored;
                 if (mb.state == .pressed) {
                     const idx = self.itemIndexAt(abs_rect.width, abs_rect.height, rel_x, rel_y) orelse return .handled;
-                    const now_ts = std.time.milliTimestamp();
+                    const now_ts = @as(i64, @intCast(perf.nowMs()));
                     const now_u: u64 = @intCast(if (now_ts < 0) 0 else now_ts);
                     // 双击
                     if (self.last_click_item) |li| {

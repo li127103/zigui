@@ -28,7 +28,7 @@ pub const StackSidebar = struct {
     base: Widget,
     allocator: std.mem.Allocator,
     stack: ?*Stack = null,
-    page_titles: std.ArrayListUnmanaged([]const u8) = .{},
+    page_titles: std.ArrayListUnmanaged([]const u8) = .{ .items = &[_][]const u8{}, .capacity = 0 },
     hovered_item: ?usize = null,
 
     on_page_changed: ?*const fn (self: *StackSidebar, index: usize) void = null,
@@ -75,8 +75,8 @@ pub const StackSidebar = struct {
             .text_color = opts.text_color,
             .on_page_changed = opts.on_page_changed,
         };
-        self.base.accessibility = .{ .role = .list_box };
-        self.base.cursor = .default;
+        self.base.accessibility = .{ .role = .list };
+        self.base.cursor = .arrow;
         return self;
     }
 
@@ -173,8 +173,8 @@ pub const StackSidebar = struct {
         if (self.stack) |s| {
             if (index < s.base.children.items.len) {
                 const child = s.base.children.items[index];
-                if (child.accessibility.label.len > 0) {
-                    return child.accessibility.label;
+                if (child.accessibility.label) |lbl| {
+                    if (lbl.len > 0) return lbl;
                 }
             }
         }
@@ -309,12 +309,12 @@ pub const StackSidebar = struct {
                     const page_count = self.getPageCount();
                     if (page_count == 0) return .ignored;
 
-                    if (key.key == .up or key.key == .arrow_up) {
+                    if (key.key == .up) {
                         if (current > 0) {
                             self.switchToPage(current - 1);
                             return .handled;
                         }
-                    } else if (key.key == .down or key.key == .arrow_down) {
+                    } else if (key.key == .down) {
                         if (current < page_count - 1) {
                             self.switchToPage(current + 1);
                             return .handled;

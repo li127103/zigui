@@ -8,6 +8,7 @@
 //! GTK4 对应: GtkWindowHandle
 
 const std = @import("std");
+const perf = @import("../perf.zig");
 const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
@@ -122,7 +123,7 @@ fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
                 const mx: f32 = @floatFromInt(mb.x);
                 const my: f32 = @floatFromInt(mb.y);
                 if (mb.state == .pressed) {
-                    const now_ts = std.time.milliTimestamp();
+                    const now_ts = @as(i64, @intCast(perf.nowMs()));
                     const now_u: u64 = @intCast(if (now_ts < 0) 0 else now_ts);
                     const double_click = (now_u - self.last_press_time) < 350;
                     self.last_press_time = now_u;

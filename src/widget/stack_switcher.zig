@@ -186,18 +186,19 @@ pub const StackSwitcher = struct {
 
     fn onEvent(w: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {
         const self: *StackSwitcher = @fieldParentPtr("base", w);
+        _ = ectx;
 
         switch (event.*) {
             .mouse_move => |ev| {
-                const local_x = ev.x - (ectx.offset_x + w.rect.x);
-                const local_y = ev.y - (ectx.offset_y + w.rect.y);
+                const local_x: f32 = @as(f32, @floatFromInt(ev.x)) - w.rect.x;
+                const local_y: f32 = @as(f32, @floatFromInt(ev.y)) - w.rect.y;
                 if (local_x >= 0 and local_x < w.rect.width and local_y >= 0 and local_y < w.rect.height) {
                     const idx = self.indexAt(local_x);
                     if (idx != self.hover_index) {
                         self.hover_index = idx;
                         self.base.markDirty();
                     }
-                    return .consumed;
+                    return .handled;
                 } else {
                     if (self.hover_index != null) {
                         self.hover_index = null;
@@ -206,17 +207,17 @@ pub const StackSwitcher = struct {
                     return .ignored;
                 }
             },
-            .mouse_down => |ev| {
+            .mouse_button => |ev| {
                 if (ev.button != .left) return .ignored;
-                const local_x = ev.x - (ectx.offset_x + w.rect.x);
-                const local_y = ev.y - (ectx.offset_y + w.rect.y);
+                const local_x: f32 = @as(f32, @floatFromInt(ev.x)) - w.rect.x;
+                const local_y: f32 = @as(f32, @floatFromInt(ev.y)) - w.rect.y;
                 if (local_x >= 0 and local_x < w.rect.width and local_y >= 0 and local_y < w.rect.height) {
                     if (self.indexAt(local_x)) |idx| {
                         if (self.stack) |s| {
                             s.setVisibleIndex(idx);
                         }
                         self.base.markDirty();
-                        return .consumed;
+                        return .handled;
                     }
                 }
                 return .ignored;

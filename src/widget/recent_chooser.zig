@@ -8,6 +8,7 @@
 //! - 支持 selectMultiple / getSelectedUris 多选模式
 
 const std = @import("std");
+const perf = @import("../perf.zig");
 const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
@@ -30,7 +31,7 @@ pub const RecentChooserWidget = struct {
     selected_index: ?usize = null,
     /// 多选模式
     select_multiple: bool = false,
-    selected_bits: std.DynamicBitSetUnmanaged = .empty,
+    selected_bits: std.DynamicBitSetUnmanaged = .{},
     /// 是否显示私有项
     show_private: bool = false,
     /// 最多显示项数 (null = 不限制)
@@ -75,8 +76,8 @@ pub const RecentChooserWidget = struct {
             .on_item_activated = opts.on_item_activated,
             .on_selection_changed = opts.on_selection_changed,
         };
-        self.base.accessibility = .{ .role = .list_box };
-        self.base.cursor = .default;
+        self.base.accessibility = .{ .role = .list };
+        self.base.cursor = .arrow;
         return self;
     }
 
@@ -254,8 +255,16 @@ pub const RecentChooserWidget = struct {
             }
             // 搜索文本过滤 (display_name 或 uri 包含)
             if (self.search_text.len > 0) {
-                const in_display = std.mem.indexOf(u8, &std.ascii.lowerString(std.heap.page_allocator, info.display_name) catch continue, &std.ascii.lowerString(std.heap.page_allocator, self.search_text) catch continue) != null;
-                const in_uri = std.mem.indexOf(u8, &std.ascii.lowerString(std.heap.page_allocator, info.uri) catch continue, &std.ascii.lowerString(std.heap.page_allocator, self.search_text) catch continue) != null;
+                const disp_low = std.ascii.allocLowerString(std.heap.page_allocator, info.display_name) catch continue;
+                defer std.heap.page_allocator.free(disp_low);
+                const search_low = std.ascii.allocLowerString(std.heap.page_allocator, self.search_text) catch continue;
+                defer std.heap.page_allocator.free(search_low);
+                const in_display = std.mem.indexOf(u8, disp_low, search_low) != null;
+                const in_uri = blk: {
+                    const uri_low = std.ascii.allocLowerString(std.heap.page_allocator, info.uri) catch break :blk false;
+                    defer std.heap.page_allocator.free(uri_low);
+                    break :blk std.mem.indexOf(u8, uri_low, search_low) != null;
+                };
                 if (!in_display and !in_uri) continue;
             }
             // Limit
@@ -433,7 +442,7 @@ pub const RecentChooserWidget = struct {
 
     fn formatTime(ts: i64) [32]u8 {
         var buf: [32]u8 = [_]u8{' '} ** 32;
-        const now = std.time.timestamp();
+        const now = @as(i64, @intCast(perf.nowMs()));
         const diff = now - ts;
         if (diff < 60) {
             @memcpy(buf[0..6], "刚刚");
@@ -453,9 +462,10 @@ pub const RecentChooserWidget = struct {
         } else {
             // 格式化为 MM-DD
             const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(ts) };
-            const day = epoch.getDayOfEpoch();
-            const month = day.month.numeric();
-            const d = day.day;
+            const year_day = epoch.getEpochDay().calculateYearDay();
+            const md = year_day.calculateMonthDay();
+            const month = md.month.numeric();
+            const d = md.day_index;
             const s = std.fmt.bufPrint(&buf, "{d:0>2}-{d:0>2}", .{ month, d }) catch return buf;
             return copyToBuf32(s);
         }
@@ -479,8 +489,8 @@ pub const RecentChooserWidget = struct {
                         const row: usize = @intFromFloat(@floor((ly + self.scroll_offset) / self.item_height));
                         const total = self.countFilteredItems();
                         if (row < total) {
-                            // Ctrl 点击切换多选 (如果支持)
-                            if (self.select_multiple and mb.modifiers.ctrl) {
+                            // 多选模式下点击切换选中态 (mouse_button 事件无 modifiers 字段)
+                            if (self.select_multiple) {
                                 if (self.isIndexSelected(row)) self.unselectIndex(row) else self.selectIndex(row);
                             } else {
                                 self.selectIndex(row);
@@ -497,10 +507,10 @@ pub const RecentChooserWidget = struct {
                     }
                 }
             },
-            .mouse_wheel => |mw| {
+            .scroll => |mw| {
                 const total_height: f32 = @as(f32, @floatFromInt(self.countFilteredItems())) * self.item_height;
                 const max_scroll = @max(0, total_height - w.rect.height);
-                self.scroll_offset = @max(0, @min(max_scroll, self.scroll_offset - @as(f32, @floatFromInt(mw.delta_y)) * self.item_height));
+                self.scroll_offset = @max(0.0, @min(max_scroll, self.scroll_offset - mw.delta * self.item_height));
                 w.markDirty();
                 return .handled;
             },

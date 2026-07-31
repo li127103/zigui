@@ -28,6 +28,13 @@ pub const WindowControlsSide = enum {
     right,
 };
 
+/// 窗口控制按钮类型 (最小化 / 最大化 / 关闭)
+pub const ControlButtonKind = enum {
+    min,
+    max,
+    close,
+};
+
 pub const WindowControls = struct {
     base: Widget,
     allocator: std.mem.Allocator,
@@ -102,7 +109,7 @@ pub const WindowControls = struct {
             .on_maximize = opts.on_maximize,
             .on_close = opts.on_close,
         };
-        self.base.accessibility = .{ .role = .group };
+        self.base.accessibility = .{ .role = .container };
         self.base.cursor = .pointing_hand;
         return self;
     }
@@ -132,7 +139,7 @@ pub const WindowControls = struct {
         var idx: usize = 0;
         var x: f32 = 0;
 
-        const button_order = if (self.side == .right) [_]enum { min, max, close }{ .min, .max, .close } else [_]enum { min, max, close }{ .close, .max, .min };
+        const button_order = if (self.side == .right) [_]ControlButtonKind{ .min, .max, .close } else [_]ControlButtonKind{ .close, .max, .min };
 
         for (button_order) |btype| {
             const show = switch (btype) {
@@ -157,8 +164,8 @@ pub const WindowControls = struct {
     }
 
     /// 获取指定位置的按钮索引和类型
-    fn findButtonAt(self: *const Self, x: f32, y: f32) ?struct { usize, enum { min, max, close } } {
-        const button_order = if (self.side == .right) [_]enum { min, max, close }{ .min, .max, .close } else [_]enum { min, max, close }{ .close, .max, .min };
+    fn findButtonAt(self: *const Self, x: f32, y: f32) ?struct { usize, ControlButtonKind } {
+        const button_order = if (self.side == .right) [_]ControlButtonKind{ .min, .max, .close } else [_]ControlButtonKind{ .close, .max, .min };
         var idx: usize = 0;
         var bx: f32 = 0;
 
@@ -299,7 +306,7 @@ pub const WindowControls = struct {
         const rx = ctx.offset_x + w.rect.x;
         const ry = ctx.offset_y + w.rect.y;
 
-        const button_order = if (self.side == .right) [_]enum { min, max, close }{ .min, .max, .close } else [_]enum { min, max, close }{ .close, .max, .min };
+        const button_order = if (self.side == .right) [_]ControlButtonKind{ .min, .max, .close } else [_]ControlButtonKind{ .close, .max, .min };
         var idx: usize = 0;
         var bx: f32 = rx;
 
@@ -351,7 +358,7 @@ pub const WindowControls = struct {
         }
     }
 
-    fn defaultBg(self: *const Self, btype: enum { min, max, close }) math.Color {
+    fn defaultBg(self: *const Self, btype: ControlButtonKind) math.Color {
         return switch (btype) {
             .min => self.minimize_bg,
             .max => self.maximize_bg,
@@ -359,7 +366,7 @@ pub const WindowControls = struct {
         };
     }
 
-    fn defaultColor(self: *const Self, btype: enum { min, max, close }) math.Color {
+    fn defaultColor(self: *const Self, btype: ControlButtonKind) math.Color {
         return switch (btype) {
             .min => self.minimize_color,
             .max => self.maximize_color,
@@ -367,7 +374,7 @@ pub const WindowControls = struct {
         };
     }
 
-    fn hoverColor(self: *const Self, btype: enum { min, max, close }) math.Color {
+    fn hoverColor(self: *const Self, btype: ControlButtonKind) math.Color {
         return switch (btype) {
             .min => self.hover_minimize_color,
             .max => self.hover_maximize_color,
@@ -375,7 +382,7 @@ pub const WindowControls = struct {
         };
     }
 
-    fn hoverCloseOr(self: *const Self, btype: enum { min, max, close }, pressed: bool) math.Color {
+    fn hoverCloseOr(self: *const Self, btype: ControlButtonKind, pressed: bool) math.Color {
         const base = switch (btype) {
             .min => self.hover_minimize_bg,
             .max => self.hover_maximize_bg,
@@ -383,9 +390,9 @@ pub const WindowControls = struct {
         };
         if (!pressed) return base;
         const f = 0.85;
-        const ri: f32 = base.r * f;
-        const gi: f32 = base.g * f;
-        const bi: f32 = base.b * f;
+        const ri: f32 = @as(f32, @floatFromInt(base.r)) * f;
+        const gi: f32 = @as(f32, @floatFromInt(base.g)) * f;
+        const bi: f32 = @as(f32, @floatFromInt(base.b)) * f;
         return .{
             .r = if (ri > 255) 255 else @intFromFloat(ri),
             .g = if (gi > 255) 255 else @intFromFloat(gi),

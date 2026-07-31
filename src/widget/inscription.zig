@@ -102,7 +102,7 @@ pub const Inscription = struct {
             .italic = opts.italic,
             .font_family = opts.font_family,
         };
-        self.base.accessibility = .{ .role = .label, .label = text_dup };
+        self.base.accessibility = .{ .role = .text, .label = text_dup };
         return self;
     }
 
@@ -143,11 +143,10 @@ pub const Inscription = struct {
     }
 
     fn measureTextSize(self: *const Self, alloc: std.mem.Allocator, max_w: ?f32) math.Size(f32) {
-        const opts: styled_text.TextOptions = .{
+        const opts: styled_text.TextStyle = .{
             .font_size = self.font_size,
-            .font_weight = self.font_weight,
+            .font_weight = @as(u16, @intCast(self.font_weight)),
             .italic = self.italic,
-            .font_family = self.font_family,
             .max_width = if (self.wrap) max_w else null,
         };
         return styled_text.measureText(alloc, self.text, opts);
@@ -203,14 +202,14 @@ pub const Inscription = struct {
                     const mid = (lo + hi) / 2;
                     const sub = text[0..mid];
                     // 加省略号一起测
-                    var tmp = std.ArrayList(u8).init(alloc);
-                    defer tmp.deinit();
-                    tmp.appendSlice(sub) catch break;
-                    tmp.appendSlice(ellipsis) catch break;
+                    var tmp = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+                    defer tmp.deinit(alloc);
+                    tmp.appendSlice(alloc, sub) catch break;
+                    tmp.appendSlice(alloc, ellipsis) catch break;
                     const combined = tmp.items;
                     const sz = styled_text.measureText(alloc, combined, .{
                         .font_size = self.font_size,
-                        .font_weight = self.font_weight,
+                        .font_weight = @as(u16, @intCast(self.font_weight)),
                         .italic = self.italic,
                     });
                     if (sz.width <= target_w) {
@@ -237,14 +236,14 @@ pub const Inscription = struct {
                 for (0..max_iter) |_| {
                     const mid = (lo + hi) / 2;
                     const sub = text[mid..text.len];
-                    var tmp = std.ArrayList(u8).init(alloc);
-                    defer tmp.deinit();
-                    tmp.appendSlice(ellipsis) catch break;
-                    tmp.appendSlice(sub) catch break;
+                    var tmp = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+                    defer tmp.deinit(alloc);
+                    tmp.appendSlice(alloc, ellipsis) catch break;
+                    tmp.appendSlice(alloc, sub) catch break;
                     const combined = tmp.items;
                     const sz = styled_text.measureText(alloc, combined, .{
                         .font_size = self.font_size,
-                        .font_weight = self.font_weight,
+                        .font_weight = @as(u16, @intCast(self.font_weight)),
                         .italic = self.italic,
                     });
                     if (sz.width <= target_w) {
@@ -274,15 +273,15 @@ pub const Inscription = struct {
                     const half = mid / 2;
                     const sub1 = text[0..half];
                     const sub2 = text[text.len - half..];
-                    var tmp = std.ArrayList(u8).init(alloc);
-                    defer tmp.deinit();
-                    tmp.appendSlice(sub1) catch break;
-                    tmp.appendSlice(ellipsis) catch break;
-                    tmp.appendSlice(sub2) catch break;
+                    var tmp = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+                    defer tmp.deinit(alloc);
+                    tmp.appendSlice(alloc, sub1) catch break;
+                    tmp.appendSlice(alloc, ellipsis) catch break;
+                    tmp.appendSlice(alloc, sub2) catch break;
                     const combined = tmp.items;
                     const sz = styled_text.measureText(alloc, combined, .{
                         .font_size = self.font_size,
-                        .font_weight = self.font_weight,
+                        .font_weight = @as(u16, @intCast(self.font_weight)),
                         .italic = self.italic,
                     });
                     if (sz.width <= target_w) {
@@ -378,10 +377,9 @@ pub const Inscription = struct {
 
         styled_text.drawText(ctx.renderer, ctx.allocator, text_to_draw, draw_x, draw_y, .{
             .font_size = self.font_size,
-            .font_weight = self.font_weight,
+            .font_weight = @as(u16, @intCast(self.font_weight)),
             .italic = self.italic,
             .color = self.text_color,
-            .font_family = self.font_family,
             .max_width = if (self.wrap) max_text_w else null,
         });
     }

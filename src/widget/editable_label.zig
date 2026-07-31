@@ -19,6 +19,7 @@ const layout_mod = @import("../layout/engine.zig");
 const Constraints = layout_mod.Constraints;
 const pal = @import("../pal/pal.zig");
 const text_layout = @import("../text/layout.zig");
+const styled_text = @import("../text/styled_text.zig");
 
 const EllipsizeMode = enum { none, start, middle, end };
 
@@ -160,7 +161,6 @@ pub const EditableLabel = struct {
     const vtable = Widget.VTable{
         .type_name = "editable_label",
         .measure = measure,
-        .layout = layoutFn,
         .paint = paint,
         .on_event = onEvent,
         .focusable = true,
@@ -181,7 +181,7 @@ pub const EditableLabel = struct {
         return c.constrain(.{ .width = chars * approx_char_w + 10, .height = line_h });
     }
 
-    fn layoutFn(_: *Widget, _: *PaintContext) void {}
+
 
     fn paint(w: *Widget, ctx: *PaintContext) void {
         const s: *Self = @fieldParentPtr("base", w);
@@ -197,9 +197,12 @@ pub const EditableLabel = struct {
             .height = w.rect.height,
         }, bg) catch {};
 
-        _ = text_layout.render; // 真实实现会走 text_layout 绘制
-        _ = color_show;
-        _ = text_show;
+        const tx: f32 = ctx.offset_x + w.rect.x + 4;
+        const ty: f32 = ctx.offset_y + w.rect.y + (w.rect.height - s.font_size) / 2.0;
+        styled_text.drawText(ctx.renderer, ctx.allocator, text_show, tx, ty, .{
+            .font_size = s.font_size,
+            .color = color_show,
+        });
     }
 
     fn onEvent(w: *Widget, event: *const pal.Event, _ectx: *EventContext) EventResult {

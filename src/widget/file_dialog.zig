@@ -1,39 +1,38 @@
 //! FileDialog 控件 - GTK4 文件选择对话框
 //!
-//! GTK4 新版简化 API (替代 GtkFileChooserDialog)。
-//! 与 FileChooserButton 配合使用。
+//! GTK4 新版简化 API (替代 GtkFileChooserDialog)，对应 GtkFileDialog。
 //!
-//! GTK4 对应: GtkFileDialog
+//! 与 GTK4 一致，FileDialog 不是一个嵌入窗口的控件 (Widget)，而是一个独立的
+//! 对话框对象：调用 openFile / saveFile / selectFolder 会以**原生文件对话框
+//! 形式打开一个新窗口**（优先系统原生 kdialog/zenity，失败回退内部实现），
+//! 用户选择/取消后通过回调返回结果。这正是"文件选择框一般打开新的窗口"的语义。
 
 const std = @import("std");
-const math = @import("../math.zig");
-const widget_mod = @import("widget.zig");
-const layout_mod = @import("../layout/engine.zig");
-const pal = @import("../pal/pal.zig");
+const model_filter = @import("../model/file_filter.zig");
+const FileChooserNative = @import("file_chooser_native.zig").FileChooserNative;
+const FileChooserAction = @import("file_chooser_native.zig").FileChooserAction;
 
-const Widget = widget_mod.Widget;
-const PaintContext = widget_mod.PaintContext;
 const Allocator = std.mem.Allocator;
 
 pub const FileDialogMode = enum { open, save, select_folder };
 
+/// 过滤器 (简化版: 名称 + glob 模式列表)
 pub const FileFilter = struct {
     name: []const u8 = "",
     patterns: []const []const u8 = &.{},
 };
 
 pub const FileDialogResult = union(enum) {
-    open: []const u8,      // 选中的文件路径
-    save: []const u8,      // 保存的目标路径
-    folder: []const u8,    // 选中的文件夹路径
-    multi_open: [][]const u8, // 多选文件 (暂保留)
+    open: []const u8,
+    save: []const u8,
+    folder: []const u8,
+    multi_open: [][]const u8,
     cancel: void,
 };
 
 pub const FileDialog = struct {
-    base: Widget,
     allocator: Allocator,
-    title: []const u8 = "Open File",
+    title: []const u8,
     title_dup: []const u8 = &.{},
     modal: bool = true,
     accept_label: []const u8 = "Open",
@@ -45,105 +44,152 @@ pub const FileDialog = struct {
     initial_name: []const u8 = "",
     initial_name_dup: []const u8 = &.{},
 
+    select_multiple: bool = false,
     filters: []const FileFilter = &.{},
+
     on_response: ?*const fn (self: *FileDialog, result: FileDialogResult) void = null,
+
+    /// 上一次结果中由本对象分配并拥有的路径；destroy / 下次打开时释放
+    last_result: FileDialogResult = .cancel,
+
+    const Self = @This();
 
     pub fn new(allocator: Allocator, title: []const u8) !*FileDialog {
         const self = try allocator.create(FileDialog);
         const title_dup = try allocator.dupe(u8, title);
         self.* = .{
-            .base = .{
-                .vtable = &vtable,
-                .id = widget_mod.genWidgetId(),
-            },
             .allocator = allocator,
             .title = title_dup,
             .title_dup = title_dup,
         };
-        self.base.accessibility = .{ .role = .dialog, .label = self.title };
         return self;
     }
 
-    pub fn destroy(self: *FileDialog, allocator: Allocator) void {
+    pub fn destroy(self: *Self, allocator: Allocator) void {
+        self.freeResult(self.last_result);
         if (self.title_dup.len > 0) allocator.free(self.title_dup);
         if (self.initial_folder_dup.len > 0) allocator.free(self.initial_folder_dup);
         if (self.initial_name_dup.len > 0) allocator.free(self.initial_name_dup);
-        self.base.background.deinit(allocator);
-        self.base.children.deinit(allocator);
         allocator.destroy(self);
     }
 
-    pub fn setTitle(self: *FileDialog, title: []const u8) void {
+    pub fn setTitle(self: *Self, title: []const u8) void {
         if (self.title_dup.len > 0) self.allocator.free(self.title_dup);
         self.title_dup = self.allocator.dupe(u8, title) catch return;
         self.title = self.title_dup;
-        self.base.accessibility.label = self.title;
     }
 
-    pub fn setMode(self: *FileDialog, mode: FileDialogMode) void {
+    pub fn setMode(self: *Self, mode: FileDialogMode) void {
         self.mode = mode;
     }
 
-    pub fn setInitialFolder(self: *FileDialog, folder: []const u8) void {
+    pub fn setInitialFolder(self: *Self, folder: []const u8) void {
         if (self.initial_folder_dup.len > 0) self.allocator.free(self.initial_folder_dup);
         self.initial_folder_dup = self.allocator.dupe(u8, folder) catch return;
         self.initial_folder = self.initial_folder_dup;
     }
 
-    pub fn setInitialName(self: *FileDialog, name: []const u8) void {
+    pub fn setInitialName(self: *Self, name: []const u8) void {
         if (self.initial_name_dup.len > 0) self.allocator.free(self.initial_name_dup);
         self.initial_name_dup = self.allocator.dupe(u8, name) catch return;
         self.initial_name = self.initial_name_dup;
     }
 
-    pub fn setFilters(self: *FileDialog, filters: []const FileFilter) void {
+    pub fn setFilters(self: *Self, filters: []const FileFilter) void {
         self.filters = filters;
     }
 
-    pub fn openFile(self: *FileDialog, callback: ?*const fn (ud: ?*anyopaque, result: FileDialogResult) void, userdata: ?*anyopaque) void {
-        const folder = if (self.initial_folder.len > 0) self.initial_folder else "/home";
-        const result: FileDialogResult = .{ .open = folder };
+    pub fn setSelectMultiple(self: *Self, v: bool) void {
+        self.select_multiple = v;
+    }
+
+    // ── 打开对话框（同步：原生窗口关闭后返回） ─────────────────────────────
+
+    pub fn openFile(self: *Self, callback: ?*const fn (ud: ?*anyopaque, result: FileDialogResult) void, userdata: ?*anyopaque) void {
+        self.run(.open, callback, userdata);
+    }
+
+    pub fn saveFile(self: *Self, callback: ?*const fn (ud: ?*anyopaque, result: FileDialogResult) void, userdata: ?*anyopaque) void {
+        self.run(.save, callback, userdata);
+    }
+
+    pub fn selectFolder(self: *Self, callback: ?*const fn (ud: ?*anyopaque, result: FileDialogResult) void, userdata: ?*anyopaque) void {
+        self.run(.select_folder, callback, userdata);
+    }
+
+    fn run(self: *Self, mode: FileDialogMode, callback: ?*const fn (ud: ?*anyopaque, result: FileDialogResult) void, userdata: ?*anyopaque) void {
+        const action: FileChooserAction = switch (mode) {
+            .open => .open,
+            .save => .save,
+            .select_folder => .select_folder,
+        };
+        const native = FileChooserNative.create(self.allocator, .{
+            .action = action,
+            .title = self.title,
+            .accept_label = self.accept_label,
+            .cancel_label = self.cancel_label,
+            .current_name = self.initial_name,
+            .current_folder = self.initial_folder,
+            .select_multiple = self.select_multiple,
+        }) catch {
+            self.fireResult(.cancel, callback, userdata);
+            return;
+        };
+
+        // 将简化版 FileFilter 转换为 model.FileFilter 交给原生对话框
+        for (self.filters) |f| {
+            var mf = model_filter.FileFilter.init(self.allocator, if (f.name.len > 0) f.name else null);
+            for (f.patterns) |p| mf.addPattern(p) catch {};
+            // addFilter 已按值拷入 native.filters，堆上 patterns 归 native 所有；
+            // 切勿调用 mf.deinit()（会释放共享缓冲）。mf 局部作用域结束即可。
+            native.addFilter(mf) catch {};
+        }
+
+        // 打开原生窗口（同步：用户关闭后返回）
+        native.show(null);
+
+        // 转换结果：有选中文件 => accept；否则 => cancel
+        const result: FileDialogResult = blk: {
+            if (native.getFileCount() == 0) break :blk .cancel;
+            if (self.select_multiple and mode == .open) {
+                var list: std.ArrayList([]const u8) = .{ .items = &.{}, .capacity = 0 };
+                for (native.getFiles()) |p| {
+                    list.append(self.allocator, self.allocator.dupe(u8, p) catch continue) catch {};
+                }
+                break :blk .{ .multi_open = list.toOwnedSlice(self.allocator) catch &.{} };
+            } else {
+                const p = native.getFile() orelse break :blk .cancel;
+                const dup = self.allocator.dupe(u8, p) catch break :blk .cancel;
+                break :blk switch (mode) {
+                    .open => .{ .open = dup },
+                    .save => .{ .save = dup },
+                    .select_folder => .{ .folder = dup },
+                };
+            }
+        };
+
+        native.destroy();
+        self.fireResult(result, callback, userdata);
+    }
+
+    fn fireResult(self: *Self, result: FileDialogResult, callback: ?*const fn (ud: ?*anyopaque, result: FileDialogResult) void, userdata: ?*anyopaque) void {
+        // 释放上一次结果拥有的路径，接管本次结果所有权
+        self.freeResult(self.last_result);
+        self.last_result = result;
         if (callback) |cb| cb(userdata, result);
         if (self.on_response) |cb| cb(self, result);
     }
 
-    pub fn saveFile(self: *FileDialog, callback: ?*const fn (ud: ?*anyopaque, result: FileDialogResult) void, userdata: ?*anyopaque) void {
-        const name = if (self.initial_name.len > 0) self.initial_name else "Untitled";
-        const result: FileDialogResult = .{ .save = name };
-        if (callback) |cb| cb(userdata, result);
-        if (self.on_response) |cb| cb(self, result);
-    }
-
-    pub fn selectFolder(self: *FileDialog, callback: ?*const fn (ud: ?*anyopaque, result: FileDialogResult) void, userdata: ?*anyopaque) void {
-        const folder = if (self.initial_folder.len > 0) self.initial_folder else "/home";
-        const result: FileDialogResult = .{ .folder = folder };
-        if (callback) |cb| cb(userdata, result);
-        if (self.on_response) |cb| cb(self, result);
+    fn freeResult(self: *Self, r: FileDialogResult) void {
+        switch (r) {
+            .open => |p| self.allocator.free(p),
+            .save => |p| self.allocator.free(p),
+            .folder => |p| self.allocator.free(p),
+            .multi_open => |ps| {
+                for (ps) |p| self.allocator.free(p);
+                self.allocator.free(ps);
+            },
+            .cancel => {},
+        }
     }
 };
-
-const vtable = Widget.VTable{
-    .type_name = "file_dialog",
-    .measure = measure,
-    .paint = paint,
-    .on_event = null,
-    .focusable = false,
-    .destroy = destroyVTable,
-};
-
-fn destroyVTable(w: *Widget, allocator: Allocator) void {
-    const self: *FileDialog = @fieldParentPtr("base", w);
-    self.destroy(allocator);
-}
-
-fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
-    _ = w;
-    _ = ctx;
-    _ = constraints;
-    return .{ .width = 720, .height = 520 };
-}
-
-fn paint(w: *Widget, ctx: *PaintContext) void {
-    _ = w;
-    _ = ctx;
-}

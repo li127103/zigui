@@ -6,7 +6,7 @@
 //!   - GLArea            OpenGL 绘制区
 //!   - GraphicsOffload   离屏渲染卸载容器
 //!   - Scrollbar         滚动条 (带 Adjustment)
-//!   - FileChooser       文件对话框 (点击打开新窗口)
+//!   - FileDialog        文件对话框 (点击打开新窗口)
 //!   - FilterListBar     过滤列表栏
 //!   - ConstraintLayout 约束布局
 //!   - ShortcutLabel     快捷键标签
@@ -28,7 +28,8 @@ const GLArea = zigui.gl_area.GLArea;
 const GraphicsOffload = zigui.graphics_offload.GraphicsOffload;
 const Scrollbar = zigui.scrollbar.Scrollbar;
 const Adjustment = zigui.model.adjustment.Adjustment;
-const FileChooser = zigui.file_chooser.FileChooser;
+const FileDialog = zigui.file_dialog.FileDialog;
+const FileDialogResult = zigui.file_dialog.FileDialogResult;
 const FilterListBar = zigui.filter_list_bar.FilterListBar;
 const ConstraintLayout = zigui.constraint_layout.ConstraintLayout;
 const ShortcutLabel = zigui.shortcut_label.ShortcutLabel;
@@ -44,7 +45,7 @@ var g_prev_mouse_down: bool = false;
 
 // 控件引用
 var g_file_label: ?*Label = null;
-var g_file_dialog: ?*FileChooser = null;
+var g_file_dialog: ?*FileDialog = null;
 var g_file_buf: [256]u8 = undefined;
 var g_filter_label: ?*Label = null;
 var g_filter_buf: [256]u8 = undefined;
@@ -117,17 +118,11 @@ fn buildTree(alloc: std.mem.Allocator) !void {
     sb.range.base.layout_style.vexpand = true;
     try root.base.addChild(alloc, &sb_tile.base);
 
-    // ── FileChooser (文件对话框 · 点击打开新窗口) ──────────────────────────────
-    try section(alloc, root, "FileChooser (文件对话框 · 点击打开新窗口)");
-    const fd = try FileChooser.create(alloc, .{
-        .mode = .open,
-        .title = "Open File",
-        .on_file_selected = onFileChosen,
-        .on_cancel = onFileCancelled,
-    });
-    fd.base.state.visible = false;
+    // ── FileDialog (文件对话框 · 点击打开新窗口) ──────────────────────────────
+    try section(alloc, root, "FileDialog (文件对话框 · 点击打开新窗口)");
+    const fd = try FileDialog.new(alloc, "Open File");
+    fd.setMode(.open);
     g_file_dialog = fd;
-    try root.base.addChild(alloc, &fd.base);
     const fd_open = try Button.create(alloc, "Open File…", .{ .on_click = onFileOpen });
     try root.base.addChild(alloc, &fd_open.base);
     const fd_save = try Button.create(alloc, "Save File…", .{ .on_click = onFileSave });
@@ -183,28 +178,23 @@ fn buildTree(alloc: std.mem.Allocator) !void {
 // ── 回调 ─────────────────────────────────────────────────────────────────────
 
 fn onFileOpen(_: *Button) void {
-    if (g_file_dialog) |d| {
-        d.mode = .open;
-        d.show();
-    }
+    if (g_file_dialog) |d| d.openFile(onFileResult, null);
 }
 
 fn onFileSave(_: *Button) void {
-    if (g_file_dialog) |d| {
-        d.mode = .save;
-        d.show();
-    }
+    if (g_file_dialog) |d| d.saveFile(onFileResult, null);
 }
 
-fn onFileChosen(_: *FileChooser, path: []const u8) void {
+fn onFileResult(_: ?*anyopaque, result: FileDialogResult) void {
     if (g_file_label) |lbl| {
-        lbl.text = std.fmt.bufPrint(&g_file_buf, "result: {s}", .{path}) catch "result";
-    }
-}
-
-fn onFileCancelled(_: *FileChooser) void {
-    if (g_file_label) |lbl| {
-        lbl.text = "result: cancel";
+        const txt = switch (result) {
+            .open => |p| std.fmt.bufPrint(&g_file_buf, "result: open {s}", .{p}) catch "result",
+            .save => |n| std.fmt.bufPrint(&g_file_buf, "result: save {s}", .{n}) catch "result",
+            .folder => |p| std.fmt.bufPrint(&g_file_buf, "result: folder {s}", .{p}) catch "result",
+            .multi_open => |ps| std.fmt.bufPrint(&g_file_buf, "result: multi {d} files", .{ps.len}) catch "result",
+            .cancel => "result: cancel",
+        };
+        lbl.text = txt;
     }
 }
 

@@ -13,7 +13,7 @@
 //! ```
 
 const std = @import("std");
-const c = std.c;
+const builtin = @import("builtin");
 const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const pal = @import("../pal/pal.zig");
@@ -133,43 +133,34 @@ pub const FontChooserDialog = struct {
         self.base.markDirty();
     }
 
+    // 平台相关的字体族枚举实现: 仅被当前平台编译的那个文件会被 @import。
+    const font_enum = if (builtin.os.tag == .macos)
+        @import("font_chooser_ct.zig")
+    else
+        @import("font_chooser_fc.zig");
+
     fn loadFontFamilies(self: *Self) void {
-        const fc = @cImport(@cInclude("fontconfig/fontconfig.h"));
-        const config = fc.FcInitLoadConfigAndFonts();
-        if (config == null) return;
-        defer fc.FcConfigDestroy(config);
+        font_enum.enumerate(self.allocator, &self.font_families);
+        self.dedupAndSortFontFamilies();
+    }
 
-        const pat = fc.FcPatternCreate();
-        if (pat == null) return;
-        defer fc.FcPatternDestroy(pat);
-
-        const null_ptr: [*c]u8 = null;
-        const os = fc.FcObjectSetBuild(fc.FC_FAMILY, null_ptr);
-        if (os == null) return;
-        defer fc.FcObjectSetDestroy(os);
-
-        const font_set = fc.FcFontList(config, pat, os);
-        if (font_set == null) return;
-        defer fc.FcFontSetDestroy(font_set);
-
+    fn dedupAndSortFontFamilies(self: *Self) void {
+        // 去重 (CoreText / fontconfig 都可能返回重复族名)
         var seen = std.StringHashMap(void).init(self.allocator);
         defer seen.deinit();
 
-        var i: c_int = 0;
-        while (i < font_set.*.nfont) : (i += 1) {
-            var family: [*c]u8 = null;
-            const idx: usize = @intCast(i);
-            if (fc.FcPatternGetString(font_set.*.fonts[idx], fc.FC_FAMILY, 0, @ptrCast(&family)) != fc.FcResultMatch) continue;
-            const name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(family)), 0);
-            if (name.len == 0) continue;
-
-            const gop = seen.getOrPut(name) catch continue;
-            if (!gop.found_existing) {
-                const owned = self.allocator.dupe(u8, name) catch continue;
-                self.font_families.append(self.allocator, owned) catch {
-                    self.allocator.free(owned);
+        var i: usize = 0;
+        while (i < self.font_families.items.len) {
+            const name = self.font_families.items[i];
+            if (seen.contains(name)) {
+                const removed = self.font_families.swapRemove(i);
+                self.allocator.free(removed);
+            } else {
+                seen.put(name, {}) catch {
+                    i += 1;
                     continue;
                 };
+                i += 1;
             }
         }
 

@@ -9,7 +9,13 @@
 //! 运行:  zig build run-multi-window
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zigui = @import("zigui");
+
+const is_macos = builtin.os.tag == .macos;
+/// 子窗口类型按平台别名: macOS 用 CocoaSubWindow, 其余用 window.Window。
+/// 用编译期 if 保证非本平台的类型名不会真正被解析 (避免 macOS 拉入 vulkan.zig)。
+const TargetWin = if (is_macos) zigui.app.CocoaSubWindow else zigui.window.Window;
 const math = zigui.math;
 const widget = zigui.widget;
 const pal = zigui.pal;
@@ -79,7 +85,7 @@ fn onSetTitle(_: *Button) void {
     }
 }
 
-fn subWindowDraw(win: *zigui.window.Window) void {
+fn subWindowDraw(win: *TargetWin) void {
     const r = win.getRenderer();
     const w: f32 = @floatFromInt(win.getWidth());
     const h: f32 = @floatFromInt(win.getHeight());

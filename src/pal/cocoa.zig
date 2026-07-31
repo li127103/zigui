@@ -26,6 +26,7 @@ pub const CocoaBackend = struct {
             &buf,
             @intCast(desc.width),
             @intCast(desc.height),
+            desc.resizable,
         );
 
         self.window_handle = handle;
@@ -57,6 +58,11 @@ pub const CocoaBackend = struct {
     pub fn getMetalLayer(self: *CocoaBackend) ?*anyopaque {
         if (self.window_handle) |h| return h.metal_layer;
         return null;
+    }
+
+    /// 设置子窗口的父窗口 (transient-for). parent_wid == 0 表示主窗口
+    pub fn setSubWindowTransientFor(_: *CocoaBackend, wid: u32, parent_wid: u32) void {
+        c.zigui_cocoa_set_sub_window_transient_for(wid, parent_wid);
     }
 
     /// 查询当前 IME 组字中的 marked text (如拼音), 写入 buf (UTF-8), 返回字节数

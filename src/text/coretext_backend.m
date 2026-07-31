@@ -309,3 +309,47 @@ bool zigui_ct_rasterize_glyph_with_font(void *ct_font, uint32_t glyph_id,
 void zigui_ct_release_font(void *ct_font) {
     if (ct_font) CFRelease((CFTypeRef)ct_font);
 }
+
+/* ── Font family enumeration ──────────────────────────────────────────────── */
+
+int zigui_ct_enumerate_font_families(ZiguiFontFamilyCallback cb, void *context) {
+    if (!cb) return 0;
+
+    @autoreleasepool {
+        CFArrayRef names = CTFontManagerCopyAvailableFontFamilyNames();
+        if (!names) return 0;
+
+        CFIndex count = CFArrayGetCount(names);
+        int reported = 0;
+
+        for (CFIndex i = 0; i < count; i++) {
+            CFStringRef name_cf = (CFStringRef)CFArrayGetValueAtIndex(names, i);
+            CFIndex len = CFStringGetLength(name_cf);
+            if (len == 0) continue;
+
+            /* UTF-8 最多 4 字节/码点, +1 留余量 */
+            CFIndex max_bytes = (len + 1) * 4;
+            char *buf = (char *)malloc((size_t)max_bytes);
+            if (!buf) continue;
+
+            CFIndex used = 0;
+            CFStringGetBytes(name_cf,
+                             CFRangeMake(0, len),
+                             kCFStringEncodingUTF8,
+                             0,
+                             false,
+                             (UInt8 *)buf,
+                             max_bytes,
+                             &used);
+
+            if (used > 0) {
+                cb(buf, (int)used, context);
+                reported++;
+            }
+            free(buf);
+        }
+
+        CFRelease(names);
+        return reported;
+    }
+}

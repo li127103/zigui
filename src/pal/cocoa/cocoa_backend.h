@@ -49,12 +49,14 @@ typedef struct {
 
 /* Lifecycle */
 int zigui_cocoa_init(void);
-ZiguiWindowHandle zigui_cocoa_create_window(const char *title, int width, int height);
+ZiguiWindowHandle zigui_cocoa_create_window(const char *title, int width, int height, bool resizable);
 int zigui_cocoa_poll_events(ZiguiEvent *events, int max_events);
 bool zigui_cocoa_should_quit(void);
 
 /* Sub-windows */
 uint32_t zigui_cocoa_create_sub_window(const char *title, int width, int height);
+/* 设置子窗口的父窗口 (transient-for). parent_wid == 0 表示主窗口 */
+void zigui_cocoa_set_sub_window_transient_for(uint32_t wid, uint32_t parent_wid);
 void zigui_cocoa_destroy_sub_window(uint32_t window_id);
 void zigui_cocoa_show_sub_window(uint32_t window_id);
 void zigui_cocoa_hide_sub_window(uint32_t window_id);

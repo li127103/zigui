@@ -83,4 +83,16 @@ bool zigui_ct_rasterize_glyph_with_font(void *ct_font, uint32_t glyph_id,
 /* Release a native CTFontRef previously retained (e.g. ZiguiShapedGlyph.run_font). */
 void zigui_ct_release_font(void *ct_font);
 
+/* ── Font family enumeration ──────────────────────────────────────────────── */
+
+/* Callback invoked once per available font family. `name` points to UTF-8 bytes
+ * of length `name_len` (NOT null-terminated); the buffer is only valid for the
+ * duration of the callback. */
+typedef void (*ZiguiFontFamilyCallback)(const char *name, int name_len, void *context);
+
+/* Enumerate every available system font family name via CoreText.
+ * Returns the number of families reported. The C buffer behind each callback is
+ * freed immediately after the callback returns, so callers must copy the bytes. */
+int zigui_ct_enumerate_font_families(ZiguiFontFamilyCallback cb, void *context);
+
 #endif

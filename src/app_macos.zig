@@ -16,6 +16,8 @@ pub const AppConfig = struct {
     title: []const u8 = "zigui app",
     width: u32 = 800,
     height: u32 = 600,
+    /// true = 窗口可缩放 (默认); false = 固定大小
+    resizable: bool = true,
     /// true = 每帧连续渲染 (动画 demo); false = 按需渲染 (脏区驱动, 空闲跳帧)
     continuous: bool = true,
 };
@@ -85,7 +87,7 @@ pub const CocoaSubWindow = struct {
         var renderer = renderer2d.Renderer2D.init(allocator, undefined);
         renderer.glyph_atlas = &glyph_atlas;
 
-        const dirty = dirty_mod.DirtyRegion.init(allocator);
+        var dirty = dirty_mod.DirtyRegion.init(allocator);
         errdefer dirty.deinit();
 
         const owned_title = try allocator.alloc(u8, title.len);
@@ -301,6 +303,7 @@ pub const App = struct {
             .title = config.title,
             .width = config.width,
             .height = config.height,
+            .resizable = config.resizable,
         });
 
         // 3. 初始化 Metal
@@ -611,6 +614,17 @@ pub const App = struct {
             win.visible = true;
         }
         self.cocoa_backend.showSubWindow(wid);
+    }
+
+    /// 主窗口 id (macOS 主窗口固定为 0, 见 cocoa_backend 的 wid 约定)
+    pub fn getMainWindowId(self: *const App) u32 {
+        _ = self;
+        return 0;
+    }
+
+    /// 设置子窗口的父窗口 (transient-for). parent_wid == 0 表示主窗口
+    pub fn setSubWindowTransientFor(self: *App, wid: u32, parent_wid: u32) void {
+        self.cocoa_backend.setSubWindowTransientFor(wid, parent_wid);
     }
 
     /// 隐藏子窗口

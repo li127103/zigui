@@ -40,6 +40,7 @@ typedef struct {
 static ZgSubWindow g_sub_windows[ZG_MAX_SUB_WINDOWS];
 static int g_sub_window_count = 0;
 static uint32_t g_next_sub_window_id = 1; // 0 保留给主窗口
+static void *g_main_window = NULL;        // 主窗口 NSWindow (window_id == 0)
 
 static ZgSubWindow *zgFindSubWindow(uint32_t window_id) {
     for (int i = 0; i < g_sub_window_count; i++) {
@@ -452,13 +453,13 @@ int zigui_cocoa_init(void) {
     return 0;
 }
 
-ZiguiWindowHandle zigui_cocoa_create_window(const char *title, int width, int height) {
+ZiguiWindowHandle zigui_cocoa_create_window(const char *title, int width, int height, bool resizable) {
     ZiguiWindowHandle handle = {0};
 
     NSUInteger styleMask = NSWindowStyleMaskTitled
                          | NSWindowStyleMaskClosable
-                         | NSWindowStyleMaskMiniaturizable
-                         | NSWindowStyleMaskResizable;
+                         | NSWindowStyleMaskMiniaturizable;
+    if (resizable) styleMask |= NSWindowStyleMaskResizable;
 
     NSRect frame = NSMakeRect(0, 0, width, height);
     NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
@@ -502,6 +503,7 @@ ZiguiWindowHandle zigui_cocoa_create_window(const char *title, int width, int he
     [window makeFirstResponder:contentView];
 
     handle.ns_window    = (__bridge void *)window;
+    g_main_window        = (__bridge void *)window;
     handle.content_view = (__bridge void *)contentView;
     handle.metal_layer  = (__bridge void *)metalLayer;
     handle.width        = (uint32_t)width;
@@ -751,7 +753,8 @@ uint32_t zigui_cocoa_create_sub_window(const char *title, int width, int height)
         /* Store */
         int idx = g_sub_window_count++;
         g_sub_windows[idx].window_id = window_id;
-        g_sub_windows[idx].ns_window = (__bridge void *)window;
+        /* 接管 NSWindow 所有权 (ARC 会在函数返回时释放局部变量, 必须用 retained 桥接保留) */
+        g_sub_windows[idx].ns_window = (__bridge_retained void *)window;
         g_sub_windows[idx].content_view = (__bridge void *)contentView;
         g_sub_windows[idx].metal_layer = (__bridge void *)metalLayer;
         g_sub_windows[idx].width = (uint32_t)width;
@@ -763,12 +766,31 @@ uint32_t zigui_cocoa_create_sub_window(const char *title, int width, int height)
     }
 }
 
+void zigui_cocoa_set_sub_window_transient_for(uint32_t wid, uint32_t parent_wid) {
+    ZgSubWindow *sw = zgFindSubWindow(wid);
+    if (!sw) return;
+
+    void *parent_ns = NULL;
+    if (parent_wid == 0) {
+        parent_ns = g_main_window;
+    } else {
+        ZgSubWindow *pw = zgFindSubWindow(parent_wid);
+        if (pw) parent_ns = pw->ns_window;
+    }
+    if (!parent_ns) return;
+
+    @autoreleasepool {
+        [(NSWindow *)(__bridge NSWindow *)sw->ns_window setParentWindow:(__bridge NSWindow *)parent_ns];
+    }
+}
+
 void zigui_cocoa_destroy_sub_window(uint32_t window_id) {
     ZgSubWindow *sw = zgFindSubWindow(window_id);
     if (!sw) return;
 
     @autoreleasepool {
-        NSWindow *window = (__bridge NSWindow *)sw->ns_window;
+        /* 交还 create 时 (__bridge_retained) 接管的 NSWindow 所有权, 此处释放 */
+        NSWindow *window = (__bridge_transfer NSWindow *)sw->ns_window;
         [window orderOut:nil];
         [window setDelegate:nil];
         [window setContentView:nil];

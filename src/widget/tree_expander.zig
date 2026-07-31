@@ -20,7 +20,7 @@ const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 const Allocator = std.mem.Allocator;
-const Event = pal.event_mod.Event;
+const Event = pal.Event;
 
 /// TreeListRow — 树形行状态 (GTK4 对应 GtkTreeListRow)
 /// 独立定义，保持与 model.TreeListModel 相同的字段布局以便互转 (不是别名)。
@@ -66,7 +66,7 @@ pub const TreeExpander = struct {
             },
             .allocator = allocator,
         };
-        self.base.accessibility = .{ .role = .row, .label = "Tree Expander" };
+        self.base.accessibility = .{ .role = .list_item, .label = "Tree Expander" };
         return self;
     }
 
@@ -183,7 +183,7 @@ fn destroyVTable(w: *Widget, allocator: Allocator) void {
     self.destroy(allocator);
 }
 
-fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size {
+fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
     const self: *TreeExpander = @fieldParentPtr("base", w);
     const indent = self.indentPx();
     var mw: f32 = indent;
@@ -192,15 +192,16 @@ fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) 
     if (show_exp) mw += EXPANDER_SIZE;
 
     if (self.child) |c| {
-        const c_avail: math.Size = .{
-            .width = @max(0, constraints.max_width - mw),
-            .height = constraints.max_height,
+        const child_con: layout_mod.Constraints = .{
+            .min_width = 0,
+            .max_width = @max(0, constraints.max_width - mw),
+            .min_height = 0,
+            .max_height = constraints.max_height,
         };
-        const sz = Widget.measureChild(c, c_avail);
+        const sz = c.vtable.measure(c, ctx, child_con);
         mw += sz.width;
         mh = @max(mh, sz.height);
     }
-    _ = ctx;
     return .{ .width = mw, .height = mh };
 }
 
@@ -232,15 +233,10 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
             }, 4, math.Color.hex(0x33415566)) catch {};
         }
         if (self.list_row.has_children) {
-            const icon: icons_mod.IconName = if (self.list_row.expanded) icons_mod.IconName.chevron_down else icons_mod.IconName.chevron_right;
+            const icon: icons_mod.IconName = if (self.list_row.expanded) icons_mod.IconName.arrow_down else icons_mod.IconName.arrow_right;
             const ix = icon_box_x + (EXPANDER_SIZE - EXPANDER_ICON) / 2;
             const iy = icon_box_y + (EXPANDER_SIZE - EXPANDER_ICON) / 2;
-            icons_mod.drawIcon(ctx.allocator, ctx.renderer, icon, .{
-                .x = ix,
-                .y = iy,
-                .size = EXPANDER_ICON,
-                .color = math.Color.hex(0x94A3B8FF),
-            }) catch {};
+            icons_mod.drawIcon(ctx.renderer, ix, iy, EXPANDER_ICON, math.Color.hex(0x94A3B8FF), icon) catch {};
         }
         x_cursor += EXPANDER_SIZE;
     }

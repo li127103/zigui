@@ -166,9 +166,8 @@ pub const PrintDialog = struct {
         const printer_row = try self.createLabelRow(alloc, "打印机:");
         try inner.base.addChild(alloc, &printer_row.base);
 
-        const printer_combo = try ComboBox.create(alloc, .{
-            .items = &.{"默认打印机"},
-        });
+        const printer_combo = try ComboBox.create(alloc, .{});
+        try printer_combo.addItem("默认打印机");
         try printer_row.base.addChild(alloc, &printer_combo.base);
         printer_combo.base.layout_style.flex_grow = 1;
 
@@ -180,7 +179,7 @@ pub const PrintDialog = struct {
 
         const copies = try Entry.create(alloc, .{
             .placeholder = "1",
-            .initial_text = "1",
+            .text = "1",
         });
         try copies_row.base.addChild(alloc, &copies.base);
         copies.base.layout_style.flex_grow = 1;
@@ -206,13 +205,13 @@ pub const PrintDialog = struct {
         const range_all_check = try CheckButton.create(alloc, "全部", .{ .checked = true });
         try inner.base.addChild(alloc, &range_all_check.base);
         self.range_all_check = range_all_check;
-        range_all_check.on_toggle = onRangeAllToggle;
+        range_all_check.on_change = onRangeAllToggle;
         range_all_check.base.user_data = self;
 
         const range_custom_check = try CheckButton.create(alloc, "页码范围:", .{});
         try inner.base.addChild(alloc, &range_custom_check.base);
         self.range_custom_check = range_custom_check;
-        range_custom_check.on_toggle = onRangeCustomToggle;
+        range_custom_check.on_change = onRangeCustomToggle;
         range_custom_check.base.user_data = self;
 
         const range_row = try Container.create(alloc, .{
@@ -250,9 +249,9 @@ pub const PrintDialog = struct {
         const orient_row = try self.createLabelRow(alloc, "方向:");
         try inner.base.addChild(alloc, &orient_row.base);
 
-        const orient_combo = try ComboBox.create(alloc, .{
-            .items = &.{ "纵向", "横向" },
-        });
+        const orient_combo = try ComboBox.create(alloc, .{});
+        try orient_combo.addItem("纵向");
+        try orient_combo.addItem("横向");
         try orient_row.base.addChild(alloc, &orient_combo.base);
         orient_combo.base.layout_style.flex_grow = 1;
         self.orientation_combo = orient_combo;
@@ -260,9 +259,12 @@ pub const PrintDialog = struct {
         const paper_row = try self.createLabelRow(alloc, "纸张大小:");
         try inner.base.addChild(alloc, &paper_row.base);
 
-        const paper_combo = try ComboBox.create(alloc, .{
-            .items = &.{ "A4", "Letter", "Legal", "A3", "A5" },
-        });
+        const paper_combo = try ComboBox.create(alloc, .{});
+        try paper_combo.addItem("A4");
+        try paper_combo.addItem("Letter");
+        try paper_combo.addItem("Legal");
+        try paper_combo.addItem("A3");
+        try paper_combo.addItem("A5");
         try paper_row.base.addChild(alloc, &paper_combo.base);
         paper_combo.base.layout_style.flex_grow = 1;
         self.paper_combo = paper_combo;
@@ -270,9 +272,9 @@ pub const PrintDialog = struct {
         const color_row = try self.createLabelRow(alloc, "颜色:");
         try inner.base.addChild(alloc, &color_row.base);
 
-        const color_combo = try ComboBox.create(alloc, .{
-            .items = &.{ "彩色", "黑白" },
-        });
+        const color_combo = try ComboBox.create(alloc, .{});
+        try color_combo.addItem("彩色");
+        try color_combo.addItem("黑白");
         try color_row.base.addChild(alloc, &color_combo.base);
         color_combo.base.layout_style.flex_grow = 1;
         self.color_combo = color_combo;
@@ -280,9 +282,10 @@ pub const PrintDialog = struct {
         const duplex_row = try self.createLabelRow(alloc, "双面打印:");
         try inner.base.addChild(alloc, &duplex_row.base);
 
-        const duplex_combo = try ComboBox.create(alloc, .{
-            .items = &.{ "无", "长边翻转", "短边翻转" },
-        });
+        const duplex_combo = try ComboBox.create(alloc, .{});
+        try duplex_combo.addItem("无");
+        try duplex_combo.addItem("长边翻转");
+        try duplex_combo.addItem("短边翻转");
         try duplex_row.base.addChild(alloc, &duplex_combo.base);
         duplex_combo.base.layout_style.flex_grow = 1;
         self.duplex_combo = duplex_combo;
@@ -312,8 +315,8 @@ pub const PrintDialog = struct {
         const row = try Container.create(alloc, .{
             .direction = .row,
             .gap = .{ .width = 12, .height = 0 },
-            .alignment = .center,
         });
+        row.base.layout_style.align_items = .center;
         const lbl = try Label.create(alloc, label_text, .{
             .font_size = 12,
             .color = self.text_secondary,
@@ -369,10 +372,10 @@ pub const PrintDialog = struct {
             self.settings.page_range_to = std.fmt.parseInt(u32, text, 10) catch 1;
         }
         if (self.orientation_combo) |cb| {
-            self.settings.orientation = if (cb.selected_index == 1) .landscape else .portrait;
+            self.settings.orientation = if (cb.selected == 1) .landscape else .portrait;
         }
         if (self.paper_combo) |cb| {
-            self.settings.paper_size = switch (cb.selected_index) {
+            self.settings.paper_size = switch (cb.selected) {
                 1 => .letter,
                 2 => .legal,
                 3 => .a3,
@@ -381,10 +384,10 @@ pub const PrintDialog = struct {
             };
         }
         if (self.color_combo) |cb| {
-            self.settings.color_mode = if (cb.selected_index == 1) .grayscale else .color;
+            self.settings.color_mode = if (cb.selected == 1) .grayscale else .color;
         }
         if (self.duplex_combo) |cb| {
-            self.settings.duplex = switch (cb.selected_index) {
+            self.settings.duplex = switch (cb.selected) {
                 1 => .long_edge,
                 2 => .short_edge,
                 else => .none,

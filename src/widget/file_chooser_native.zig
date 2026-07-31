@@ -411,23 +411,68 @@ pub const FileChooserNative = struct {
     }
 
     /// 执行命令并解析输出。
-    /// 注: 当前 Zig 0.16 已移除 std.ChildProcess.exec, 原生 kdialog/zenity
-    /// 执行路径需要基于 std.process.Child + std.Io 重写。此处直接回退到内部
-    /// 实现 (show 仍通过 runFallback 触发 on_response 回调), 保证 widget 可编译。
+    /// 用 Zig 0.16 的 std.process.run（底层基于 std.process.Child + std.Io）同步
+    /// 调起原生对话框（kdialog / zenity），捕获 stdout 后按 mode 解析。
+    /// 返回 true 表示已处理响应（accept/cancel）；false 表示命令不可用/失败，
+    /// 调用者应回退到内部实现。
     fn execAndParse(self: *Self, argv: []const []const u8, mode: ParseMode) bool {
-        _ = self;
-        _ = argv;
-        _ = mode;
-        return false;
+        if (argv.len == 0) return false;
+
+        // std.process.run 需要一个 std.Io 实例；用 Threaded 实现（每次对话框
+        // 打开时创建并销毁，开销可接受）。
+        var threaded = std.Io.Threaded.init(self.allocator, .{});
+        const io = threaded.io();
+        defer threaded.deinit();
+
+        const result = std.process.run(self.allocator, io, .{
+            .argv = argv,
+            .stdout_limit = .limited(256 * 1024),
+            .stderr_limit = .limited(256 * 1024),
+        }) catch return false;
+        defer {
+            self.allocator.free(result.stdout);
+            self.allocator.free(result.stderr);
+        }
+
+        switch (result.term) {
+            .exited => |code| {
+                if (code == 0) {
+                    // 解析 stdout 到 selected_files
+                    var paths = self.parseOutput(result.stdout, mode) orelse {
+                        self.fireResponse(.cancel);
+                        return true;
+                    };
+                    defer {
+                        for (paths.items) |p| self.allocator.free(p);
+                        paths.deinit(self.allocator);
+                    }
+                    for (paths.items) |p| {
+                        if (p.len == 0) continue;
+                        self.addSelected(p) catch {};
+                    }
+                    if (self.selected_files.items.len > 0) {
+                        self.fireResponse(.accept);
+                    } else {
+                        self.fireResponse(.cancel);
+                    }
+                    return true;
+                } else {
+                    // 非 0 通常是用户点击 "Cancel"
+                    self.fireResponse(.cancel);
+                    return true;
+                }
+            },
+            else => return false, // 信号/停止：当作命令失败 → 回退
+        }
     }
 
     /// 解析 stdout，返回分配的路径列表（调用方 free）。
     /// 失败或空输出返回 null。
     fn parseOutput(self: *Self, stdout: []const u8, mode: ParseMode) ?std.ArrayListUnmanaged([]const u8) {
-        var list = std.ArrayListUnmanaged([]const u8){};
+        var list = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         switch (mode) {
             .single_line => {
-                const trimmed = std.mem.trimRight(u8, stdout, "\r\n \t");
+                const trimmed = std.mem.trimEnd(u8, stdout, "\r\n \t");
                 if (trimmed.len == 0) return null;
                 const dup = self.allocator.dupe(u8, trimmed) catch return null;
                 list.append(self.allocator, dup) catch {
@@ -438,7 +483,7 @@ pub const FileChooserNative = struct {
             .multi_line => {
                 var it = std.mem.splitSequence(u8, stdout, "\n");
                 while (it.next()) |line| {
-                    const t = std.mem.trimRight(u8, line, "\r \t");
+                    const t = std.mem.trimEnd(u8, line, "\r \t");
                     if (t.len == 0) continue;
                     const dup = self.allocator.dupe(u8, t) catch continue;
                     list.append(self.allocator, dup) catch {

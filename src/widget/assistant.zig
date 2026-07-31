@@ -489,29 +489,29 @@ pub const Assistant = struct {
         // 根据 page_type 动态设置按钮文案（updatePageUI 时也会调，这里每帧同步以防万一）
         switch (cur_page_type) {
             .intro => {
-                self.btn_next.setText("继续");
+                self.btn_next.setLabel("继续");
                 self.btn_back.base.state.visible = false; // intro 无 Back
                 self.btn_next.base.state.visible = true;
                 self.btn_apply.base.state.visible = false; // intro 无 Apply
             },
             .progress => {
-                self.btn_next.setText("下一步");
+                self.btn_next.setLabel("下一步");
                 self.btn_back.base.state.visible = true;
                 self.btn_next.base.state.visible = true;
                 self.btn_apply.base.state.visible = false; // progress 无 Apply
             },
             .confirm => {
-                self.btn_next.setText("下一步");
+                self.btn_next.setLabel("下一步");
                 self.btn_back.base.state.visible = true;
                 self.btn_next.base.state.visible = self.current_page + 1 < self.pages.items.len;
                 self.btn_apply.base.state.visible = true;
-                self.btn_apply.setText("确认"); // confirm: Apply = 确认
+                self.btn_apply.setLabel("确认"); // confirm: Apply = 确认
             },
             .summary => {
                 self.btn_back.base.state.visible = false; // summary 无 Back/Next
                 self.btn_next.base.state.visible = false;
                 self.btn_apply.base.state.visible = true;
-                self.btn_apply.setText("关闭"); // summary: Apply = 关闭
+                self.btn_apply.setLabel("关闭"); // summary: Apply = 关闭
             },
             .custom => {
                 // custom：全部隐藏（上层自行控制）
@@ -520,8 +520,8 @@ pub const Assistant = struct {
                 self.btn_apply.base.state.visible = false;
             },
             .content => {
-                self.btn_next.setText("下一步");
-                self.btn_apply.setText("完成");
+                self.btn_next.setLabel("下一步");
+                self.btn_apply.setLabel("完成");
                 self.btn_back.base.state.visible = true;
                 self.btn_next.base.state.visible = true;
                 self.btn_apply.base.state.visible = true;

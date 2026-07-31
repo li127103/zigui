@@ -395,7 +395,6 @@ pub const EmojiChooser = struct {
     pub fn show(self: *Self) void {
         self.visible = true;
         self.base.markDirty();
-        self.base.setFocus();
     }
 
     pub fn hide(self: *Self) void {
@@ -407,8 +406,7 @@ pub const EmojiChooser = struct {
     fn buildUI(self: *Self) !void {
         const categories = [_]EmojiCategory{ .smileys, .people, .animals, .food, .travel, .activities, .objects, .symbols, .flags };
         for (categories) |cat| {
-            const btn = try Button.create(self.allocator, .{
-                .label = category_names.get(cat),
+            const btn = try Button.create(self.allocator, category_names.get(cat), .{
                 .on_click = onCategoryClick,
                 .bg_color = math.Color.hex(0x00000000),
                 .bg_hover = self.hover_color,
@@ -419,29 +417,26 @@ pub const EmojiChooser = struct {
                 .padding_v = 6.0,
                 .font_size = 16,
             });
-            btn.base.user_data = @intFromEnum(cat);
+            btn.base.user_data = @as(*anyopaque, @ptrFromInt(@as(usize, @intFromEnum(cat))));
             btn.base.parent = &self.base;
             try self.category_buttons.append(self.allocator, btn);
-            try self.base.addChild(self.allocator, btn);
+            try self.base.addChild(self.allocator, &btn.base);
         }
 
         const search = try Entry.create(self.allocator, .{
             .placeholder = "搜索表情...",
-            .on_text_changed = onSearchChanged,
-            .bg_color = math.Color.hex(0x0F172AFF),
+            .on_change = onSearchChanged,
             .text_color = self.text_color,
-            .placeholder_color = self.text_secondary,
-            .corner_radius = 6.0,
             .font_size = 13,
         });
         search.base.parent = &self.base;
         self.search_input = search;
-        try self.base.addChild(self.allocator, search);
+        try self.base.addChild(self.allocator, &search.base);
     }
 
     fn onCategoryClick(btn: *Button) void {
         const self: *Self = @fieldParentPtr("base", btn.base.parent.?);
-        const cat: EmojiCategory = @enumFromInt(btn.base.user_data);
+        const cat: EmojiCategory = @enumFromInt(@intFromPtr(btn.base.user_data.?));
         self.current_category = cat;
         self.hovered_emoji = null;
         self.base.markDirty();
@@ -531,15 +526,15 @@ pub const EmojiChooser = struct {
                 const duped = self.allocator.dupe(u8, emoji) catch return;
                 self.allocator.free(self.recently_used.items[i]);
                 _ = self.recently_used.orderedRemove(i);
-                self.recently_used.insertAt(self.allocator, 0, duped) catch {};
+                self.recently_used.insert(self.allocator, 0, duped) catch {};
                 return;
             }
         }
         const duped = self.allocator.dupe(u8, emoji) catch return;
-        self.recently_used.insertAt(self.allocator, 0, duped) catch {};
+        self.recently_used.insert(self.allocator, 0, duped) catch {};
         if (self.recently_used.items.len > 24) {
             const old = self.recently_used.pop();
-            self.allocator.free(old);
+            if (old) |o| self.allocator.free(o);
         }
     }
 
@@ -594,7 +589,7 @@ pub const EmojiChooser = struct {
             search.base.rect.y = y_offset - ry;
             search.base.rect.width = pw - 20;
             search.base.rect.height = search_h;
-            search.paintTree(ctx);
+            search.base.paintTree(ctx);
             y_offset += search_h + 8;
         }
 
@@ -607,7 +602,7 @@ pub const EmojiChooser = struct {
         const cat_count = self.category_buttons.items.len;
         const cat_btn_w = pw / @as(f32, @floatFromInt(cat_count));
         for (self.category_buttons.items, 0..) |btn, i| {
-            const cat: EmojiCategory = @enumFromInt(btn.base.user_data);
+            const cat: EmojiCategory = @enumFromInt(@intFromPtr(btn.base.user_data.?));
             btn.base.rect.x = w.rect.x + @as(f32, @floatFromInt(i)) * cat_btn_w;
             btn.base.rect.y = y_offset - ry;
             btn.base.rect.width = cat_btn_w;
@@ -617,7 +612,7 @@ pub const EmojiChooser = struct {
             } else {
                 btn.base.state.pressed = false;
             }
-            btn.paintTree(ctx);
+            btn.base.paintTree(ctx);
         }
         y_offset += cat_bar_h + 4;
 
@@ -713,11 +708,11 @@ pub const EmojiChooser = struct {
                     }
 
                     for (self.category_buttons.items) |btn| {
-                        const result = btn.dispatchEvent(event, ectx);
+                        const result = btn.base.dispatchEvent(event, ectx);
                         if (result == .handled) return .handled;
                     }
                     if (self.search_input) |search| {
-                        const result = search.dispatchEvent(event, ectx);
+                        const result = search.base.dispatchEvent(event, ectx);
                         if (result == .handled) return .handled;
                     }
 
@@ -736,22 +731,22 @@ pub const EmojiChooser = struct {
                 }
 
                 for (self.category_buttons.items) |btn| {
-                    const result = btn.dispatchEvent(event, ectx);
+                    const result = btn.base.dispatchEvent(event, ectx);
                     if (result == .handled) break;
                 }
                 if (self.search_input) |search| {
-                    _ = search.dispatchEvent(event, ectx);
+                    _ = search.base.dispatchEvent(event, ectx);
                 }
 
                 return .handled;
             },
             else => {
                 for (self.category_buttons.items) |btn| {
-                    const result = btn.dispatchEvent(event, ectx);
+                    const result = btn.base.dispatchEvent(event, ectx);
                     if (result == .handled) return .handled;
                 }
                 if (self.search_input) |search| {
-                    const result = search.dispatchEvent(event, ectx);
+                    const result = search.base.dispatchEvent(event, ectx);
                     if (result == .handled) return .handled;
                 }
                 return .ignored;

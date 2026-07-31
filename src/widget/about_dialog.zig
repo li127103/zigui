@@ -142,7 +142,6 @@ pub const AboutDialog = struct {
         self.last_dw = self.dialog_width;
         self.last_dh = self.dialog_max_height;
         self.base.markDirty();
-        self.base.setFocus();
     }
 
     pub fn hide(self: *Self) void {
@@ -318,7 +317,6 @@ pub const AboutDialog = struct {
             styled_text.drawText(r2d, ctx.allocator, label, x, y, .{
                 .font_size = self.text_size,
                 .color = self.link_color,
-                .underline = true,
             });
             y += size.height + 16;
         }
@@ -570,19 +568,6 @@ pub const AboutDialog = struct {
                     return .handled;
                 }
 
-                if (self.show_license) {
-                    if (mb.button == .wheel_up) {
-                        self.scroll_offset = @max(0, self.scroll_offset - 20);
-                        w.markDirty();
-                        return .handled;
-                    } else if (mb.button == .wheel_down) {
-                        const max_scroll = @max(0, self.license_content_height - (dh - 48 - 80));
-                        self.scroll_offset = @min(max_scroll, self.scroll_offset + 20);
-                        w.markDirty();
-                        return .handled;
-                    }
-                }
-
                 return .handled;
             },
             .mouse_move => |mm| {
@@ -632,7 +617,7 @@ pub const AboutDialog = struct {
             },
             .scroll => |scr| {
                 if (self.show_license) {
-                    if (scr.dy < 0) {
+                    if (scr.delta < 0) {
                         self.scroll_offset = @max(0, self.scroll_offset - 20);
                     } else {
                         const max_scroll = @max(0, self.license_content_height - (dh - 48 - 80));

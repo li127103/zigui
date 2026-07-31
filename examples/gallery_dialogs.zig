@@ -19,6 +19,11 @@ const MessageDialog = zigui.message_dialog.MessageDialog;
 const MessageDialogResult = zigui.message_dialog.MessageDialogResult;
 const FileChooser = zigui.file_chooser.FileChooser;
 const ColorChooserDialog = zigui.color_chooser.ColorChooserDialog;
+const AboutDialog = zigui.about_dialog.AboutDialog;
+const FontChooserDialog = zigui.font_chooser.FontChooserDialog;
+const FontDesc = zigui.font_chooser.FontDesc;
+const Assistant = zigui.assistant.Assistant;
+const EmojiChooser = zigui.emoji_chooser.EmojiChooser;
 const Label = zigui.label.Label;
 const Button = zigui.button.Button;
 
@@ -106,6 +111,65 @@ fn buildTree(alloc: std.mem.Allocator) !void {
     const cc_btn = try Button.create(alloc, "Open ColorChooser", .{ .on_click = onOpenColor });
     try addRow(alloc, root, "ColorChooser", cc_btn);
 
+    // AboutDialog
+    const about = try AboutDialog.create(alloc, .{
+        .program_name = "zigui",
+        .version = "0.16",
+        .copyright = "© 2026 zigui contributors",
+        .comments = "Cross-platform GPU-accelerated GUI framework.",
+        .website = "https://github.com/zigui/zigui",
+        .website_label = "Project Home",
+        .authors = &[_][]const u8{"The zigui Team"},
+        .on_close = onAboutClose,
+    });
+    about.base.state.visible = false;
+    g_about = about;
+    try root.base.addChild(alloc, &about.base);
+    const about_btn = try Button.create(alloc, "Open AboutDialog", .{ .on_click = onOpenAbout });
+    try addRow(alloc, root, "AboutDialog", about_btn);
+
+    // FontChooserDialog
+    const fcd = try FontChooserDialog.create(alloc, .{
+        .title = "Pick a Font",
+        .initial_family = "Sans",
+        .initial_size = 14,
+        .on_font_selected = onFontSelected,
+        .on_cancel = onFontCancel,
+    });
+    fcd.base.state.visible = false;
+    g_font = fcd;
+    try root.base.addChild(alloc, &fcd.base);
+    const fcd_btn = try Button.create(alloc, "Open FontChooser", .{ .on_click = onOpenFont });
+    try addRow(alloc, root, "FontChooser", fcd_btn);
+
+    // Assistant
+    const asst = try Assistant.create(alloc, .{
+        .title = "Setup Assistant",
+        .on_apply = onAssistantApply,
+        .on_cancel = onAssistantCancel,
+    });
+    const asst_page = try Label.create(alloc, "Welcome! This assistant demonstrates a multi-page workflow.", .{
+        .font_size = 14,
+        .color = math.Color.hex(0xF1F5FFFF),
+    });
+    _ = try asst.addPage("Welcome", &asst_page.base);
+    asst.base.state.visible = false;
+    g_assistant = asst;
+    try root.base.addChild(alloc, &asst.base);
+    const asst_btn = try Button.create(alloc, "Open Assistant", .{ .on_click = onOpenAssistant });
+    try addRow(alloc, root, "Assistant", asst_btn);
+
+    // EmojiChooser
+    const emoji = try EmojiChooser.create(alloc, .{
+        .on_emoji_selected = onEmojiSelected,
+        .on_close = onEmojiClose,
+    });
+    emoji.base.state.visible = false;
+    g_emoji = emoji;
+    try root.base.addChild(alloc, &emoji.base);
+    const emoji_btn = try Button.create(alloc, "Open EmojiChooser", .{ .on_click = onOpenEmoji });
+    try addRow(alloc, root, "EmojiChooser", emoji_btn);
+
     // status
     const status = try Label.create(alloc, "Status: idle", .{ .font_size = 13, .color = math.Color.hex(0x94A3B8FF) });
     status.base.layout_style.margin.top = 8;
@@ -120,6 +184,10 @@ fn buildTree(alloc: std.mem.Allocator) !void {
 var g_msg: ?*MessageDialog = null;
 var g_fc: ?*FileChooser = null;
 var g_cc: ?*ColorChooserDialog = null;
+var g_about: ?*AboutDialog = null;
+var g_font: ?*FontChooserDialog = null;
+var g_assistant: ?*Assistant = null;
+var g_emoji: ?*EmojiChooser = null;
 
 fn onOpenMsg(_: *Button) void {
     if (g_msg) |d| d.show();
@@ -129,6 +197,18 @@ fn onOpenFile(_: *Button) void {
 }
 fn onOpenColor(_: *Button) void {
     if (g_cc) |d| d.show();
+}
+fn onOpenAbout(_: *Button) void {
+    if (g_about) |d| d.show();
+}
+fn onOpenFont(_: *Button) void {
+    if (g_font) |d| d.show();
+}
+fn onOpenAssistant(_: *Button) void {
+    if (g_assistant) |d| d.show();
+}
+fn onOpenEmoji(_: *Button) void {
+    if (g_emoji) |d| d.show();
 }
 
 fn onMsgResult(_: *MessageDialog, result: MessageDialogResult) void {
@@ -149,6 +229,27 @@ fn onColorSelected(_: *ColorChooserDialog, color: math.Color) void {
 }
 fn onColorCancel(_: *ColorChooserDialog) void {
     setStatus("Color chooser cancelled", .{});
+}
+fn onAboutClose(_: *AboutDialog) void {
+    setStatus("AboutDialog closed", .{});
+}
+fn onFontSelected(_: *FontChooserDialog, desc: FontDesc) void {
+    setStatus("Font: {s} {d}{s}{s}", .{ desc.family, desc.size, if (desc.bold) " bold" else "", if (desc.italic) " italic" else "" });
+}
+fn onFontCancel(_: *FontChooserDialog) void {
+    setStatus("Font chooser cancelled", .{});
+}
+fn onAssistantApply(_: *Assistant) void {
+    setStatus("Assistant applied", .{});
+}
+fn onAssistantCancel(_: *Assistant) void {
+    setStatus("Assistant cancelled", .{});
+}
+fn onEmojiSelected(_: *EmojiChooser, emoji: []const u8) void {
+    setStatus("Emoji selected: {s}", .{emoji});
+}
+fn onEmojiClose(_: *EmojiChooser) void {
+    setStatus("EmojiChooser closed", .{});
 }
 
 fn setStatus(comptime fmt: []const u8, args: anytype) void {

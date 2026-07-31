@@ -19,7 +19,7 @@ const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 const Allocator = std.mem.Allocator;
-const Event = pal.event_mod.Event;
+const Event = pal.Event;
 
 pub const WindowHandle = struct {
     base: Widget,
@@ -44,7 +44,7 @@ pub const WindowHandle = struct {
             },
             .allocator = allocator,
         };
-        self.base.accessibility = .{ .role = .panel, .label = "Window Handle" };
+        self.base.accessibility = .{ .role = .container, .label = "Window Handle" };
         return self;
     }
 
@@ -81,15 +81,11 @@ fn destroyVTable(w: *Widget, allocator: Allocator) void {
     self.destroy(allocator);
 }
 
-fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size {
+fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
     const self: *WindowHandle = @fieldParentPtr("base", w);
     if (self.child) |c| {
-        return Widget.measureChild(c, .{
-            .width = constraints.max_width,
-            .height = constraints.max_height,
-        });
+        return c.vtable.measure(c, ctx, constraints);
     }
-    _ = ctx;
     return .{ .width = 0, .height = 0 };
 }
 
@@ -131,7 +127,7 @@ fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
                     if (double_click) {
                         self.last_press_time = 0;
                         if (self.on_toggle_maximized) |cb| {
-                            cb(self, ectx.window_id orelse 0);
+                            cb(self, mb.window_id);
                         }
                         return .handled;
                     }
@@ -140,7 +136,7 @@ fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
                     self.drag_start_x = mx;
                     self.drag_start_y = my;
                     if (self.on_begin_move_drag) |cb| {
-                        cb(self, ectx.window_id orelse 0, mx, my);
+                        cb(self, mb.window_id, mx, my);
                     }
                     return .handled;
                 } else {

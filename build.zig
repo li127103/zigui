@@ -78,6 +78,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "gallery-more2", .path = "examples/gallery_more2.zig" },
         .{ .name = "gallery-more3", .path = "examples/gallery_more3.zig" },
         .{ .name = "gallery-more4", .path = "examples/gallery_more4.zig" },
+        .{ .name = "gallery-more5", .path = "examples/gallery_more5.zig" },
     };
     for (examples) |ex| {
         const exe = b.addExecutable(.{

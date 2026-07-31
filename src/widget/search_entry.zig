@@ -447,8 +447,24 @@ pub const SearchEntry = struct {
             else => {},
         }
 
-        // 转发事件给 Entry
-        const result = self.input.base.dispatchEvent(event, ectx);
+        // 转发事件给内部 Entry。
+        // 注意: 必须直接调用内部 Entry 的 handler, 不能走 dispatchEvent —— dispatchEvent
+        // 处理完目标后会向父控件冒泡, 而 SearchEntry 正是 Entry 的父, 冒泡回来又会调用
+        // 本 onEvent, 再次 dispatchEvent, 形成无限递归 → 栈溢出 (打字时在焦点 Entry 上触发)。
+        // 这里只复刻 dispatchEvent 对目标控件自身的处理 (event controllers + on_event), 不冒泡。
+        const input_w = &self.input.base;
+        var result: EventResult = .ignored;
+        if (!input_w.state.disabled) {
+            for (input_w.event_controllers.items) |*ctrl| {
+                if (ctrl.handle_event(ctrl.self_ptr, input_w, event, ectx) == .handled) {
+                    result = .handled;
+                    break;
+                }
+            }
+            if (result != .handled) {
+                if (input_w.vtable.on_event) |h| result = h(input_w, event, ectx);
+            }
+        }
 
         // 文本变化：按 search_delay 规则走 debounce 或立即触发
         if (event.* == .text_input or event.* == .key) {

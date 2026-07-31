@@ -6,7 +6,7 @@
 //!   - GLArea            OpenGL 绘制区
 //!   - GraphicsOffload   离屏渲染卸载容器
 //!   - Scrollbar         滚动条 (带 Adjustment)
-//!   - FileDialog        文件对话框 (原生抽象)
+//!   - FileChooser       文件对话框 (点击打开新窗口)
 //!   - FilterListBar     过滤列表栏
 //!   - ConstraintLayout 约束布局
 //!   - ShortcutLabel     快捷键标签
@@ -28,8 +28,7 @@ const GLArea = zigui.gl_area.GLArea;
 const GraphicsOffload = zigui.graphics_offload.GraphicsOffload;
 const Scrollbar = zigui.scrollbar.Scrollbar;
 const Adjustment = zigui.model.adjustment.Adjustment;
-const FileDialog = zigui.file_dialog.FileDialog;
-const FileDialogResult = zigui.file_dialog.FileDialogResult;
+const FileChooser = zigui.file_chooser.FileChooser;
 const FilterListBar = zigui.filter_list_bar.FilterListBar;
 const ConstraintLayout = zigui.constraint_layout.ConstraintLayout;
 const ShortcutLabel = zigui.shortcut_label.ShortcutLabel;
@@ -45,6 +44,7 @@ var g_prev_mouse_down: bool = false;
 
 // 控件引用
 var g_file_label: ?*Label = null;
+var g_file_dialog: ?*FileChooser = null;
 var g_file_buf: [256]u8 = undefined;
 var g_filter_label: ?*Label = null;
 var g_filter_buf: [256]u8 = undefined;
@@ -117,16 +117,20 @@ fn buildTree(alloc: std.mem.Allocator) !void {
     sb.range.base.layout_style.vexpand = true;
     try root.base.addChild(alloc, &sb_tile.base);
 
-    // ── FileDialog (原生抽象，按钮触发) ──────────────────────────────────────
-    try section(alloc, root, "FileDialog (文件对话框)");
-    const fd = try FileDialog.new(alloc, "Open File");
-    fd.setMode(.open);
+    // ── FileChooser (文件对话框 · 点击打开新窗口) ──────────────────────────────
+    try section(alloc, root, "FileChooser (文件对话框 · 点击打开新窗口)");
+    const fd = try FileChooser.create(alloc, .{
+        .mode = .open,
+        .title = "Open File",
+        .on_file_selected = onFileChosen,
+        .on_cancel = onFileCancelled,
+    });
+    fd.base.state.visible = false;
+    g_file_dialog = fd;
+    try root.base.addChild(alloc, &fd.base);
     const fd_open = try Button.create(alloc, "Open File…", .{ .on_click = onFileOpen });
-    // 把 fd 存到 user_data 以便回调访问
-    fd_open.base.user_data = @ptrCast(fd);
     try root.base.addChild(alloc, &fd_open.base);
     const fd_save = try Button.create(alloc, "Save File…", .{ .on_click = onFileSave });
-    fd_save.base.user_data = @ptrCast(fd);
     try root.base.addChild(alloc, &fd_save.base);
     g_file_label = try Label.create(alloc, "result: (none)", .{ .font_size = 13, .color = math.Color.hex(0x94A3B8FF) });
     try root.base.addChild(alloc, &g_file_label.?.base);
@@ -178,26 +182,29 @@ fn buildTree(alloc: std.mem.Allocator) !void {
 
 // ── 回调 ─────────────────────────────────────────────────────────────────────
 
-fn onFileOpen(self: *Button) void {
-    const fd: *FileDialog = @ptrCast(@alignCast(self.base.user_data));
-    fd.openFile(onFileResult, null);
+fn onFileOpen(_: *Button) void {
+    if (g_file_dialog) |d| {
+        d.mode = .open;
+        d.show();
+    }
 }
 
-fn onFileSave(self: *Button) void {
-    const fd: *FileDialog = @ptrCast(@alignCast(self.base.user_data));
-    fd.saveFile(onFileResult, null);
+fn onFileSave(_: *Button) void {
+    if (g_file_dialog) |d| {
+        d.mode = .save;
+        d.show();
+    }
 }
 
-fn onFileResult(_: ?*anyopaque, result: FileDialogResult) void {
+fn onFileChosen(_: *FileChooser, path: []const u8) void {
     if (g_file_label) |lbl| {
-        const txt = switch (result) {
-            .open => |p| std.fmt.bufPrint(&g_file_buf, "result: open {s}", .{p}) catch "result",
-            .save => |n| std.fmt.bufPrint(&g_file_buf, "result: save {s}", .{n}) catch "result",
-            .folder => |p| std.fmt.bufPrint(&g_file_buf, "result: folder {s}", .{p}) catch "result",
-            .multi_open => |ps| std.fmt.bufPrint(&g_file_buf, "result: multi {d} files", .{ps.len}) catch "result",
-            .cancel => "result: cancel",
-        };
-        lbl.text = txt;
+        lbl.text = std.fmt.bufPrint(&g_file_buf, "result: {s}", .{path}) catch "result";
+    }
+}
+
+fn onFileCancelled(_: *FileChooser) void {
+    if (g_file_label) |lbl| {
+        lbl.text = "result: cancel";
     }
 }
 

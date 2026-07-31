@@ -85,7 +85,7 @@ pub const ShortcutsWindow = struct {
                 .id = widget_mod.genWidgetId(),
             },
             .allocator = allocator,
-            .groups = .{},
+            .groups = .empty,
             .window_title = opts.window_title,
             .modal = opts.modal,
             .title_font_size = opts.title_font_size,
@@ -414,7 +414,7 @@ pub const ShortcutsWindow = struct {
                 }
             },
             .text_input => |ti| {
-                const new_text = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.search_text, ti.text }) catch return .ignored;
+                const new_text = std.fmt.allocPrint(self.allocator, "{s}{u}", .{ self.search_text, ti.codepoint }) catch return .ignored;
                 self.allocator.free(self.search_text);
                 self.search_text = new_text;
                 self.base.markDirty();

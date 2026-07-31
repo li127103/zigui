@@ -115,7 +115,6 @@ pub const AlertDialog = struct {
         self.base.accessibility = .{
             .role = .dialog,
             .label = title_dup,
-            .modal = opts.modal,
         };
         self.last_dw = opts.width;
         return self;
@@ -248,7 +247,7 @@ pub const AlertDialog = struct {
         ctx.renderer.strokeRoundedRect(.{ .x = rx, .y = ry, .width = dw, .height = dh }, 12, 1, self.border_color) catch {};
 
         // 顶部 header
-        ctx.renderer.fillRoundedRect(.{ .x = rx, .y = ry, .width = dw, .height = 56 }, .{ .tl = 12, .tr = 12, .bl = 0, .br = 0 }, self.header_bg) catch {};
+        ctx.renderer.fillRoundedRect(.{ .x = rx, .y = ry, .width = dw, .height = 56 }, 12, self.header_bg) catch {};
 
         // 关闭按钮
         const close_x = rx + dw - 56;
@@ -304,7 +303,7 @@ pub const AlertDialog = struct {
 
         // 底部按钮栏
         const btn_bar_y = ry + dh - 60;
-        ctx.renderer.fillRoundedRect(.{ .x = rx, .y = btn_bar_y, .width = dw, .height = 60 }, .{ .tl = 0, .tr = 0, .bl = 12, .br = 12 }, self.btn_bar_bg) catch {};
+        ctx.renderer.fillRoundedRect(.{ .x = rx, .y = btn_bar_y, .width = dw, .height = 60 }, 12, self.btn_bar_bg) catch {};
 
         // 分隔线
         ctx.renderer.fillRect(.{ .x = rx, .y = btn_bar_y, .width = dw, .height = 1 }, self.border_color) catch {};
@@ -407,9 +406,11 @@ pub const AlertDialog = struct {
                 }
             },
             .key => |key| {
-                if (key.state == .pressed and key.key == .escape and self.on_response) |cb| {
-                    cb(self, 999);
-                    return .handled;
+                if (key.state == .pressed and key.key == .escape) {
+                    if (self.on_response) |cb| {
+                        cb(self, 999);
+                        return .handled;
+                    }
                 }
             },
             else => {},

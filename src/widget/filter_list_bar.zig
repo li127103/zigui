@@ -20,6 +20,7 @@ const std = @import("std");
 const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const pal = @import("../pal/pal.zig");
+const layout_mod = @import("../layout/engine.zig");
 const container_mod = @import("container.zig");
 const search_entry_mod = @import("search_entry.zig");
 const button_mod = @import("button.zig");
@@ -118,7 +119,8 @@ pub const FilterListBar = struct {
             .on_search = onSearchWrapper,
         });
         self.search_entry = se;
-        try cont.addChild(self.allocator, &se.base, .{ .expand = true, .fill = true });
+        try cont.base.addChild(self.allocator, &se.base);
+        se.base.layout_style.hexpand = true;
 
         if (self.show_close_button) {
             const btn = try Button.create(self.allocator, "", .{
@@ -130,9 +132,9 @@ pub const FilterListBar = struct {
                 .bg_pressed = math.Color.hex(0x1E293BFF),
             });
             self.close_button = btn;
-            try cont.addChild(self.allocator, &btn.base, .{});
+            try cont.base.addChild(self.allocator, &btn.base);
         }
-        self.base.accessibility = .{ .role = .search, .label = placeholder };
+        self.base.accessibility = .{ .role = .text, .label = placeholder };
     }
 
     pub fn destroy(self: *Self, allocator: std.mem.Allocator) void {
@@ -147,7 +149,7 @@ pub const FilterListBar = struct {
     /// GTK4: gtk_filter_list_bar_set_reveal_child
     pub fn setRevealChild(self: *Self, reveal: bool) void {
         self.reveal_child = reveal;
-        self.base.visible = reveal;
+        self.base.state.visible = reveal;
         self.base.markDirty();
         if (reveal) {
             // 自动聚焦搜索
@@ -187,46 +189,40 @@ pub const FilterListBar = struct {
     // ── Widget vtable ──────────────────────────────────────────────────────
     fn measure(
         widget: *Widget,
-        ctx: *const PaintContext,
-        available_w: f32,
-        available_h: f32,
-    ) math.Vec2 {
+        ctx: *PaintContext,
+        c: layout_mod.Constraints,
+    ) math.Size(f32) {
         const self: *Self = @ptrCast(@alignCast(widget));
         if (!self.reveal_child) {
-            return math.Vec2{ .x = @min(available_w, 0), .y = 0 };
+            return .{ .width = 0, .height = 0 };
         }
-        const cont = self.container orelse return .{ .x = @min(available_w, 120), .y = self.height };
-        const m = cont.base.vtable.measure(&cont.base, ctx, available_w, available_h);
-        const h = @max(self.height, m.y);
-        return .{ .x = @max(120, m.x), .y = h };
+        const cont = self.container orelse return .{ .width = @min(c.max_width, 120), .height = self.height };
+        const m = cont.base.vtable.measure(&cont.base, ctx, c);
+        const h = @max(self.height, m.height);
+        return .{ .width = @max(120, m.width), .height = h };
     }
 
-    fn layout(widget: *Widget, rect: math.Rect, ctx: *const PaintContext) void {
+    fn paint(widget: *Widget, ctx: *PaintContext) void {
         const self: *Self = @ptrCast(@alignCast(widget));
         if (!self.reveal_child) return;
-        if (self.container) |cont| {
-            cont.base.vtable.layout(&cont.base, rect, ctx);
-        }
-    }
-
-    fn paint(widget: *Widget, ctx: *const PaintContext, rect: math.Rect) void {
-        const self: *Self = @ptrCast(@alignCast(widget));
-        if (!self.reveal_child) return;
+        const rect = math.Rect(f32){
+            .x = ctx.offset_x + widget.rect.x,
+            .y = ctx.offset_y + widget.rect.y,
+            .width = widget.rect.width,
+            .height = widget.rect.height,
+        };
         // 背景圆角矩形
-        pal.getRenderer2D().fillRectRounded(rect, self.bg_color, self.corner_radius);
+        ctx.renderer.fillRoundedRect(rect, self.corner_radius, self.bg_color) catch {};
         // 顶部细线分隔
-        pal.getRenderer2D().strokeRect(
-            math.Rect.new(rect.x, rect.y, rect.width, 1),
-            self.border_color,
-            1,
-        );
+        ctx.renderer.strokeRect(.{ .x = rect.x, .y = rect.y, .width = rect.width, .height = 1 }, 1, self.border_color) catch {};
         // 容器内容
         if (self.container) |cont| {
-            cont.base.vtable.paint(&cont.base, ctx, rect);
+            cont.base.vtable.paint(&cont.base, ctx);
         }
     }
 
-    fn onEvent(widget: *Widget, ev: *const Widget.Event, ctx: *const EventContext) EventResult {
+    fn onEvent(widget: *Widget, ev: *const pal.Event, ctx: *const EventContext) EventResult {
+        _ = ctx;
         const self: *Self = @ptrCast(@alignCast(widget));
         if (!self.reveal_child) return .ignored;
 
@@ -241,16 +237,20 @@ pub const FilterListBar = struct {
             },
             else => {},
         }
-        return widget.dispatchEventToChildren(ev, ctx) orelse .ignored;
+        return .ignored;
+    }
+
+    fn destroyVTable(w: *Widget, allocator: std.mem.Allocator) void {
+        const self: *Self = @fieldParentPtr("base", w);
+        self.destroy(allocator);
     }
 
     const vtable = Widget.VTable{
         .type_name = "FilterListBar",
         .measure = measure,
-        .layout = layout,
         .paint = paint,
         .on_event = onEvent,
         .focusable = false,
-        .destroy = destroy,
+        .destroy = destroyVTable,
     };
 };

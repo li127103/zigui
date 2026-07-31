@@ -162,6 +162,10 @@ pub const Color = struct {
         };
     }
 
+    pub fn eql(self: Color, o: Color) bool {
+        return self.r == o.r and self.g == o.g and self.b == o.b and self.a == o.a;
+    }
+
     pub fn toPremultiplied(self: Color) [4]f32 {
         const alpha: f32 = @as(f32, @floatFromInt(self.a)) / 255.0;
         return .{
@@ -176,6 +180,9 @@ pub const Color = struct {
     pub const black = Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
     pub const transparent = Color{ .r = 0, .g = 0, .b = 0, .a = 0 };
 };
+
+/// 2D 向量 (x, y)
+pub const Vec2 = struct { x: f32 = 0, y: f32 = 0 };
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 

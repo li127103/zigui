@@ -25,18 +25,18 @@ const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 const Allocator = std.mem.Allocator;
-const Event = pal.event_mod.Event;
+const Event = pal.Event;
 
 /// 简化的 GL 上下文 (对应 GtkGLArea 暴露的 GdkGLContext)
 pub const GLContext = struct {
     /// 关联 PaintContext
     paint_ctx: *PaintContext,
     /// GLArea 绝对区域
-    viewport: math.Rect,
+    viewport: math.Rect(f32),
 
     pub fn clearColor(self: GLContext, color: math.Color) void {
         const R = self.paint_ctx.renderer;
-        R.fillRect(self.viewport, color, 0) catch {};
+        R.fillRect(self.viewport, color) catch {};
     }
 
     /// 画一个简单彩色三角形 (仿 glDrawArrays(GL_TRIANGLES))
@@ -177,7 +177,7 @@ pub const GLArea = struct {
             .corner_radius = opts.corner_radius,
         };
         if (opts.bg_color) |c| self.bg_color = c;
-        self.base.accessibility = .{ .role = .panel, .label = "GL Area" };
+        self.base.accessibility = .{ .role = .container, .label = "GL Area" };
         return self;
     }
 
@@ -224,7 +224,7 @@ fn destroyVTable(w: *Widget, allocator: Allocator) void {
     self.destroy(allocator);
 }
 
-fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size {
+fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
     const self: *GLArea = @fieldParentPtr("base", w);
     const max_w = if (constraints.max_width < std.math.inf(f32)) constraints.max_width else 800;
     const max_h = if (constraints.max_height < std.math.inf(f32)) constraints.max_height else 600;
@@ -260,8 +260,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
     }
 
     // clip to GL area
-    const saved = R.getClipRect();
-    R.setClipRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }) catch {};
+    const saved = R.pushClip(.{ .x = rx, .y = ry, .width = rw, .height = rh });
 
     // 背景 (仿 glClear)
     R.fillRoundedRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }, self.corner_radius, self.bg_color) catch {};
@@ -292,16 +291,14 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
             const st = @import("../text/styled_text.zig");
             var buf: [32]u8 = undefined;
             const fps_text = std.fmt.bufPrint(&buf, "{d:.1} FPS", .{self.fps}) catch "0.0 FPS";
-            st.drawText(ctx, fps_text, .{
-                .x = rx + 8,
-                .y = ry + 6,
+            st.drawText(ctx.renderer, ctx.allocator, fps_text, rx + 8, ry + 6, .{
                 .color = math.Color.hex(0x22C55EFF),
                 .font_size = 11,
             });
         }
     }
 
-    if (saved) |s| R.setClipRect(s) catch {};
+    R.popClip(saved);
     // 边框
     R.strokeRoundedRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }, self.corner_radius, 1, self.border_color) catch {};
 }

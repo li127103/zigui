@@ -22,7 +22,7 @@ const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 const Allocator = std.mem.Allocator;
-const Event = pal.event_mod.Event;
+const Event = pal.Event;
 
 pub const VideoState = enum {
     stopped,
@@ -94,13 +94,13 @@ pub const Video = struct {
     is_fullscreen: bool = false,
 
     // 命中检测缓存 (上次 paint 写入, onEvent 读取)
-    _hit_controls_area: math.Rect = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 },
-    _hit_rect_play: math.Rect = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 },
-    _hit_rect_stop: math.Rect = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 },
-    _hit_rect_progress: math.Rect = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 },
-    _hit_rect_mute: math.Rect = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 },
-    _hit_rect_volume: math.Rect = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 },
-    _hit_rect_fs: math.Rect = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    _hit_controls_area: math.Rect(f32) = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 },
+    _hit_rect_play: math.Rect(f32) = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 },
+    _hit_rect_stop: math.Rect(f32) = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 },
+    _hit_rect_progress: math.Rect(f32) = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 },
+    _hit_rect_mute: math.Rect(f32) = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 },
+    _hit_rect_volume: math.Rect(f32) = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 },
+    _hit_rect_fs: math.Rect(f32) = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 },
 
     // 样式
     bg_color: math.Color = math.Color.hex(0x000000FF),
@@ -134,7 +134,7 @@ pub const Video = struct {
             .base = .{
                 .vtable = &vtable,
                 .id = widget_mod.genWidgetId(),
-                .cursor = .default,
+                .cursor = .arrow,
             },
             .allocator = allocator,
             .media_uri = dup,
@@ -152,7 +152,7 @@ pub const Video = struct {
             .on_end_of_stream = opts.on_end_of_stream,
             .on_error = opts.on_error,
         };
-        self.base.accessibility = .{ .role = .panel, .label = "Video" };
+        self.base.accessibility = .{ .role = .container, .label = "Video" };
         return self;
     }
 
@@ -318,7 +318,7 @@ fn destroyVTable(w: *Widget, allocator: Allocator) void {
     self.destroy(allocator);
 }
 
-fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size {
+fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
     _ = w;
     _ = ctx;
     const max_w = if (constraints.max_width < std.math.inf(f32)) constraints.max_width else 960;
@@ -348,13 +348,12 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
     const R = ctx.renderer;
     const alloc = ctx.allocator;
 
-    const saved = R.getClipRect();
-    R.setClipRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }) catch {};
+    const saved = R.pushClip(.{ .x = rx, .y = ry, .width = rw, .height = rh });
     R.fillRoundedRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }, self.corner_radius, self.bg_color) catch {};
 
     const controls_h: f32 = if (self.show_controls) 60 else 0;
     const video_h = rh - controls_h;
-    const video_rect = math.Rect{ .x = rx, .y = ry, .width = rw, .height = video_h };
+    const video_rect = math.Rect(f32){ .x = rx, .y = ry, .width = rw, .height = video_h };
 
     // 视频画面占位: 渐变背景
     const grad_top = math.Color.hex(0x0F172AFF);
@@ -388,11 +387,11 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
             .y = video_rect.y + video_rect.height * t0,
             .width = video_rect.width,
             .height = video_rect.height * (t1 - t0) + 1,
-        }, color, 0) catch {};
+        }, color) catch {};
     }
     const bar_h = @max(6, video_h * 0.06);
-    R.fillRect(.{ .x = video_rect.x, .y = video_rect.y, .width = video_rect.width, .height = bar_h }, math.Color.hex(0x000000AA), 0) catch {};
-    R.fillRect(.{ .x = video_rect.x, .y = video_rect.y + video_h - bar_h, .width = video_rect.width, .height = bar_h }, math.Color.hex(0x000000AA), 0) catch {};
+    R.fillRect(.{ .x = video_rect.x, .y = video_rect.y, .width = video_rect.width, .height = bar_h }, math.Color.hex(0x000000AA)) catch {};
+    R.fillRect(.{ .x = video_rect.x, .y = video_rect.y + video_h - bar_h, .width = video_rect.width, .height = bar_h }, math.Color.hex(0x000000AA)) catch {};
 
     const show_big_play = self.state == .stopped or self.state == .ended or self.state == .paused or self.state == .loading or self.state == .err_state;
     if (show_big_play) {
@@ -413,63 +412,35 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
             else => self.icon_color,
         };
         if (self.state == .err_state) {
-            icons_mod.drawIcon(alloc, R, icons_mod.IconName.alert_circle, .{
-                .x = cx,
-                .y = cy,
-                .size = icon_size,
-                .color = icon_color_,
-            }) catch {};
+            icons_mod.drawIcon(R, cx, cy, icon_size, icon_color_, icons_mod.IconName.err) catch {};
         } else if (self.state == .loading) {
-            icons_mod.drawIcon(alloc, R, icons_mod.IconName.loader, .{
-                .x = cx,
-                .y = cy,
-                .size = icon_size,
-                .color = icon_color_,
-            }) catch {};
+            icons_mod.drawIcon(R, cx, cy, icon_size, icon_color_, icons_mod.IconName.refresh) catch {};
         } else {
-            icons_mod.drawIcon(alloc, R, icons_mod.IconName.play, .{
-                .x = cx,
-                .y = cy,
-                .size = icon_size,
-                .color = icon_color_,
-            }) catch {};
+            icons_mod.drawIcon(R, cx, cy, icon_size, icon_color_, icons_mod.IconName.arrow_right) catch {};
         }
     }
 
     if (self.state == .buffering or self.state == .loading) {
         const sz: f32 = 24;
-        icons_mod.drawIcon(alloc, R, icons_mod.IconName.loader, .{
-            .x = video_rect.x + video_rect.width - sz - 16,
-            .y = video_rect.y + 16,
-            .size = sz,
-            .color = math.Color.hex(0xFFFFFFFF),
-        }) catch {};
+        icons_mod.drawIcon(R, video_rect.x + video_rect.width - sz - 16, video_rect.y + 16, sz, math.Color.hex(0xFFFFFFFF), icons_mod.IconName.refresh) catch {};
     }
 
     if (self.state == .err_state) {
         const msg = if (self.error_message.len > 0) self.error_message else "Video playback failed";
         var title_buf: [64]u8 = undefined;
         const title_msg = std.fmt.bufPrint(&title_buf, "Error: {s}", .{@tagName(self.error_code)}) catch "Error";
-        const title_ts = styled_text.measureText(alloc, title_msg, .{ .font_size = 18, .bold = true });
+        const title_ts = styled_text.measureText(alloc, title_msg, .{ .font_size = 18, .font_weight = 700 });
         const msg_ts = styled_text.measureText(alloc, msg, .{ .font_size = 14 });
         const block_w = @max(title_ts.width, msg_ts.width) + 40;
         const block_h = title_ts.height + msg_ts.height + 28;
         const bx = video_rect.x + (video_rect.width - block_w) / 2;
         const by = video_rect.y + video_rect.height * 0.65;
         R.fillRoundedRect(.{ .x = bx, .y = by, .width = block_w, .height = block_h }, 8, math.Color.hex(0x000000AA)) catch {};
-        styled_text.drawText(ctx, title_msg, .{
-            .x = bx + 20,
-            .y = by + 14,
-            .color = math.Color.hex(0xFCA5A5FF),
+        styled_text.drawText(ctx.renderer, ctx.allocator, title_msg, bx + 20, by + 14, .{ .color = math.Color.hex(0xFCA5A5FF),
             .font_size = 18,
-            .bold = true,
-        });
-        styled_text.drawText(ctx, msg, .{
-            .x = bx + 20,
-            .y = by + 14 + title_ts.height + 8,
-            .color = math.Color.hex(0xE2E8F0FF),
-            .font_size = 14,
-        });
+            .font_weight = 700, });
+        styled_text.drawText(ctx.renderer, ctx.allocator, msg, bx + 20, by + 14 + title_ts.height + 8, .{ .color = math.Color.hex(0xE2E8F0FF),
+            .font_size = 14, });
     }
 
     if (!self.show_controls and self.duration_s > 0) {
@@ -479,49 +450,30 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
         const dur_s = self.fmtTime(self.duration_s, &buf2);
         var both_buf: [32]u8 = undefined;
         const both = std.fmt.bufPrint(&both_buf, "{s} / {s}", .{ pos_s, dur_s }) catch "";
-        styled_text.drawText(ctx, both, .{
-            .x = video_rect.x + video_rect.width - 90,
-            .y = video_rect.y + 16,
-            .color = math.Color.hex(0xFFFFFFFF),
-            .font_size = 12,
-        });
+        styled_text.drawText(ctx.renderer, ctx.allocator, both, video_rect.x + video_rect.width - 90, video_rect.y + 16, .{ .color = math.Color.hex(0xFFFFFFFF),
+            .font_size = 12, });
     }
 
     if (self.show_controls and controls_h > 0 and self.controls_alpha > 0.01) {
         const cy = ry + rh - controls_h;
         const cb = withAlpha(self.controls_bg, self.controls_alpha);
-        R.fillRect(.{ .x = rx, .y = cy, .width = rw, .height = controls_h }, cb, 0) catch {};
-        R.fillRoundedRectPartial(.{ .x = rx, .y = cy, .width = rw, .height = controls_h }, cb, self.corner_radius, .{
-            .top_left = false,
-            .top_right = false,
-            .bottom_left = true,
-            .bottom_right = true,
-        }) catch {};
+        R.fillRect(.{ .x = rx, .y = cy, .width = rw, .height = controls_h }, cb) catch {};
+        R.fillRoundedRect(.{ .x = rx, .y = cy, .width = rw, .height = controls_h }, self.corner_radius, cb) catch {};
 
         const pad: f32 = 10;
         const btn_size: f32 = 32;
         const row_y = cy + (controls_h - 36) / 2;
 
         var cur_x: f32 = rx + pad;
-        const play_rect = math.Rect{ .x = cur_x, .y = row_y + 2, .width = btn_size, .height = btn_size };
-        const play_icon: icons_mod.IconName = if (self.state == .playing) icons_mod.IconName.pause else icons_mod.IconName.play;
+        const play_rect = math.Rect(f32){ .x = cur_x, .y = row_y + 2, .width = btn_size, .height = btn_size };
+        const play_icon: icons_mod.IconName = if (self.state == .playing) icons_mod.IconName.none else icons_mod.IconName.arrow_right;
         const play_bg = if (self.hover_play) withAlpha(math.Color.hex(0x334155FF), self.controls_alpha) else math.Color{ .r = 0, .g = 0, .b = 0, .a = 0 };
         if (play_bg.a > 0) R.fillRoundedRect(play_rect, 6, play_bg) catch {};
-        icons_mod.drawIcon(alloc, R, play_icon, .{
-            .x = play_rect.x + 8,
-            .y = play_rect.y + 8,
-            .size = 16,
-            .color = withAlpha(self.icon_color, self.controls_alpha),
-        }) catch {};
+        icons_mod.drawIcon(R, play_rect.x + 8, play_rect.y + 8, 16, withAlpha(self.icon_color, self.controls_alpha), play_icon) catch {};
         cur_x = play_rect.x + play_rect.width + 4;
 
-        const stop_rect = math.Rect{ .x = cur_x, .y = row_y + 2, .width = 24, .height = btn_size };
-        icons_mod.drawIcon(alloc, R, icons_mod.IconName.square, .{
-            .x = stop_rect.x + 6,
-            .y = stop_rect.y + 10,
-            .size = 12,
-            .color = withAlpha(self.controls_text, self.controls_alpha),
-        }) catch {};
+        const stop_rect = math.Rect(f32){ .x = cur_x, .y = row_y + 2, .width = 24, .height = btn_size };
+        icons_mod.drawIcon(R, stop_rect.x + 6, stop_rect.y + 10, 12, withAlpha(self.controls_text, self.controls_alpha), icons_mod.IconName.none) catch {};
         cur_x = stop_rect.x + stop_rect.width + 10;
 
         var pos_buf: [16]u8 = undefined;
@@ -531,12 +483,8 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
         var time_buf: [40]u8 = undefined;
         const time_text = std.fmt.bufPrint(&time_buf, "{s} / {s}", .{ pos_s, dur_s }) catch "";
         const ts = styled_text.measureText(alloc, time_text, .{ .font_size = 12 });
-        styled_text.drawText(ctx, time_text, .{
-            .x = cur_x,
-            .y = row_y + (36 - ts.height) / 2,
-            .color = withAlpha(self.controls_text, self.controls_alpha),
-            .font_size = 12,
-        });
+        styled_text.drawText(ctx.renderer, ctx.allocator, time_text, cur_x, row_y + (36 - ts.height) / 2, .{ .color = withAlpha(self.controls_text, self.controls_alpha),
+            .font_size = 12, });
         cur_x += ts.width + 12;
 
         const right_area_start = rx + rw - pad - 40 - 4 - 40 - 8 - 120;
@@ -559,30 +507,20 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
         }
 
         cur_x = rx + rw - pad - 40;
-        const fs_rect = math.Rect{ .x = cur_x, .y = row_y + 2, .width = 36, .height = 32 };
+        const fs_rect = math.Rect(f32){ .x = cur_x, .y = row_y + 2, .width = 36, .height = 32 };
         const fs_bg = if (self.hover_fullscreen) withAlpha(math.Color.hex(0x334155FF), self.controls_alpha) else math.Color{ .r = 0, .g = 0, .b = 0, .a = 0 };
         if (fs_bg.a > 0) R.fillRoundedRect(fs_rect, 6, fs_bg) catch {};
-        const fs_icon: icons_mod.IconName = if (self.is_fullscreen) icons_mod.IconName.minimize_2 else icons_mod.IconName.maximize_2;
-        icons_mod.drawIcon(alloc, R, fs_icon, .{
-            .x = fs_rect.x + 10,
-            .y = fs_rect.y + 8,
-            .size = 16,
-            .color = withAlpha(self.icon_color, self.controls_alpha),
-        }) catch {};
+        const fs_icon: icons_mod.IconName = if (self.is_fullscreen) icons_mod.IconName.none else icons_mod.IconName.none;
+        icons_mod.drawIcon(R, fs_rect.x + 10, fs_rect.y + 8, 16, withAlpha(self.icon_color, self.controls_alpha), fs_icon) catch {};
         cur_x = fs_rect.x - 120 - 4;
 
         const vol_area_x = cur_x;
-        const vol_icon_rect = math.Rect{ .x = vol_area_x, .y = row_y + 2, .width = 32, .height = 32 };
+        const vol_icon_rect = math.Rect(f32){ .x = vol_area_x, .y = row_y + 2, .width = 32, .height = 32 };
         const muted_ = self.muted or self.volume < 0.001;
-        const vol_icon: icons_mod.IconName = if (muted_) icons_mod.IconName.volume_x else if (self.volume < 0.33) icons_mod.IconName.volume_1 else if (self.volume < 0.66) icons_mod.IconName.volume_2 else icons_mod.IconName.volume;
+        const vol_icon: icons_mod.IconName = if (muted_) icons_mod.IconName.none else if (self.volume < 0.33) icons_mod.IconName.none else if (self.volume < 0.66) icons_mod.IconName.none else icons_mod.IconName.none;
         const vbg = if (self.hover_mute) withAlpha(math.Color.hex(0x334155FF), self.controls_alpha) else math.Color{ .r = 0, .g = 0, .b = 0, .a = 0 };
         if (vbg.a > 0) R.fillRoundedRect(vol_icon_rect, 6, vbg) catch {};
-        icons_mod.drawIcon(alloc, R, vol_icon, .{
-            .x = vol_icon_rect.x + 8,
-            .y = vol_icon_rect.y + 8,
-            .size = 16,
-            .color = withAlpha(if (muted_) self.controls_muted else self.icon_color, self.controls_alpha),
-        }) catch {};
+        icons_mod.drawIcon(R, vol_icon_rect.x + 8, vol_icon_rect.y + 8, 16, withAlpha(if (muted_) self.controls_muted else self.icon_color, self.controls_alpha), vol_icon) catch {};
         const vb_x = vol_icon_rect.x + vol_icon_rect.width + 4;
         const vb_w: f32 = 80;
         const vb_y = row_y + 16;
@@ -596,27 +534,27 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
 
         self._hit_rect_play = play_rect;
         self._hit_rect_stop = stop_rect;
-        self._hit_rect_progress = math.Rect{ .x = prog_area_x, .y = prog_y - 10, .width = prog_area_w, .height = prog_h + 20 };
+        self._hit_rect_progress = math.Rect(f32){ .x = prog_area_x, .y = prog_y - 10, .width = prog_area_w, .height = prog_h + 20 };
         self._hit_rect_mute = vol_icon_rect;
-        self._hit_rect_volume = math.Rect{ .x = vb_x, .y = vb_y - 10, .width = vb_w, .height = vb_h + 20 };
+        self._hit_rect_volume = math.Rect(f32){ .x = vb_x, .y = vb_y - 10, .width = vb_w, .height = vb_h + 20 };
         self._hit_rect_fs = fs_rect;
-        self._hit_controls_area = math.Rect{ .x = rx, .y = cy, .width = rw, .height = controls_h };
+        self._hit_controls_area = math.Rect(f32){ .x = rx, .y = cy, .width = rw, .height = controls_h };
     } else {
         // 清空
-        self._hit_controls_area = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
-        self._hit_rect_play = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
-        self._hit_rect_stop = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
-        self._hit_rect_progress = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
-        self._hit_rect_mute = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
-        self._hit_rect_volume = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
-        self._hit_rect_fs = math.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
+        self._hit_controls_area = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 };
+        self._hit_rect_play = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 };
+        self._hit_rect_stop = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 };
+        self._hit_rect_progress = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 };
+        self._hit_rect_mute = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 };
+        self._hit_rect_volume = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 };
+        self._hit_rect_fs = math.Rect(f32){ .x = 0, .y = 0, .width = 0, .height = 0 };
     }
 
-    if (saved) |s| R.setClipRect(s) catch {};
+    R.popClip(saved);
     R.strokeRoundedRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }, self.corner_radius, 1, math.Color.hex(0x1E293BFF)) catch {};
 }
 
-fn in_rect(r: math.Rect, x: f32, y: f32) bool {
+fn in_rect(r: math.Rect(f32), x: f32, y: f32) bool {
     return x >= r.x and x < r.x + r.width and y >= r.y and y < r.y + r.height;
 }
 
@@ -636,7 +574,7 @@ fn onEvent(w: *Widget, event: *const Event, _: *EventContext) EventResult {
         .key => |k| {
             if (k.state == .pressed) {
                 switch (k.key) {
-                    .space, .kp_space => {
+                    .space => {
                         self.togglePlay();
                         return .handled;
                     },
@@ -644,11 +582,11 @@ fn onEvent(w: *Widget, event: *const Event, _: *EventContext) EventResult {
                         self.togglePlay();
                         return .handled;
                     },
-                    .arrow_left => {
+                    .left => {
                         self.seek(self.position_s - 5);
                         return .handled;
                     },
-                    .arrow_right => {
+                    .right => {
                         self.seek(self.position_s + 5);
                         return .handled;
                     },
@@ -660,11 +598,11 @@ fn onEvent(w: *Widget, event: *const Event, _: *EventContext) EventResult {
                         self.seek(self.duration_s);
                         return .handled;
                     },
-                    .arrow_up => {
+                    .up => {
                         self.setVolume(self.volume + 0.05);
                         return .handled;
                     },
-                    .arrow_down => {
+                    .down => {
                         self.setVolume(self.volume - 0.05);
                         return .handled;
                     },
@@ -706,7 +644,7 @@ fn onEvent(w: *Widget, event: *const Event, _: *EventContext) EventResult {
                 self.hover_mute = in_rect(hrm, mx, my);
                 self.hover_fullscreen = in_rect(hrfs, mx, my);
                 const cursor_hand = (in_rect(hrp, mx, my) or in_rect(hrst, mx, my) or in_rect(hrm, mx, my) or in_rect(hrfs, mx, my) or in_rect(hrpr, mx, my) or in_rect(hrv, mx, my));
-                self.base.cursor = if (cursor_hand) .pointing_hand else .default;
+                self.base.cursor = if (cursor_hand) .pointing_hand else .arrow;
                 if (self.drag_progress and self._hit_rect_progress.width > 0) {
                     const prog = self._hit_rect_progress;
                     const pct = @max(0, @min(1, (mx - prog.x) / prog.width));
@@ -718,7 +656,7 @@ fn onEvent(w: *Widget, event: *const Event, _: *EventContext) EventResult {
                     self.hover_play = false;
                     self.hover_mute = false;
                     self.hover_fullscreen = false;
-                    self.base.cursor = .default;
+                    self.base.cursor = .arrow;
                     self.base.markDirty();
                 }
             }

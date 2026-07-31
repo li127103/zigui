@@ -160,7 +160,6 @@ pub const ToolPalette = struct {
             .bg_color = self.bg_color,
             .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 },
             .gap = .{ .width = 0, .height = 8 },
-            .scrollable = true,
         });
         self.content_container = content;
         try self.base.addChild(alloc, &content.base);
@@ -180,19 +179,16 @@ pub const ToolPalette = struct {
 
         const content = try Container.create(alloc, .{
             .direction = .row,
-            .wrap = true,
             .gap = .{ .width = 6, .height = 6 },
             .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 },
         });
         grp.content_container = content;
 
         const exp = try Expander.create(alloc, name, .{
-            .bg_color = self.group_bg_color,
             .text_color = self.text_color,
-            .corner_radius = 6,
         });
         grp.expander = exp;
-        try exp.setContent(&content.base);
+        try exp.base.addChild(alloc, &content.base);
 
         if (self.content_container) |cc| {
             try cc.base.addChild(alloc, &exp.base);

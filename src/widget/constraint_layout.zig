@@ -25,6 +25,7 @@ const std = @import("std");
 const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
+const pal = @import("../pal/pal.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
@@ -122,7 +123,7 @@ pub const ConstraintLayout = struct {
     pub fn destroy(self: *Self, allocator: std.mem.Allocator) void {
         // 显式销毁所有子控件 (遵循硬约束)
         for (self.children.items) |child| {
-            if (child.vtable.destroy) |d| d(child, allocator);
+            child.vtable.destroy(child, allocator);
         }
         self.children.deinit(allocator);
         self.constraints.deinit(allocator);
@@ -311,7 +312,7 @@ pub const ConstraintLayout = struct {
                 };
                 if (violate) {
                     // 简单处理: 直接设置到期望值 (忽略 multiplier 反向解)
-                    self.writeAttr(self, c.target, c.target_attr, expected);
+                    self.writeAttr(c.target, c.target_attr, expected);
                     changed = true;
                 }
             }
@@ -324,7 +325,7 @@ pub const ConstraintLayout = struct {
     const vtable = Widget.VTable{
         .type_name = "constraint_layout",
         .measure = measure,
-        .layout = layout,
+        .perform_layout = layout,
         .paint = paint,
         .on_event = onEvent,
         .focusable = false,
@@ -386,7 +387,7 @@ pub const ConstraintLayout = struct {
         // Widget.paintTree 默认循环会绘制 children, 此处无需手动 paintTree
     }
 
-    fn onEvent(w: *Widget, event: *const widget_mod.pal.Event, ectx: *EventContext) EventResult {
+    fn onEvent(w: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {
         const self: *Self = @fieldParentPtr("base", w);
         _ = self;
         _ = event;

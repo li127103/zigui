@@ -56,14 +56,13 @@ pub const MediaControls = struct {
         const self = try allocator.create(MediaControls);
         self.* = .{
             .allocator = allocator,
-            .base = Widget.init(&vtable),
+            .base = .{ .vtable = &vtable, .id = widget_mod.genWidgetId() },
         };
-        self.base.cursor = .default;
+        self.base.cursor = .arrow;
         return self;
     }
 
     pub fn destroy(self: *Self, allocator: std.mem.Allocator) void {
-        self.base.deinit(allocator);
         allocator.destroy(self);
     }
 
@@ -139,12 +138,11 @@ pub const MediaControls = struct {
             // 播放符号：三角形
             const tri_size: f32 = 10;
             const half = tri_size / 2;
-            r2d.fillTriangle(
-                .{ .x = btn_cx - half, .y = btn_cy - tri_size / 2 },
-                .{ .x = btn_cx - half, .y = btn_cy + tri_size / 2 },
-                .{ .x = btn_cx + half, .y = btn_cy },
-                self.bg_color,
-            ) catch {};
+            r2d.fillConvexPolygon(&[3][2]f32{
+                .{ btn_cx - half, btn_cy - tri_size / 2 },
+                .{ btn_cx - half, btn_cy + tri_size / 2 },
+                .{ btn_cx + half, btn_cy },
+            }, self.bg_color) catch {};
         }
 
         // 时间标签
@@ -211,12 +209,11 @@ pub const MediaControls = struct {
         const icon_cx = vol_x + vol_btn_w / 2;
         const icon_cy = vol_y + vol_btn_w / 2;
         r2d.fillRect(.{ .x = icon_cx - 5, .y = icon_cy - 3, .width = 4, .height = 6 }, self.bg_color) catch {};
-        r2d.fillTriangle(
-            .{ .x = icon_cx - 1, .y = icon_cy - 6 },
-            .{ .x = icon_cx - 1, .y = icon_cy + 6 },
-            .{ .x = icon_cx + 4, .y = icon_cy },
-            self.bg_color,
-        ) catch {};
+        r2d.fillConvexPolygon(&[3][2]f32{
+            .{ icon_cx - 1, icon_cy - 6 },
+            .{ icon_cx - 1, icon_cy + 6 },
+            .{ icon_cx + 4, icon_cy },
+        }, self.bg_color) catch {};
 
         // 音量滑块弹窗
         if (self.volume_popup_visible) {
@@ -283,7 +280,7 @@ pub const MediaControls = struct {
                 {
                     self.base.markDirty();
                 }
-                return .pass;
+                return .handled;
             },
             .mouse_button => |mb| {
                 if (mb.state != .pressed) {
@@ -291,7 +288,7 @@ pub const MediaControls = struct {
                         self.dragging_progress = false;
                         self.volume_dragging = false;
                     }
-                    return .pass;
+                    return .ignored;
                 }
 
                 const mx = @as(f32, @floatFromInt(mb.x)) - rx;
@@ -351,9 +348,9 @@ pub const MediaControls = struct {
                     return .handled;
                 }
 
-                return .pass;
+                return .ignored;
             },
-            else => return .pass,
+            else => return .ignored,
         }
     }
 

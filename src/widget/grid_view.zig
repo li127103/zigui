@@ -28,7 +28,7 @@ const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 const Allocator = std.mem.Allocator;
-const Event = pal.event_mod.Event;
+const Event = pal.Event;
 
 const ListModel = list_mod.ListModel;
 const SelectionModel = sel_mod.SelectionModel;
@@ -50,8 +50,8 @@ pub const GridView = struct {
     allocator: Allocator,
 
     /// ── 旧 API：items (GridItem 数组) ──
-    items: std.ArrayListUnmanaged(GridItem) = .{},
-    items_dup: std.ArrayListUnmanaged([2][]const u8) = .{}, // title_dup, subtitle_dup
+    items: std.ArrayListUnmanaged(GridItem) = .{ .items = &.{}, .capacity = 0 },
+    items_dup: std.ArrayListUnmanaged([2][]const u8) = .{ .items = &.{}, .capacity = 0 }, // title_dup, subtitle_dup
 
     /// ── GTK4 模型层 API ──
     model: ?ListModel = null,
@@ -79,7 +79,7 @@ pub const GridView = struct {
     on_activated: ?*const fn (self: *GridView, item: usize) void = null,
 
     /// 自定义渲染器: (ctx, rect, item_index, userdata)
-    custom_renderer: ?*const fn (ctx: *PaintContext, rect: math.Rect, index: usize, userdata: ?*anyopaque) void = null,
+    custom_renderer: ?*const fn (ctx: *PaintContext, rect: math.Rect(f32), index: usize, userdata: ?*anyopaque) void = null,
     custom_userdata: ?*anyopaque = null,
 
     // 样式
@@ -125,7 +125,7 @@ pub const GridView = struct {
             .on_selected = opts.on_selected,
             .on_activated = opts.on_activated,
         };
-        self.base.accessibility = .{ .role = .grid, .label = "Grid View" };
+        self.base.accessibility = .{ .role = .list, .label = "Grid View" };
         return self;
     }
 
@@ -363,7 +363,7 @@ fn destroyVTable(w: *Widget, allocator: Allocator) void {
     self.destroy(allocator);
 }
 
-fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size {
+fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
     const self: *GridView = @fieldParentPtr("base", w);
     const max_w = if (constraints.max_width < std.math.inf(f32)) constraints.max_width else 600;
     const max_h = if (constraints.max_height < std.math.inf(f32)) constraints.max_height else 500;
@@ -386,8 +386,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
     // 背景
     R.fillRoundedRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }, self.radius, self.bg_color) catch {};
 
-    const saved = R.getClipRect();
-    R.setClipRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }) catch {};
+    const saved = R.pushClip(.{ .x = rx, .y = ry, .width = rw, .height = rh });
 
     self.clampScroll(rw, rh);
     const L = self.layout(rw);
@@ -412,7 +411,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
             const x = rx + self.padding + @as(f32, @floatFromInt(col)) * (L.item_w + L.col_gap);
             const y_base = ry + self.padding + @as(f32, @floatFromInt(row)) * (L.item_h + self.spacing);
             const y = y_base - self.scroll_offset;
-            const rect = math.Rect{ .x = x, .y = y, .width = L.item_w, .height = L.item_h };
+            const rect = math.Rect(f32){ .x = x, .y = y, .width = L.item_w, .height = L.item_h };
 
             const is_hover = if (self.hovered_item) |h| h == idx else false;
             const any_sel = self.effectiveIsSelected(idx);
@@ -437,7 +436,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
             }
 
             if (self.custom_renderer) |renderer| {
-                const inner_rect = math.Rect{
+                const inner_rect = math.Rect(f32){
                     .x = rect.x + self.item_padding,
                     .y = rect.y + self.item_padding,
                     .width = rect.width - self.item_padding * 2,
@@ -460,22 +459,12 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
                 const icon_size = @min(avail_w, icon_h);
                 const icon_x = rect.x + (rect.width - icon_size) / 2;
                 const icon_y = rect.y + inner_pad;
-                icons_mod.drawIcon(alloc, R, icons_mod.IconName.folder, .{
-                    .x = icon_x,
-                    .y = icon_y,
-                    .size = icon_size,
-                    .color = self.icon_color,
-                }) catch {};
+                icons_mod.drawIcon(R, icon_x, icon_y, icon_size, self.icon_color, .home) catch {};
                 if (self.show_labels) {
                     const tc: math.Color = if (any_sel) math.Color.hex(0xFFFFFFFF) else self.title_color;
-                    styled_text.drawText(ctx, title, .{
-                        .x = rect.x + inner_pad,
-                        .y = icon_y + icon_size + 6,
-                        .color = tc,
+                    styled_text.drawText(ctx.renderer, ctx.allocator, title, rect.x + inner_pad, icon_y + icon_size + 6, .{ .color = tc,
                         .font_size = 13,
-                        .max_width = avail_w,
-                        .alignment = .center,
-                    });
+                        .max_width = avail_w, });
                 }
             } else {
                 // 默认渲染: 图标 + 标题 + 副标题 (旧 items API)
@@ -490,8 +479,8 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
                 var sub_h: f32 = 0;
                 if (self.show_labels) {
                     title_h = 18;
-                    sub_h = if (item.subtitle.len > 0) 16 else 0;
-                    icon_h = avail_h - title_h - sub_h - (if (item.subtitle.len > 0) 12 else 6);
+                    sub_h = if (item.subtitle.len > 0) @as(f32, 16) else 0;
+                    icon_h = avail_h - title_h - sub_h - (if (item.subtitle.len > 0) @as(f32, 12) else 6);
                 }
                 icon_h = @max(32, icon_h);
 
@@ -500,55 +489,32 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
                 const icon_y = rect.y + inner_pad;
 
                 if (item.icon_name) |iname| {
-                    icons_mod.drawIcon(alloc, R, iname, .{
-                        .x = icon_x,
-                        .y = icon_y,
-                        .size = icon_size,
-                        .color = self.icon_color,
-                    }) catch {};
+                    icons_mod.drawIcon(R, icon_x, icon_y, icon_size, self.icon_color, iname) catch {};
                 } else if (item.icon.len > 0) {
                     // emoji/text 图标
                     const icon_font = icon_size * 0.6;
                     const ts = styled_text.measureText(alloc, item.icon, .{ .font_size = icon_font });
-                    styled_text.drawText(ctx, item.icon, .{
-                        .x = rect.x + (rect.width - ts.width) / 2,
-                        .y = icon_y + (icon_size - ts.height) / 2,
-                        .font_size = icon_font,
-                        .color = self.icon_color,
-                    });
+                    styled_text.drawText(ctx.renderer, ctx.allocator, item.icon, rect.x + (rect.width - ts.width) / 2, icon_y + (icon_size - ts.height) / 2, .{ .font_size = icon_font,
+                        .color = self.icon_color, });
                 } else {
                     // 默认图标
-                    icons_mod.drawIcon(alloc, R, icons_mod.IconName.folder, .{
-                        .x = icon_x,
-                        .y = icon_y,
-                        .size = icon_size,
-                        .color = self.icon_color,
-                    }) catch {};
+                    icons_mod.drawIcon(R, icon_x, icon_y, icon_size, self.icon_color, .home) catch {};
                 }
 
                 if (self.show_labels) {
                     const label_y = icon_y + icon_size + 6;
                     // 标题
                     const tc: math.Color = if (any_sel) math.Color.hex(0xFFFFFFFF) else self.title_color;
-                    styled_text.drawText(ctx, item.title, .{
-                        .x = rect.x + inner_pad,
-                        .y = label_y,
-                        .color = tc,
+                    styled_text.drawText(ctx.renderer, ctx.allocator, item.title, rect.x + inner_pad, label_y, .{ .color = tc,
                         .font_size = 13,
-                        .max_width = avail_w,
-                        .alignment = .center,
-                    });
+                        .max_width = avail_w, });
                     // 副标题
                     if (item.subtitle.len > 0) {
                         const sub_y = label_y + title_h + 4;
                         const sc: math.Color = if (any_sel) math.Color.hex(0xE2E8F0FF) else self.subtitle_color;
-                        styled_text.drawText(ctx, item.subtitle, .{
-                            .x = rect.x + inner_pad,
-                            .y = sub_y,
-                            .color = sc,
+                        styled_text.drawText(ctx.renderer, ctx.allocator, item.subtitle, rect.x + inner_pad, sub_y, .{ .color = sc,
                             .font_size = 11,
                             .max_width = avail_w,
-                            .alignment = .center,
                         });
                     }
                 }
@@ -571,7 +537,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
         }, 3, self.scrollbar_color) catch {};
     }
 
-    if (saved) |s| R.setClipRect(s) catch {};
+    R.popClip(saved);
     R.strokeRoundedRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }, self.radius, 1, math.Color.hex(0x1E293BFF)) catch {};
 }
 

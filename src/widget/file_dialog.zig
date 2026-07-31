@@ -136,7 +136,7 @@ fn destroyVTable(w: *Widget, allocator: Allocator) void {
     self.destroy(allocator);
 }
 
-fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size {
+fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
     _ = w;
     _ = ctx;
     _ = constraints;

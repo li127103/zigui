@@ -16,7 +16,7 @@ const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 const Allocator = std.mem.Allocator;
-const Event = pal.event_mod.Event;
+const Event = pal.Event;
 
 pub const ColorDialogResult = union(enum) {
     ok: math.Color,

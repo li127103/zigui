@@ -32,7 +32,7 @@ const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 const Allocator = std.mem.Allocator;
-const Event = pal.event_mod.Event;
+const Event = pal.Event;
 
 const ListModel = list_mod.ListModel;
 const SelectionModel = sel_mod.SelectionModel;
@@ -59,7 +59,7 @@ pub const ColumnViewColumn = struct {
     ///   - 也可被 cell renderer / ListItemFactory 直接调用抽取 cell 文本
     expression: ?Expression = null,
     /// 自定义 cell 渲染函数 (可选): (renderer, cell_rect, row_index, column_index, userdata)
-    cell_renderer: ?*const fn (ctx: *PaintContext, rect: math.Rect, row: usize, col: usize, userdata: ?*anyopaque) void = null,
+    cell_renderer: ?*const fn (ctx: *PaintContext, rect: math.Rect(f32), row: usize, col: usize, userdata: ?*anyopaque) void = null,
     /// 自定义渲染的 userdata
     userdata: ?*anyopaque = null,
 };
@@ -68,11 +68,11 @@ pub const ColumnView = struct {
     base: Widget,
     allocator: Allocator,
 
-    columns: std.ArrayListUnmanaged(ColumnViewColumn) = .{},
-    columns_dup: std.ArrayListUnmanaged([]const u8) = .{}, // 列标题 dup 缓存
+    columns: std.ArrayListUnmanaged(ColumnViewColumn) = .{ .items = &.{}, .capacity = 0 },
+    columns_dup: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 }, // 列标题 dup 缓存
 
     /// ── 旧 API：行数据 (每行 cells 是字符串列表) ──
-    rows: std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)) = .{},
+    rows: std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)) = .{ .items = &.{}, .capacity = 0 },
 
     /// ── GTK4 模型层 API ──
     /// 关联的 ListModel (设置后，优先使用 model 取数据，不再用 rows)
@@ -80,7 +80,7 @@ pub const ColumnView = struct {
     /// 关联的 SelectionModel (设置后，选中状态由它管理)
     selection_model: ?*SelectionModel = null,
     /// 每列的 ListItemFactory (和 columns 一一对应)
-    column_factories: std.ArrayListUnmanaged(?ListItemFactory) = .{},
+    column_factories: std.ArrayListUnmanaged(?ListItemFactory) = .{ .items = &.{}, .capacity = 0 },
     /// 列工厂的列缓存: setup 后产生的 ListItem (用于 paint 时 bind/unbind)
     _listitem_cache: std.AutoHashMapUnmanaged(usize, ListItem) = .{}, // key = row_idx
 
@@ -140,7 +140,7 @@ pub const ColumnView = struct {
             .base = .{
                 .vtable = &vtable,
                 .id = widget_mod.genWidgetId(),
-                .cursor = .default,
+                .cursor = .arrow,
             },
             .allocator = allocator,
             .header_height = opts.header_height,
@@ -148,7 +148,7 @@ pub const ColumnView = struct {
             .font_size = opts.font_size,
             .selection_mode = opts.selection_mode,
         };
-        self.base.accessibility = .{ .role = .table, .label = "Column View" };
+        self.base.accessibility = .{ .role = .list, .label = "Column View" };
         return self;
     }
 
@@ -323,7 +323,7 @@ pub const ColumnView = struct {
     }
 
     pub fn addRow(self: *ColumnView, cells: []const []const u8) !void {
-        var row: std.ArrayListUnmanaged([]const u8) = .{};
+        var row: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 };
         for (cells) |cell| {
             const dup = try self.allocator.dupe(u8, cell);
             try row.append(self.allocator, dup);
@@ -398,8 +398,9 @@ pub const ColumnView = struct {
     }
 
     /// 获取列 x 位置 + 宽度数组 (考虑 expand 列)
-    fn getColumnLayout(self: *const ColumnView, view_w: f32) struct { xs: [64]f32, ws: [64]f32, count: usize } {
-        var result: struct { xs: [64]f32, ws: [64]f32, count: usize } = .{
+    const ColLayout = struct { xs: [64]f32, ws: [64]f32, count: usize };
+    fn getColumnLayout(self: *const ColumnView, view_w: f32) ColLayout {
+        var result: ColLayout = .{
             .xs = [_]f32{0} ** 64,
             .ws = [_]f32{0} ** 64,
             .count = 0,
@@ -505,7 +506,7 @@ fn destroyVTable(w: *Widget, allocator: Allocator) void {
     self.destroy(allocator);
 }
 
-fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size {
+fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
     const self: *ColumnView = @fieldParentPtr("base", w);
     var total_w: f32 = 0;
     const n = @min(self.columns.items.len, 64);
@@ -537,19 +538,13 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
     R.fillRoundedRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }, self.corner_radius, self.bg_color) catch {};
 
     // 裁剪
-    const saved = R.getClipRect();
-    R.setClipRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }) catch {};
+    const saved = R.pushClip(.{ .x = rx, .y = ry, .width = rw, .height = rh });
 
     // ── 表头 ──
-    const h_rect = math.Rect{ .x = rx, .y = ry, .width = rw, .height = self.header_height };
-    R.fillRect(h_rect, self.header_bg, 0) catch {};
+    const h_rect = math.Rect(f32){ .x = rx, .y = ry, .width = rw, .height = self.header_height };
+    R.fillRect(h_rect, self.header_bg) catch {};
     // 顶部圆角覆盖
-    R.fillRoundedRectPartial(h_rect, self.header_bg, self.corner_radius, .{
-        .top_left = true,
-        .top_right = true,
-        .bottom_left = false,
-        .bottom_right = false,
-    }) catch {};
+    R.fillRoundedRect(h_rect, self.corner_radius, self.header_bg) catch {};
 
     var col_x: f32 = rx;
     for (0..cols.count) |i| {
@@ -557,32 +552,23 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
         const cw = cols.ws[i];
         const hov = if (self.hovered_col) |hc| hc == i else false;
         if (hov) {
-            R.fillRect(.{ .x = col_x, .y = ry, .width = cw, .height = self.header_height }, self.header_hover_bg, 0) catch {};
+            R.fillRect(.{ .x = col_x, .y = ry, .width = cw, .height = self.header_height }, self.header_hover_bg) catch {};
         }
         // 排序箭头
         const show_sort = if (self.sort_column) |sc| sc == i else false;
         var text_end_extra: f32 = 0;
         if (show_sort and self.sort_order != .none) {
-            const sort_icon: icons_mod.IconName = if (self.sort_order == .ascending) icons_mod.IconName.chevron_up else icons_mod.IconName.chevron_down;
+            const sort_icon: icons_mod.IconName = if (self.sort_order == .ascending) icons_mod.IconName.arrow_up else icons_mod.IconName.arrow_down;
             const icon_w: f32 = 12;
-            icons_mod.drawIcon(alloc, R, sort_icon, .{
-                .x = col_x + cw - self.cell_padding - icon_w,
-                .y = ry + (self.header_height - icon_w) / 2,
-                .size = icon_w,
-                .color = self.header_text,
-            }) catch {};
+            icons_mod.drawIcon(R, col_x + cw - self.cell_padding - icon_w, ry + (self.header_height - icon_w) / 2, icon_w, self.header_text, sort_icon) catch {};
             text_end_extra = icon_w + 4;
         }
         // 标题
         const ts = styled_text.measureText(alloc, c.title, .{ .font_size = self.font_size });
         const ty = ry + (self.header_height - ts.height) / 2;
-        styled_text.drawText(ctx, c.title, .{
-            .x = col_x + self.cell_padding,
-            .y = ty,
-            .color = self.header_text,
+        styled_text.drawText(ctx.renderer, ctx.allocator, c.title, col_x + self.cell_padding, ty, .{ .color = self.header_text,
             .font_size = self.font_size,
-            .max_width = cw - self.cell_padding * 2 - text_end_extra,
-        });
+            .max_width = cw - self.cell_padding * 2 - text_end_extra, });
         // 列分隔线
         if (i < cols.count - 1) {
             R.fillRect(.{
@@ -590,7 +576,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
                 .y = ry + 8,
                 .width = 1,
                 .height = self.header_height - 16,
-            }, self.grid_color, 0) catch {};
+            }, self.grid_color) catch {};
         }
         col_x += cw;
     }
@@ -600,7 +586,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
         .y = ry + self.header_height - 1,
         .width = rw,
         .height = 1,
-    }, self.grid_color, 0) catch {};
+    }, self.grid_color) catch {};
 
     // ── 数据行 ──
     const view_top = ry + self.header_height;
@@ -623,8 +609,8 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
 
         // 斑马纹
         const alt_bg = if (ri % 2 == 1) self.row_alt_bg else self.bg_color;
-        if (alt_bg != self.bg_color) {
-            R.fillRect(.{ .x = rx, .y = row_top, .width = rw, .height = self.row_height }, alt_bg, 0) catch {};
+        if (!alt_bg.eql(self.bg_color)) {
+            R.fillRect(.{ .x = rx, .y = row_top, .width = rw, .height = self.row_height }, alt_bg) catch {};
         }
 
         const is_hover = if (self.hovered_row) |hr| hr == ri else false;
@@ -659,7 +645,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
         for (0..cols.count) |ci| {
             const cx = rx + cols.xs[ci];
             const cw = cols.ws[ci];
-            const cell_rect = math.Rect{
+            const cell_rect = math.Rect(f32){
                 .x = cx,
                 .y = row_top,
                 .width = cw,
@@ -677,7 +663,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
 
             if (col.cell_renderer) |renderer| {
                 // 自定义渲染
-                const inner = math.Rect{
+                const inner = math.Rect(f32){
                     .x = cx + self.cell_padding,
                     .y = row_top + 2,
                     .width = cw - self.cell_padding * 2,
@@ -695,36 +681,24 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
                         const as_bytes: *[]const u8 = @ptrCast(@alignCast(p));
                         const ts = styled_text.measureText(alloc, as_bytes.*, .{ .font_size = self.font_size });
                         const ty = row_top + (self.row_height - ts.height) / 2;
-                        styled_text.drawText(ctx, as_bytes.*, .{
-                            .x = cx + self.cell_padding,
-                            .y = ty,
-                            .color = tc,
+                        styled_text.drawText(ctx.renderer, ctx.allocator, as_bytes.*, cx + self.cell_padding, ty, .{ .color = tc,
                             .font_size = self.font_size,
-                            .max_width = cw - self.cell_padding * 2,
-                        });
+                            .max_width = cw - self.cell_padding * 2, });
                         continue;
                     }
                     // 没拿到，退回到空文本
                     const ts = styled_text.measureText(alloc, "", .{ .font_size = self.font_size });
                     const ty = row_top + (self.row_height - ts.height) / 2;
-                    styled_text.drawText(ctx, "", .{
-                        .x = cx + self.cell_padding,
-                        .y = ty,
-                        .color = tc,
+                    styled_text.drawText(ctx.renderer, ctx.allocator, "", cx + self.cell_padding, ty, .{ .color = tc,
                         .font_size = self.font_size,
-                        .max_width = cw - self.cell_padding * 2,
-                    });
+                        .max_width = cw - self.cell_padding * 2, });
                 } else {
                     const txt = self.getRowCell(ri, ci) orelse "";
                     const ts = styled_text.measureText(alloc, txt, .{ .font_size = self.font_size });
                     const ty = row_top + (self.row_height - ts.height) / 2;
-                    styled_text.drawText(ctx, txt, .{
-                        .x = cx + self.cell_padding,
-                        .y = ty,
-                        .color = tc,
+                    styled_text.drawText(ctx.renderer, ctx.allocator, txt, cx + self.cell_padding, ty, .{ .color = tc,
                         .font_size = self.font_size,
-                        .max_width = cw - self.cell_padding * 2,
-                    });
+                        .max_width = cw - self.cell_padding * 2, });
                 }
                 _ = cell_rect;
             }
@@ -749,7 +723,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
     }
 
     // 恢复 clip
-    if (saved) |s| R.setClipRect(s) catch {};
+    R.popClip(saved);
     // 边框
     R.strokeRoundedRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }, self.corner_radius, 1, self.grid_color) catch {};
 }
@@ -760,8 +734,6 @@ fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
 
     switch (event.*) {
         .scroll => |s| {
-            const mx: f32 = @floatFromInt(s.axis == .vertical); // suppress unused
-            _ = mx;
             const view_h = abs_rect.height - self.header_height;
             const delta_pix = s.delta * self.row_height * 3;
             if (s.axis == .vertical) {
@@ -802,7 +774,7 @@ fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
             if (new_hover_resize != self.hover_resize_col) {
                 self.hover_resize_col = new_hover_resize;
                 // 切换光标: resize_ew / default
-                w.setCursor(if (new_hover_resize != null) .resize_ew else .default);
+                w.cursor = if (new_hover_resize != null) .resize_ew else .arrow;
                 w.markDirty();
             }
             if (self.hover_resize_col != null) {

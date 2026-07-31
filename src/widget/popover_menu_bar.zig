@@ -15,7 +15,6 @@ const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
 const menu_mod = @import("menu.zig");
 const styled_text = @import("../text/styled_text.zig");
-const model_mod = @import("../root.zig").model;
 const action_mod = @import("../model/action.zig");
 
 const Widget = widget_mod.Widget;
@@ -23,11 +22,10 @@ const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 const Allocator = std.mem.Allocator;
-const Event = pal.event_mod.Event;
+const Event = pal.Event;
 const ActionGroup = action_mod.ActionGroup;
-const ModelMenu = model_mod.Menu;
-const ModelMenuItem = model_mod.MenuItem;
-const ModelMenuModel = model_mod.MenuModel;
+const ModelMenu = menu_mod.Menu;
+const ModelMenuItem = menu_mod.MenuItem;
 const ActionValue = action_mod.ActionValue;
 
 pub const PopoverMenuItem = struct {
@@ -43,11 +41,13 @@ const ActionClickCtx = struct {
     action_target: ActionValue,
 };
 
+const LayoutResult = struct { xs: [64]f32, ws: [64]f32, count: usize };
+
 pub const PopoverMenuBar = struct {
     base: Widget,
     allocator: Allocator,
-    items: std.ArrayListUnmanaged(PopoverMenuItem) = .{},
-    label_dups: std.ArrayListUnmanaged([]const u8) = .{},
+    items: std.ArrayListUnmanaged(PopoverMenuItem)  = .{ .items = &.{}, .capacity = 0 },
+    label_dups: std.ArrayListUnmanaged([]const u8)  = .{ .items = &.{}, .capacity = 0 },
 
     active_menu: ?usize = null,
     hovered_item: ?usize = null,
@@ -81,9 +81,9 @@ pub const PopoverMenuBar = struct {
     menu_model: ?*ModelMenu = null,
     action_group: ?ActionGroup = null,
     /// 由 setMenuModel 分配的子菜单控件 (destroy 时释放)
-    owned_widget_menus: std.ArrayListUnmanaged(*menu_mod.Menu) = .{},
+    owned_widget_menus: std.ArrayListUnmanaged(*menu_mod.Menu)  = .{ .items = &.{}, .capacity = 0 },
     /// 由 setMenuModel 分配的 ActionClickCtx (destroy 时释放)
-    owned_action_ctxs: std.ArrayListUnmanaged(*ActionClickCtx) = .{},
+    owned_action_ctxs: std.ArrayListUnmanaged(*ActionClickCtx)  = .{ .items = &.{}, .capacity = 0 },
 
     pub fn new(allocator: Allocator, opts: struct {
         font_size: f32 = 13,
@@ -109,7 +109,7 @@ pub const PopoverMenuBar = struct {
         };
         if (opts.bg_color) |c| self.bg_color = c;
         if (opts.text_color) |c| self.text_color = c;
-        self.base.accessibility = .{ .role = .menu_bar, .label = "Menu Bar" };
+        self.base.accessibility = .{ .role = .menu, .label = "Menu Bar" };
         return self;
     }
 
@@ -267,7 +267,7 @@ pub const PopoverMenuBar = struct {
         for (label, 0..) |ch, i| {
             if (ch == '_' and i + 1 < label.len) {
                 underline = i;
-                display_label = label[0..i] ++ label[i + 1 ..];
+                display_label = label;
                 break;
             }
         }
@@ -300,14 +300,13 @@ pub const PopoverMenuBar = struct {
         self.closeAll();
         self.active_menu = index;
         self.items.items[index].menu.open = true;
-        self.items.items[index].menu.orientation = menu_mod.MenuOrientation.vertical;
         if (self.on_menu_open) |cb| cb(self, index);
         self.base.markDirty();
     }
 
     /// 计算每项 x+宽度数组
-    fn layoutItems(self: *const PopoverMenuBar, ctx: *PaintContext, bar_w: f32) struct { xs: [64]f32, ws: [64]f32, count: usize } {
-        var res: struct { xs: [64]f32, ws: [64]f32, count: usize } = .{
+    fn layoutItems(self: *const PopoverMenuBar, alloc: std.mem.Allocator, bar_w: f32) LayoutResult {
+        var res: LayoutResult = .{
             .xs = [_]f32{0} ** 64,
             .ws = [_]f32{0} ** 64,
             .count = 0,
@@ -317,7 +316,7 @@ pub const PopoverMenuBar = struct {
         var x: f32 = 4;
         for (0..n) |i| {
             const label = self.items.items[i].label;
-            const ts = styled_text.measureText(ctx.allocator, label, .{ .font_size = self.font_size });
+            const ts = styled_text.measureText(alloc, label, .{ .font_size = self.font_size });
             const w = ts.width + self.item_padding_h * 2;
             res.xs[i] = x;
             res.ws[i] = w;
@@ -327,8 +326,8 @@ pub const PopoverMenuBar = struct {
         return res;
     }
 
-    fn findItemAt(self: *const PopoverMenuBar, ctx: *PaintContext, x: f32, bar_w: f32) ?usize {
-        const L = self.layoutItems(ctx, bar_w);
+    fn findItemAt(self: *const PopoverMenuBar, alloc: std.mem.Allocator, x: f32, bar_w: f32) ?usize {
+        const L = self.layoutItems(alloc, bar_w);
         for (0..L.count) |i| {
             if (x >= L.xs[i] and x < L.xs[i] + L.ws[i]) return i;
         }
@@ -350,9 +349,9 @@ fn destroyVTable(w: *Widget, allocator: Allocator) void {
     self.destroy(allocator);
 }
 
-fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size {
+fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
     const self: *PopoverMenuBar = @fieldParentPtr("base", w);
-    const L = self.layoutItems(ctx, constraints.max_width);
+    const L = self.layoutItems(ctx.allocator, constraints.max_width);
     var total_w: f32 = 4;
     for (0..L.count) |i| {
         total_w += L.ws[i] + if (i + 1 < L.count) self.item_spacing else 4;
@@ -375,7 +374,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
 
     R.fillRoundedRect(.{ .x = rx, .y = ry, .width = rw, .height = rh }, 0, self.bg_color) catch {};
 
-    const L = self.layoutItems(ctx, rw);
+    const L = self.layoutItems(ctx.allocator, rw);
     for (0..L.count) |i| {
         const item = self.items.items[i];
         const ix = rx + L.xs[i];
@@ -397,9 +396,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
         const ty = ry + (rh - ts.height) / 2;
         const tx = ix + self.item_padding_h;
         const tc: math.Color = if (is_active) self.active_text else self.text_color;
-        styled_text.drawText(ctx, item.label, .{
-            .x = tx,
-            .y = ty,
+        styled_text.drawText(ctx.renderer, ctx.allocator, item.label, tx, ty, .{
             .color = tc,
             .font_size = self.font_size,
         });
@@ -430,15 +427,16 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
                     .y = ry + rh - 6,
                     .width = @max(4, ch_w),
                     .height = 1,
-                }, tc, 0) catch {};
+                }, tc) catch {};
             }
         }
     }
     // 底部分隔线
-    R.fillRect(.{ .x = rx, .y = ry + rh - 1, .width = rw, .height = 1 }, self.border_color, 0) catch {};
+    R.fillRect(.{ .x = rx, .y = ry + rh - 1, .width = rw, .height = 1 }, self.border_color) catch {};
 }
 
 fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
+    _ = ectx;
     const self: *PopoverMenuBar = @fieldParentPtr("base", w);
     const abs_rect = w.absoluteRect();
 
@@ -446,7 +444,7 @@ fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
         .key => |k| {
             // Alt 键按下/释放
             if (k.key == .left_alt or k.key == .right_alt) {
-                const is_down = k.state == .pressed or k.state == .repeat;
+                const is_down = k.state == .pressed;
                 if (self.alt_pressed != is_down) {
                     self.alt_pressed = is_down;
                     w.markDirty();
@@ -458,7 +456,7 @@ fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
                 return .handled;
             }
             // 有 Alt 按下且菜单项有快捷键
-            if (self.alt_pressed and (k.state == .pressed or k.state == .repeat)) {
+            if (self.alt_pressed and k.state == .pressed) {
                 var ch: ?u8 = null;
                 switch (k.key) {
                     .a => ch = 'A',
@@ -547,7 +545,7 @@ fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
             const rel_x = mx - abs_rect.x;
             const rel_y = my - abs_rect.y;
             if (rel_x >= 0 and rel_x < abs_rect.width and rel_y >= 0 and rel_y < abs_rect.height) {
-                const idx = self.findItemAt(ectx.paint_ctx orelse @panic("need paint_ctx"), rel_x, abs_rect.width);
+                const idx = self.findItemAt(self.allocator, rel_x, abs_rect.width);
                 if (idx != self.hovered_item) {
                     self.hovered_item = idx;
                     // 若已经有活动菜单, hover 切换菜单
@@ -571,7 +569,7 @@ fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
                 const rel_x = mx - abs_rect.x;
                 const rel_y = my - abs_rect.y;
                 if (rel_x >= 0 and rel_x < abs_rect.width and rel_y >= 0 and rel_y < abs_rect.height) {
-                    const idx = self.findItemAt(ectx.paint_ctx orelse @panic("need paint_ctx"), rel_x, abs_rect.width);
+                    const idx = self.findItemAt(self.allocator, rel_x, abs_rect.width);
                     if (idx) |i| {
                         if (self.active_menu) |a| {
                             if (a == i) {

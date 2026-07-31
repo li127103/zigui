@@ -265,7 +265,7 @@ pub const FontSelection = struct {
         try right_col.base.addChild(alloc, &bold.base);
         self.bold_check = bold;
         bold.base.user_data = self;
-        bold.on_toggle = onBoldToggle;
+        bold.on_change = onBoldToggle;
 
         const italic = try CheckButton.create(alloc, "斜体", .{
             .checked = self.italic,
@@ -273,7 +273,7 @@ pub const FontSelection = struct {
         try right_col.base.addChild(alloc, &italic.base);
         self.italic_check = italic;
         italic.base.user_data = self;
-        italic.on_toggle = onItalicToggle;
+        italic.on_change = onItalicToggle;
 
         const preview_lbl = try Label.create(alloc, "预览:", .{
             .font_size = 12,

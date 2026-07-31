@@ -45,7 +45,7 @@ pub const ShortcutLabel = struct {
     padding_h: f32 = 8.0,
     padding_v: f32 = 3.0,
     font_size: f32 = 12,
-    font_weight: u32 = 500,
+    font_weight: u16 = 500,
     border_width: f32 = 1.0,
 
     const Self = @This();
@@ -74,7 +74,7 @@ pub const ShortcutLabel = struct {
         };
         self.display_text = try self.formatShortcut(allocator);
         self.base.accessibility = .{
-            .role = .label,
+            .role = .text,
             .label = self.display_text,
         };
         return self;

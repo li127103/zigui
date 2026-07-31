@@ -73,7 +73,7 @@ pub const Scrollbar = struct {
                 .base = .{
                     .vtable = &vtable,
                     .id = widget_mod.genWidgetId(),
-                    .cursor = .default,
+                    .cursor = .arrow,
                 },
                 .orientation = orientation,
                 .adjustment = adj,
@@ -140,7 +140,6 @@ pub const Scrollbar = struct {
     const vtable = Widget.VTable{
         .type_name = "scrollbar",
         .measure = measure,
-        .layout = layoutFn,
         .paint = paint,
         .on_event = onEvent,
         .destroy = destroyVTable,
@@ -148,18 +147,20 @@ pub const Scrollbar = struct {
     };
 
     fn destroyVTable(w: *Widget, allocator: std.mem.Allocator) void {
-        const s: *Self = @fieldParentPtr("range.base", w);
+        const range_ptr: *Range = @fieldParentPtr("base", w);
+        const s: *Self = @fieldParentPtr("range", range_ptr);
         s.destroy(allocator);
     }
 
     fn measure(w: *Widget, _: *PaintContext, c: Constraints) SizeF {
-        const s: *Self = @fieldParentPtr("range.base", w);
+        const range_ptr: *Range = @fieldParentPtr("base", w);
+        const s: *Self = @fieldParentPtr("range", range_ptr);
         return s.range.defaultMeasure(c);
     }
-    fn layoutFn(_: *Widget, _: *PaintContext) void {}
 
     fn paint(w: *Widget, ctx: *PaintContext) void {
-        const s: *Self = @fieldParentPtr("range.base", w);
+        const range_ptr: *Range = @fieldParentPtr("base", w);
+        const s: *Self = @fieldParentPtr("range", range_ptr);
         const tr = s.trackRect();
         const sr = s.sliderRect();
         const r = s.range.base.rect;
@@ -204,15 +205,18 @@ pub const Scrollbar = struct {
     }
 
     fn onEvent(w: *Widget, event: *const pal_mod.Event, _: *EventContext) EventResult {
-        const s: *Self = @fieldParentPtr("range.base", w);
+        const range_ptr: *Range = @fieldParentPtr("base", w);
+        const s: *Self = @fieldParentPtr("range", range_ptr);
         _ = s;
         _ = event;
         // 真实实现：点击 stepper → step_*；轨道非滑块 → page_*；滑块开始 drag → 持续 setValue
         return .ignored;
     }
 
-    fn tick(w: *Widget, delta_us: i64) void {
-        const s: *Self = @fieldParentPtr("range.base", w);
+    fn tick(w: *Widget, delta_ms: u32) void {
+        const range_ptr: *Range = @fieldParentPtr("base", w);
+        const s: *Self = @fieldParentPtr("range", range_ptr);
+        const delta_us: i64 = @as(i64, delta_ms) * 1000;
         switch (s.held_stepper) {
             .none => {},
             .a => {

@@ -95,9 +95,10 @@ pub const Range = struct {
             @min(v, self.fill_level)
         else
             std.math.clamp(v, a.lower, a.upper);
-        if (clamped != a.value) {
-            a.value = clamped;
-            if (a.on_value_changed) |cb| cb(a.on_value_changed_userdata, clamped);
+        const cf: f32 = @floatCast(clamped);
+        if (cf != a.value) {
+            a.value = cf;
+            if (a.on_value_changed) |cb| cb(a);
             if (self.on_value_changed) |cb| cb(self.on_value_changed_ud, clamped);
         }
     }

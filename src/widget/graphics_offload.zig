@@ -24,7 +24,7 @@ pub const GraphicsOffload = struct {
     child: ?*Widget = null,
 
     enabled: bool = true,
-    area: RectF = .{},
+    area: RectF = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     // 真实实现：vulkan texture / GL FBO / cairo_surface 句柄
     gpu_handle: ?*anyopaque = null,
     needs_redraw: bool = true,
@@ -80,7 +80,6 @@ pub const GraphicsOffload = struct {
     const vtable = Widget.VTable{
         .type_name = "graphics_offload",
         .measure = measure,
-        .layout = layoutFn,
         .paint = paint,
         .on_event = onEvent,
         .destroy = destroyVTable,
@@ -95,19 +94,11 @@ pub const GraphicsOffload = struct {
     fn measure(w: *Widget, ctx: *PaintContext, c: Constraints) SizeF {
         const s: *Self = @fieldParentPtr("base", w);
         if (s.child) |ch| {
-            const sz = Widget.measureFromVTable(ch, ctx, c);
+            const sz = ch.vtable.measure(ch, ctx, c);
             s.area = .{ .x = 0, .y = 0, .width = sz.width, .height = sz.height };
             return c.constrain(sz);
         }
         return c.constrain(.{ .width = 0, .height = 0 });
-    }
-
-    fn layoutFn(w: *Widget, ctx: *PaintContext) void {
-        const s: *Self = @fieldParentPtr("base", w);
-        if (s.child) |ch| {
-            ch.rect = .{ .x = 0, .y = 0, .width = w.rect.width, .height = w.rect.height };
-            Widget.layoutFromVTable(ch, ctx);
-        }
     }
 
     fn paint(w: *Widget, ctx: *PaintContext) void {

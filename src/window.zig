@@ -110,6 +110,11 @@ pub const Window = struct {
         };
 
         self.renderer.glyph_atlas = &self.glyph_atlas;
+        // 关键: Renderer2D.init 传入的是 init 栈上的局部 vk_device 地址 (悬挂),
+        // 必须把渲染器的 device 重新指向结构体字段 self.gpu_device (稳定地址)。
+        // 主窗口 App.initX11 也有同样修正 (app_linux.zig:400); 这里漏掉会导致子窗口
+        // 渲染时 win.renderer.device 读垃圾 → setScissor 通用保护异常。
+        self.renderer.device = &self.gpu_device;
 
         return self;
     }
@@ -153,6 +158,8 @@ pub const Window = struct {
         };
 
         self.renderer.glyph_atlas = &self.glyph_atlas;
+        // 同 init (X11): 重指向稳定字段, 避免 win.renderer.device 悬挂。
+        self.renderer.device = &self.gpu_device;
 
         return self;
     }
@@ -230,6 +237,9 @@ pub const Window = struct {
         } else {
             self.renderer.glyph_atlas = &self.glyph_atlas;
         }
+
+        // 同 init/initWayland: 重指向稳定字段, 避免子窗口渲染器 device 悬挂。
+        self.renderer.device = &self.gpu_device;
 
         return self;
     }

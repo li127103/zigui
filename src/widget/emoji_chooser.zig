@@ -417,7 +417,8 @@ pub const EmojiChooser = struct {
                 .padding_v = 6.0,
                 .font_size = 16,
             });
-            btn.base.user_data = @as(*anyopaque, @ptrFromInt(@as(usize, @intFromEnum(cat))));
+            // 偏移 +1: 避免 .smileys(=0) 经 @ptrFromInt(0) 产生空指针 (Zig 0.16 禁止)
+            btn.base.user_data = @as(*anyopaque, @ptrFromInt(@as(usize, @intFromEnum(cat)) + 1));
             btn.base.parent = &self.base;
             try self.category_buttons.append(self.allocator, btn);
             try self.base.addChild(self.allocator, &btn.base);
@@ -436,7 +437,7 @@ pub const EmojiChooser = struct {
 
     fn onCategoryClick(btn: *Button) void {
         const self: *Self = @fieldParentPtr("base", btn.base.parent.?);
-        const cat: EmojiCategory = @enumFromInt(@intFromPtr(btn.base.user_data.?));
+        const cat: EmojiCategory = @enumFromInt(@intFromPtr(btn.base.user_data.?) - 1);
         self.current_category = cat;
         self.hovered_emoji = null;
         self.base.markDirty();
@@ -602,7 +603,7 @@ pub const EmojiChooser = struct {
         const cat_count = self.category_buttons.items.len;
         const cat_btn_w = pw / @as(f32, @floatFromInt(cat_count));
         for (self.category_buttons.items, 0..) |btn, i| {
-            const cat: EmojiCategory = @enumFromInt(@intFromPtr(btn.base.user_data.?));
+            const cat: EmojiCategory = @enumFromInt(@intFromPtr(btn.base.user_data.?) - 1);
             btn.base.rect.x = w.rect.x + @as(f32, @floatFromInt(i)) * cat_btn_w;
             btn.base.rect.y = y_offset - ry;
             btn.base.rect.width = cat_btn_w;

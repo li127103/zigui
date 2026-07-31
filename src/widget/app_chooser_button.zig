@@ -89,7 +89,7 @@ pub const AppChooserButton = struct {
             }
         }
         if (self.dialog) |dlg| {
-            dlg.vtable.destroy(dlg, allocator);
+            dlg.base.vtable.destroy(&dlg.base, allocator);
         }
         self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
@@ -254,7 +254,7 @@ pub const AppChooserButton = struct {
 
         if (self.dialog) |dlg| {
             if (dlg.visible) {
-                dlg.paintTree(ctx);
+                dlg.base.paintTree(ctx);
             }
         }
     }
@@ -273,7 +273,7 @@ pub const AppChooserButton = struct {
 
         if (self.dialog) |dlg| {
             if (dlg.visible) {
-                const result = dlg.dispatchEvent(event, ectx);
+                const result = dlg.base.dispatchEvent(event, ectx);
                 if (result == .handled) return .handled;
             }
         }
@@ -303,12 +303,12 @@ pub const AppChooserButton = struct {
             },
             .key => |key| {
                 if (key.state == .pressed) {
-                    if (key.keycode == .space or key.keycode == .enter or key.keycode == .kp_enter) {
+                    if (key.key == .space or key.key == .enter or key.key == .kp_enter) {
                         const dlg = self.ensureDialog() catch return .handled;
                         dlg.show();
                         return .handled;
                     }
-                    if (key.keycode == .escape) {
+                    if (key.key == .escape) {
                         if (self.dialog) |dlg| {
                             if (dlg.visible) {
                                 dlg.visible = false;

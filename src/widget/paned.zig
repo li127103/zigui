@@ -23,7 +23,7 @@ const PaintContext = widget_mod.PaintContext;
 const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 const Allocator = std.mem.Allocator;
-const Event = pal.event_mod.Event;
+const Event = pal.Event;
 
 const Self = @This();
 
@@ -77,7 +77,7 @@ pub const Paned = struct {
             .allocator = allocator,
             .orientation = orientation,
         };
-        self.base.accessibility = .{ .role = .panel, .label = "Paned" };
+        self.base.accessibility = .{ .role = .container, .label = "Paned" };
         return self;
     }
 
@@ -134,7 +134,7 @@ pub const Paned = struct {
         return if (self.wide_handle) WIDE_HANDLE_SIZE else HANDLE_SIZE;
     }
 
-    fn handleRect(self: *Paned) math.Rect {
+    fn handleRect(self: *Paned) math.Rect(f32) {
         const r = self.base.rect;
         const hs = self.handleSize();
         const pos_f: f32 = @floatFromInt(self.position);
@@ -176,10 +176,9 @@ fn destroyVTable(w: *Widget, allocator: Allocator) void {
     self.destroy(allocator);
 }
 
-fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size {
+fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) math.Size(f32) {
     const self: *Paned = @fieldParentPtr("base", w);
-    _ = ctx;
-    const hs = self.handleSize();
+       const hs = self.handleSize();
     var min_w: f32 = hs;
     var min_h: f32 = hs;
     const avail_w = if (constraints.max_width < std.math.inf(f32)) constraints.max_width else 800;
@@ -188,24 +187,24 @@ fn measure(w: *Widget, ctx: *PaintContext, constraints: layout_mod.Constraints) 
     switch (self.orientation) {
         .horizontal => {
             if (self.start_child) |c| {
-                const sz = Widget.measureChild(c, .{ .width = @max(0, (avail_w - hs) / 2), .height = avail_h });
+                const sz = c.vtable.measure(c, ctx, layout_mod.Constraints{ .min_width = 0, .max_width = @max(0, (avail_w - hs) / 2), .min_height = 0, .max_height = avail_h });
                 min_w += sz.width;
                 min_h = @max(min_h, sz.height);
             }
             if (self.end_child) |c| {
-                const sz = Widget.measureChild(c, .{ .width = @max(0, (avail_w - hs) / 2), .height = avail_h });
+                const sz = c.vtable.measure(c, ctx, layout_mod.Constraints{ .min_width = 0, .max_width = @max(0, (avail_w - hs) / 2), .min_height = 0, .max_height = avail_h });
                 min_w += sz.width;
                 min_h = @max(min_h, sz.height);
             }
         },
         .vertical => {
             if (self.start_child) |c| {
-                const sz = Widget.measureChild(c, .{ .width = avail_w, .height = @max(0, (avail_h - hs) / 2) });
+                const sz = c.vtable.measure(c, ctx, layout_mod.Constraints{ .min_width = 0, .max_width = avail_w, .min_height = 0, .max_height = @max(0, (avail_h - hs) / 2) });
                 min_w = @max(min_w, sz.width);
                 min_h += sz.height;
             }
             if (self.end_child) |c| {
-                const sz = Widget.measureChild(c, .{ .width = avail_w, .height = @max(0, (avail_h - hs) / 2) });
+                const sz = c.vtable.measure(c, ctx, layout_mod.Constraints{ .min_width = 0, .max_width = avail_w, .min_height = 0, .max_height = @max(0, (avail_h - hs) / 2) });
                 min_w = @max(min_w, sz.width);
                 min_h += sz.height;
             }
@@ -244,9 +243,9 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
     self.position = pos_val;
     const posf: f32 = @floatFromInt(pos_val);
 
-    var start_rect: math.Rect = undefined;
-    var end_rect: math.Rect = undefined;
-    var hr: math.Rect = undefined;
+    var start_rect: math.Rect(f32) = undefined;
+    var end_rect: math.Rect(f32) = undefined;
+    var hr: math.Rect(f32) = undefined;
     switch (self.orientation) {
         .horizontal => {
             start_rect = .{ .x = 0, .y = 0, .width = posf, .height = rh };
@@ -317,6 +316,7 @@ fn paint(w: *Widget, ctx: *PaintContext) void {
 }
 
 fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
+    _ = ectx;
     const self: *Paned = @fieldParentPtr("base", w);
     const abs_rect = w.absoluteRect();
 
@@ -330,10 +330,10 @@ fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
                     .vertical => @intFromFloat(@floor(my - self.drag_start_mouse)),
                 };
                 self.setPosition(self.drag_start_pos + delta);
-                ectx.setCursor(switch (self.orientation) {
-                    .horizontal => .ew_resize,
-                    .vertical => .ns_resize,
-                });
+                w.cursor = switch (self.orientation) {
+                    .horizontal => .resize_ew,
+                    .vertical => .resize_ns,
+                };
                 return .handled;
             } else {
                 const rel_x = mx - abs_rect.x;
@@ -344,10 +344,10 @@ fn onEvent(w: *Widget, event: *const Event, ectx: *EventContext) EventResult {
                     w.markDirty();
                 }
                 if (hovering) {
-                    ectx.setCursor(switch (self.orientation) {
-                        .horizontal => .ew_resize,
-                        .vertical => .ns_resize,
-                    });
+                    w.cursor = switch (self.orientation) {
+                        .horizontal => .resize_ew,
+                        .vertical => .resize_ns,
+                    };
                     return .handled;
                 }
             }

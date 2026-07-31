@@ -60,7 +60,7 @@ pub const HeaderBar = struct {
         };
         self.base.rect.height = opts.height;
         self.base.layout_style.height = .{ .px = opts.height };
-        self.base.accessibility = .{ .role = .title_bar };
+        self.base.accessibility = .{ .role = .container };
         return self;
     }
 

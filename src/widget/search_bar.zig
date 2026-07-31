@@ -250,9 +250,8 @@ pub const SearchBar = struct {
         // ── P34.3: Ctrl+F 切换搜索栏显示（即使 reveal_child=false 也可激活）──
         if (event.* == .key and event.key.state == .pressed and event.key.modifiers.ctrl) {
             const ke = event.key;
-            // 归一化 key → 0x00-0x7F ASCII 比较 'F'/'f'
-            const code = @as(u32, ke.keycode_normalized);
-            if (code == 'F' or code == 'f') {
+            // KeyCode 的字母成员不分大小写 (大小写由 shift 修饰键决定), 直接比较 .f 即可命中 'F'/'f'
+            if (ke.key == .f) {
                 self.setSearchMode(true);
                 return .handled;
             }

@@ -164,7 +164,7 @@ pub const FontDialogButton = struct {
         // 字体图标
         const ix = rx + 12;
         const iy = ry + (self.height - self.icon_size) / 2;
-        const icon = icons_mod.IconName.font;
+        const icon = icons_mod.IconName.edit;
         icons_mod.drawIcon(ctx.renderer, ix, iy, self.icon_size, self.icon_color, icon) catch {};
 
         const text_start = ix + self.icon_size + 10;

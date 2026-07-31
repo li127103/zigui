@@ -75,7 +75,7 @@ pub const LockButton = struct {
             .on_toggle = opts.on_toggle,
         };
         self.base.accessibility = .{
-            .role = .toggle_button,
+            .role = .toggle,
             .label = if (opts.locked) opts.locked_text else opts.unlocked_text,
         };
         self.base.cursor = .pointing_hand;

@@ -115,10 +115,7 @@ pub const DrawingArea = struct {
         const self: *Self = @fieldParentPtr("base", w);
         const cw = @max(self.content_width, self.min_width);
         const ch = @max(self.content_height, self.min_height);
-        return .{
-            .width = constraints.clampWidth(cw),
-            .height = constraints.clampHeight(ch),
-        };
+        return constraints.constrain(.{ .width = cw, .height = ch });
     }
 
     fn paint(w: *Widget, ctx: *PaintContext) void {

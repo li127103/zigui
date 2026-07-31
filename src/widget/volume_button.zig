@@ -83,9 +83,6 @@ pub const VolumeButton = struct {
         self.base.accessibility = .{
             .role = .button,
             .label = "音量",
-            .value = @floatFromInt(self.value),
-            .min_value = @floatFromInt(self.min_value),
-            .max_value = @floatFromInt(self.max_value),
         };
         self.base.cursor = .pointing_hand;
 
@@ -94,10 +91,6 @@ pub const VolumeButton = struct {
             .max = opts.max_value,
             .value = opts.value,
             .step = opts.step,
-            .orientation = .vertical,
-            .width = .{ .px = 24 },
-            .height = .{ .px = 120 },
-            .on_value_changed = null,
         });
         self.slider = slider;
 
@@ -106,7 +99,7 @@ pub const VolumeButton = struct {
 
     pub fn destroy(self: *Self, allocator: std.mem.Allocator) void {
         if (self.slider) |s| {
-            s.vtable.destroy(s, allocator);
+            s.base.vtable.destroy(&s.base, allocator);
         }
         self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
@@ -126,7 +119,6 @@ pub const VolumeButton = struct {
                 s.setValue(clamped);
             }
             self.base.markDirty();
-            self.base.accessibility.value = @floatFromInt(clamped);
             if (self.on_value_changed) |cb| {
                 cb(self, clamped);
             }
@@ -274,11 +266,11 @@ pub const VolumeButton = struct {
             ) catch {};
 
             if (self.slider) |s| {
-                s.rect.x = popup_x + (popup_w - 24) / 2;
-                s.rect.y = popup_y + self.popup_padding;
-                s.rect.width = 24;
-                s.rect.height = popup_h - self.popup_padding * 2;
-                s.paintTree(ctx);
+                s.base.rect.x = popup_x + (popup_w - 24) / 2;
+                s.base.rect.y = popup_y + self.popup_padding;
+                s.base.rect.width = 24;
+                s.base.rect.height = popup_h - self.popup_padding * 2;
+                s.base.paintTree(ctx);
             }
         }
     }
@@ -286,19 +278,21 @@ pub const VolumeButton = struct {
     fn onEvent(w: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {
         const self: *Self = @fieldParentPtr("base", w);
 
-        if (self.popup_open and self.slider) |s| {
-            const result = s.dispatchEvent(event, ectx);
-            if (result == .handled) {
-                const new_val = s.getValue();
-                if (new_val != self.value) {
-                    self.value = new_val;
-                    self.muted = false;
-                    self.base.markDirty();
-                    if (self.on_value_changed) |cb| {
-                        cb(self, new_val);
+        if (self.popup_open and self.slider != null) {
+            if (self.slider) |s| {
+                const result = s.base.dispatchEvent(event, ectx);
+                if (result == .handled) {
+                    const new_val = s.value;
+                    if (new_val != self.value) {
+                        self.value = new_val;
+                        self.muted = false;
+                        self.base.markDirty();
+                        if (self.on_value_changed) |cb| {
+                            cb(self, new_val);
+                        }
                     }
+                    return .handled;
                 }
-                return .handled;
             }
         }
 
@@ -349,7 +343,7 @@ pub const VolumeButton = struct {
             },
             .key => |key| {
                 if (key.state == .pressed) {
-                    switch (key.keycode) {
+                    switch (key.key) {
                         .up, .right => {
                             self.setValue(self.value + self.step);
                             return .handled;
@@ -382,7 +376,7 @@ pub const VolumeButton = struct {
                 return .ignored;
             },
             .scroll => |scr| {
-                if (scr.dy < 0) {
+                if (scr.delta < 0) {
                     self.setValue(self.value + self.step);
                 } else {
                     self.setValue(self.value - self.step);

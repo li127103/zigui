@@ -107,11 +107,11 @@ pub const PasswordEntry = struct {
             .on_activate = opts.on_activate,
         };
 
-        try self.base.addChild(allocator, entry);
+        try self.base.addChild(allocator, &entry.base);
         // 在 addChild 之后 (parent 指针设置好) 再绑定包装回调
         entry.on_change = entryChangeWrapper;
         entry.on_submit = entrySubmitWrapper;
-        self.base.accessibility = .{ .role = .text_box };
+        self.base.accessibility = .{ .role = .text };
 
         return self;
     }
@@ -228,7 +228,7 @@ pub const PasswordEntry = struct {
             .min_height = self.size,
             .max_height = self.size,
         };
-        _ = self.entry.vtable.measure(self.entry, ctx, entry_constraints);
+        _ = self.entry.base.vtable.measure(&self.entry.base, ctx, entry_constraints);
 
         const w_out = if (constraints.max_width < std.math.inf(f32))
             constraints.max_width
@@ -244,7 +244,7 @@ pub const PasswordEntry = struct {
         const rx = ctx.offset_x + w.rect.x;
         const ry = ctx.offset_y + w.rect.y;
 
-        const border = if (w.hasFocus()) self.border_focus else self.border_color;
+        const border = if (self.entry.base.state.focused) self.border_focus else self.border_color;
         ctx.renderer.fillRoundedRect(
             .{ .x = rx, .y = ry, .width = w.rect.width, .height = w.rect.height },
             self.corner_radius,
@@ -277,11 +277,11 @@ pub const PasswordEntry = struct {
         const icon_color = if (self.hover_icon) self.icon_hover_color else self.icon_color;
         icons_mod.drawIcon(ctx.renderer, icon_x, icon_y, self.icon_size, icon_color, icon) catch {};
 
-        self.entry.rect.x = 8;
-        self.entry.rect.y = 0;
-        self.entry.rect.width = w.rect.width - self.button_size - 16;
-        self.entry.rect.height = w.rect.height;
-        self.entry.vtable.paint(self.entry, ctx);
+        self.entry.base.rect.x = 8;
+        self.entry.base.rect.y = 0;
+        self.entry.base.rect.width = w.rect.width - self.button_size - 16;
+        self.entry.base.rect.height = w.rect.height;
+        self.entry.base.vtable.paint(&self.entry.base, ctx);
     }
 
     fn onEvent(w: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {
@@ -302,7 +302,7 @@ pub const PasswordEntry = struct {
                 }
 
                 if (!hover) {
-                    return self.entry.vtable.on_event.?(self.entry, event, ectx);
+                    return self.entry.base.vtable.on_event.?(&self.entry.base, event, ectx);
                 }
                 return .handled;
             },
@@ -319,10 +319,10 @@ pub const PasswordEntry = struct {
                         return .handled;
                     }
                 }
-                return self.entry.vtable.on_event.?(self.entry, event, ectx);
+                return self.entry.base.vtable.on_event.?(&self.entry.base, event, ectx);
             },
             else => {
-                return self.entry.vtable.on_event.?(self.entry, event, ectx);
+                return self.entry.base.vtable.on_event.?(&self.entry.base, event, ectx);
             },
         }
     }

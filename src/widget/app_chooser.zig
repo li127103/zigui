@@ -145,8 +145,8 @@ pub const AppChooserDialog = struct {
         const data_home_path = std.fmt.allocPrint(self.allocator, "{s}/applications", .{data_home}) catch return;
         app_dirs.append(self.allocator, data_home_path) catch return;
 
-        const data_dirs = std.c.getenv("XDG_DATA_DIRS") orelse "/usr/share:/usr/local/share";
-        var it = std.mem.split(u8, data_dirs, ":");
+        const data_dirs: []const u8 = if (std.c.getenv("XDG_DATA_DIRS")) |p| std.mem.span(p) else "/usr/share:/usr/local/share";
+        var it = std.mem.splitScalar(u8, data_dirs, ':');
         while (it.next()) |dir| {
             if (dir.len == 0) continue;
             const path = std.fmt.allocPrint(self.allocator, "{s}/applications", .{dir}) catch continue;
@@ -164,20 +164,23 @@ pub const AppChooserDialog = struct {
         defer seen.deinit();
 
         for (dirs) |dir| {
-            var d = std.fs.openDirAbsolute(dir, .{ .iterate = true }) catch continue;
-            defer d.close();
+            const dir_z = self.allocator.dupeZ(u8, dir) catch continue;
+            defer self.allocator.free(dir_z);
+            const d = std.c.opendir(dir_z) orelse continue;
+            _ = std.c.closedir(d);
 
-            var it = d.iterate();
-            while (it.next() catch null) |entry| {
-                if (entry.kind != .file) continue;
-                if (!std.mem.endsWith(u8, entry.name, ".desktop")) continue;
+            while (true) {
+                const entry = std.c.readdir(d) orelse break;
+                const name = std.mem.sliceTo(&entry.name, 0);
+                if (name.len == 0) continue;
+                if (entry.type == 4) continue; // 跳过目录 (DT_DIR = 4)
+                if (name[0] == '.') continue; // 跳过隐藏文件
+                if (!std.mem.endsWith(u8, name, ".desktop")) continue;
 
-                const id = entry.name;
-                if (seen.contains(id)) continue;
-                const gop = seen.getOrPut(id) catch continue;
-                if (!gop.found_existing) {}
+                if (seen.contains(name)) continue;
+                _ = seen.getOrPut(name) catch continue;
 
-                const path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir, entry.name }) catch continue;
+                const path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir, name }) catch continue;
                 defer self.allocator.free(path);
 
                 if (self.parseDesktopFile(path)) |app| {
@@ -193,14 +196,8 @@ pub const AppChooserDialog = struct {
     }
 
     fn parseDesktopFile(self: *Self, path: []const u8) ?AppInfo {
-        const content = std.fs.cwd().readFileAllocOptions(
-            self.allocator,
-            path,
-            1024 * 1024,
-            null,
-            1,
-            0,
-        ) catch return null;
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const content = std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(1024 * 1024)) catch return null;
         defer self.allocator.free(content);
 
         var name: ?[]const u8 = null;
@@ -210,7 +207,7 @@ pub const AppChooserDialog = struct {
         var hidden = false;
         var no_display = false;
 
-        var lines = std.mem.split(u8, content, "\n");
+        var lines = std.mem.splitScalar(u8, content, '\n');
         while (lines.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r");
             if (trimmed.len == 0) continue;

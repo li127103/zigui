@@ -51,11 +51,13 @@ pub const ToolItem = struct {
     on_click_ctx: ?*anyopaque = null,
 };
 
+pub const Orientation = enum { horizontal, vertical };
+
 pub const Toolbar = struct {
     base: Widget,
     allocator: std.mem.Allocator,
     items: std.ArrayListUnmanaged(ToolItem),
-    orientation: enum { horizontal, vertical } = .horizontal,
+    orientation: Orientation = .horizontal,
     button_style: ToolButtonStyle = .both_horiz,
     icon_size: f32 = 16,
     font_size: f32 = 11,
@@ -77,7 +79,7 @@ pub const Toolbar = struct {
     const Self = @This();
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
-        orientation: enum { horizontal, vertical } = .horizontal,
+        orientation: Orientation = .horizontal,
         button_style: ToolButtonStyle = .both_horiz,
         icon_size: f32 = 16,
         font_size: f32 = 11,
@@ -95,7 +97,7 @@ pub const Toolbar = struct {
                 .id = widget_mod.genWidgetId(),
             },
             .allocator = allocator,
-            .items = .{},
+            .items = .{ .items = &.{}, .capacity = 0 },
             .orientation = opts.orientation,
             .button_style = opts.button_style,
             .icon_size = opts.icon_size,
@@ -107,14 +109,16 @@ pub const Toolbar = struct {
             .border_color = opts.border_color,
             .text_color = opts.text_color,
         };
-        self.base.accessibility = .{ .role = .toolbar };
+        self.base.accessibility = .{ .role = .container };
         return self;
     }
 
     pub fn destroy(self: *Self, allocator: std.mem.Allocator) void {
         for (self.items.items) |item| {
-            if (item.item_type == .custom and item.custom_widget) |w| {
-                w.destroy(allocator);
+            if (item.item_type == .custom) {
+                if (item.custom_widget) |w| {
+                    w.vtable.destroy(w, allocator);
+                }
             }
         }
         self.items.deinit(allocator);
@@ -182,8 +186,10 @@ pub const Toolbar = struct {
             }
         }
 
-        if (item.item_type == .custom and item.custom_widget) |w| {
-            return .{ .width = w.rect.width, .height = w.rect.height };
+        if (item.item_type == .custom) {
+            if (item.custom_widget) |w| {
+                return .{ .width = w.rect.width, .height = w.rect.height };
+            }
         }
 
         var w: f32 = 0;
@@ -532,10 +538,12 @@ pub const Toolbar = struct {
                         }
                     },
                 }
-            } else if (item.item_type == .custom and item.custom_widget) |child| {
-                child.rect.x = cur_x - rx;
-                child.rect.y = cur_y - ry;
-                child.vtable.paint(child, ctx);
+            } else if (item.item_type == .custom) {
+                if (item.custom_widget) |child| {
+                    child.rect.x = cur_x - rx;
+                    child.rect.y = cur_y - ry;
+                    child.vtable.paint(child, ctx);
+                }
             }
 
             if (self.orientation == .horizontal) {
@@ -562,9 +570,11 @@ pub const Toolbar = struct {
 
                 if (hovered) |idx| {
                     const item = &self.items.items[idx];
-                    if (item.item_type == .custom and item.custom_widget) |child| {
-                        const child_event = event.*;
-                        return child.vtable.on_event.?(child, &child_event, ectx);
+                    if (item.item_type == .custom) {
+                        if (item.custom_widget) |child| {
+                            const child_event = event.*;
+                            return child.vtable.on_event.?(child, &child_event, ectx);
+                        }
                     }
                 }
 
@@ -583,8 +593,10 @@ pub const Toolbar = struct {
                                 self.pressed_item = idx;
                                 self.base.markDirty();
                                 return .handled;
-                            } else if (item.item_type == .custom and item.custom_widget) |child| {
-                                return child.vtable.on_event.?(child, event, ectx);
+                            } else if (item.item_type == .custom) {
+                                if (item.custom_widget) |child| {
+                                    return child.vtable.on_event.?(child, event, ectx);
+                                }
                             }
                         }
                     } else if (mb.state == .released) {
@@ -592,9 +604,11 @@ pub const Toolbar = struct {
                             const released = self.findItemAt(w, self.allocator, mx, my);
                             if (released == idx) {
                                 const item = &self.items.items[idx];
-                                if (item.on_click) |cb| {
-                                    cb(item.on_click_ctx);
+                            if (item.on_click) |cb| {
+                                if (item.on_click_ctx) |ctx| {
+                                    cb(ctx);
                                 }
+                            }
                             }
                             self.pressed_item = null;
                             self.base.markDirty();

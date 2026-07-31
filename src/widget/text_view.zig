@@ -5,8 +5,7 @@ const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
-const text_layout = @import("../text/layout.zig");
-const coretext = @import("../text/coretext.zig");
+const styled_text = @import("../text/styled_text.zig");
 const clipboard = @import("../pal/clipboard.zig");
 const context_menu_mod = @import("context_menu.zig");
 const editable_mod = @import("../model/editable.zig");
@@ -154,7 +153,7 @@ pub const TextView = struct {
     padding: f32 = 10.0,
     cursor_visible: bool = true,
     /// 文本水平对齐方式 (默认左对齐)
-    text_align: text_layout.TextAlign = .left,
+    text_align: styled_text.TextAlign = .left,
     /// 是否显示行号
     show_line_numbers: bool = false,
     /// 是否高亮当前行
@@ -181,7 +180,7 @@ pub const TextView = struct {
         placeholder: []const u8 = "",
         font_size: f32 = 14.0,
         on_change: ?*const fn (self: *TextView, text: []const u8) void = null,
-        text_align: text_layout.TextAlign = .left,
+        text_align: styled_text.TextAlign = .left,
         show_line_numbers: bool = false,
         highlight_current_line: bool = false,
         max_length: u32 = 0,
@@ -381,7 +380,7 @@ pub const TextView = struct {
     }
 
     /// 设置文本对齐方式 (左/居中/右; 多行编辑两端对齐按左对齐处理)
-    pub fn setTextAlign(self: *TextView, alignment: text_layout.TextAlign) void {
+    pub fn setTextAlign(self: *TextView, alignment: styled_text.TextAlign) void {
         self.text_align = alignment;
         self.base.markDirty();
     }
@@ -629,12 +628,9 @@ pub const TextView = struct {
         const lh = self.lineHeight();
         const avail_w = rw - self.padding * 2 - lnw;
 
-        var font = coretext.CtFont.create(null, self.font_size, 400) catch return;
-        defer font.destroy();
-
         if (self.text.items.len == 0 and !w.state.focused) {
             if (self.placeholder.len > 0) {
-                self.drawLabel(ctx, &font, self.placeholder, text_x, ry + self.padding, self.placeholder_color);
+                self.drawLabel(ctx, self.placeholder, text_x, ry + self.padding, self.placeholder_color);
             }
             return;
         }
@@ -680,12 +676,12 @@ pub const TextView = struct {
                 const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{li + 1}) catch "?";
                 const nw = @as(f32, @floatFromInt(num_str.len)) * self.charWidth();
                 const num_x = rx + self.padding + lnw - self.padding - nw;
-                self.drawLabel(ctx, &font, num_str, num_x, line_y, self.line_number_color);
+                self.drawLabel(ctx, num_str, num_x, line_y, self.line_number_color);
             }
 
             // 该行对齐偏移
             const line_slice = self.text.items[ls..le];
-            const offset = self.lineAlignOffset(font.measureText(line_slice), avail_w);
+            const offset = self.lineAlignOffset(styled_text.measureText(ctx.allocator, line_slice, .{ .font_size = self.font_size }).width, avail_w);
 
             // 该行选区高亮
             if (has_sel and ls < sel_end and le > sel_start) {
@@ -701,7 +697,7 @@ pub const TextView = struct {
 
             // 该行文本
             if (le > ls) {
-                self.drawLabel(ctx, &font, line_slice, text_x + offset, line_y, self.text_color);
+                self.drawLabel(ctx, line_slice, text_x + offset, line_y, self.text_color);
             }
         }
 
@@ -712,7 +708,7 @@ pub const TextView = struct {
             // 光标所在行的对齐偏移
             const cls = self.lineStartAtIndex(cl);
             const cle = self.lineEnd(cls);
-            const c_offset = self.lineAlignOffset(font.measureText(self.text.items[cls..cle]), avail_w);
+            const c_offset = self.lineAlignOffset(styled_text.measureText(ctx.allocator, self.text.items[cls..cle], .{ .font_size = self.font_size }).width, avail_w);
             const cx = text_x + c_offset + @as(f32, @floatFromInt(cursor_col)) * self.charWidth();
             const cy = ry + self.padding + @as(f32, @floatFromInt(cl)) * lh - self.scroll_y;
             if (cy >= ry and cy + lh <= ry + rh) {
@@ -743,19 +739,16 @@ pub const TextView = struct {
         };
     }
 
-    fn drawLabel(self: *TextView, ctx: *PaintContext, font: *const coretext.CtFont, text: []const u8, x: f32, y: f32, color: math.Color) void {
+    fn drawLabel(self: *TextView, ctx: *PaintContext, text: []const u8, x: f32, y: f32, color: math.Color) void {
         if (text.len == 0) return;
-
-        var tl = text_layout.TextLayout.layout(
+        styled_text.drawText(
+            ctx.renderer,
             ctx.allocator,
-            &ctx.renderer.glyph_atlas.?,
-            ctx.renderer.device,
             text,
-            .{ .font = font, .font_size = self.font_size },
-        ) catch return;
-        defer tl.deinit();
-
-        ctx.renderer.drawText(&tl, x, y, color) catch {};
+            x,
+            y,
+            .{ .font_size = self.font_size, .color = color },
+        );
     }
 
     fn onEvent(w: *Widget, event: *const pal.Event, ectx: *EventContext) EventResult {

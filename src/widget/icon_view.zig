@@ -18,6 +18,7 @@ const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
+const styled_text = @import("../text/styled_text.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
@@ -269,23 +270,23 @@ pub const IconView = struct {
             ctx.renderer.fillRoundedRect(item_rect, self.corner_radius, bg) catch {};
 
             const icon_y = item_y + self.item_padding;
-            ctx.renderer.drawText(
+            styled_text.drawText(
+                ctx.renderer,
+                ctx.allocator,
                 item.icon,
                 item_x + self.item_width / 2,
                 icon_y + (self.icon_size - self.icon_font_size) / 2,
-                self.icon_font_size,
-                self.icon_color,
-                .center,
-            ) catch {};
+                .{ .font_size = self.icon_font_size, .color = self.icon_color, .text_align = .center },
+            );
 
-            ctx.renderer.drawText(
+            styled_text.drawText(
+                ctx.renderer,
+                ctx.allocator,
                 item.label,
                 item_x + self.item_width / 2,
                 item_y + self.item_height - self.item_padding - self.label_font_size,
-                self.label_font_size,
-                self.text_color,
-                .center,
-            ) catch {};
+                .{ .font_size = self.label_font_size, .color = self.text_color, .text_align = .center },
+            );
         }
 
         const total_h = self.totalHeight();
@@ -308,16 +309,16 @@ pub const IconView = struct {
 
         switch (event.*) {
             .mouse_move => |me| {
-                const local_x = me.x - w.rect.x;
-                const local_y = me.y - w.rect.y;
+                const local_x: f32 = @as(f32, @floatFromInt(me.x)) - w.rect.x;
+                const local_y: f32 = @as(f32, @floatFromInt(me.y)) - w.rect.y;
                 self.hovered = self.indexAt(local_x, local_y);
                 self.base.markDirty();
                 return if (self.hovered != null) .handled else .ignored;
             },
             .mouse_button => |mb| {
                 if (mb.button == .left and mb.state == .pressed) {
-                    const local_x = mb.x - w.rect.x;
-                    const local_y = mb.y - w.rect.y;
+                    const local_x: f32 = @as(f32, @floatFromInt(mb.x)) - w.rect.x;
+                    const local_y: f32 = @as(f32, @floatFromInt(mb.y)) - w.rect.y;
                     if (self.indexAt(local_x, local_y)) |idx| {
                         self.selected = idx;
                         self.base.markDirty();
@@ -329,18 +330,10 @@ pub const IconView = struct {
                         return .handled;
                     }
                 }
-                if (mb.button == .left and mb.state == .double_click) {
-                    const local_x = mb.x - w.rect.x;
-                    const local_y = mb.y - w.rect.y;
-                    if (self.indexAt(local_x, local_y)) |idx| {
-                        if (self.on_activate) |cb| cb(self, idx);
-                        return .handled;
-                    }
-                }
                 return .ignored;
             },
             .scroll => |se| {
-                self.scroll_offset += se.dy * 30;
+                self.scroll_offset += se.delta * 30;
                 self.clampScroll();
                 self.base.markDirty();
                 return .handled;
@@ -359,7 +352,7 @@ pub const IconView = struct {
                     .right => new_idx = current + 1,
                     .home => new_idx = 0,
                     .end => new_idx = total - 1,
-                    .return_, .enter => {
+                    .enter => {
                         if (self.on_activate) |cb| cb(self, @intCast(current));
                         return .handled;
                     },

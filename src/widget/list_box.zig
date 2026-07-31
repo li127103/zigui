@@ -401,7 +401,7 @@ pub const ListBox = struct {
                         const local_y = @as(f32, @floatFromInt(mb.y)) - w.absoluteRect().y;
                         const row_idx = self.getRowAtY(local_y);
                         self.selectRow(row_idx);
-                        w.setFocus();
+                        w.state.focused = true;
                         return .handled;
                     } else {
                         if (self.activate_on_single_click) {
@@ -433,7 +433,7 @@ pub const ListBox = struct {
             },
             .key => |key| {
                 if (key.state == .pressed) {
-                    switch (key.keycode) {
+                    switch (key.key) {
                         .up => {
                             if (self.selected_row) |idx| {
                                 var new_idx = idx;
@@ -491,16 +491,6 @@ pub const ListBox = struct {
                             }
                         },
                         else => {},
-                    }
-                }
-                return .ignored;
-            },
-            .double_click => |dc| {
-                if (dc.button == .left) {
-                    const local_y = @as(f32, @floatFromInt(dc.y)) - w.absoluteRect().y;
-                    if (self.getRowAtY(local_y)) |row_idx| {
-                        self.activateRow(row_idx);
-                        return .handled;
                     }
                 }
                 return .ignored;

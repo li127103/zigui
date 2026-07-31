@@ -58,7 +58,7 @@ pub const Scale = struct {
     scale_padding_bottom: f32 = 24.0,
 
     has_origin: bool = true,
-    marks: std.ArrayListUnmanaged(ScaleMark) = .{},
+    marks: std.ArrayListUnmanaged(ScaleMark) = .{ .items = &.{}, .capacity = 0 },
 
     pub fn create(allocator: std.mem.Allocator, opts: struct {
         value: f32 = 0,

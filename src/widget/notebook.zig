@@ -13,8 +13,7 @@ const math = @import("../math.zig");
 const widget_mod = @import("widget.zig");
 const layout_mod = @import("../layout/engine.zig");
 const pal = @import("../pal/pal.zig");
-const text_layout = @import("../text/layout.zig");
-const coretext = @import("../text/coretext.zig");
+const styled_text = @import("../text/styled_text.zig");
 
 const Widget = widget_mod.Widget;
 const PaintContext = widget_mod.PaintContext;
@@ -375,35 +374,16 @@ pub const Notebook = struct {
     }
 
     fn measureTextWithFont(self: *Notebook, ctx: *PaintContext, text: []const u8) f32 {
-        var font = coretext.CtFont.create(null, self.font_size, 500) catch return 60;
-        defer font.destroy();
-        _ = ctx;
-        return font.measureText(text);
+        return styled_text.measureText(ctx.allocator, text, .{ .font_size = self.font_size }).width;
     }
 
     fn drawLabel(self: *Notebook, ctx: *PaintContext, text: []const u8, x: f32, y: f32, color: math.Color) void {
-        var font = coretext.CtFont.create(null, self.font_size, 500) catch return;
-        defer font.destroy();
-
-        var tl = text_layout.TextLayout.layout(
-            ctx.allocator,
-            &ctx.renderer.glyph_atlas.?,
-            ctx.renderer.device,
-            text,
-            .{ .font = &font, .font_size = self.font_size },
-        ) catch return;
-        defer tl.deinit();
-
-        ctx.renderer.drawText(&tl, x, y, color) catch {};
+        styled_text.drawText(ctx.renderer, ctx.allocator, text, x, y, .{ .font_size = self.font_size, .color = color });
     }
 
     fn drawCloseButton(ctx: *PaintContext, bx: f32, by: f32, size: f32, color: math.Color) void {
-        const s: f32 = size * 0.35;
-        const cx = bx + size / 2.0;
-        const cy = by + size / 2.0;
-        // 两条对角线
-        ctx.renderer.strokeLine(cx - s, cy - s, cx + s, cy + s, 1.5, color) catch {};
-        ctx.renderer.strokeLine(cx - s, cy + s, cx + s, cy - s, 1.5, color) catch {};
+        // 关闭按钮: 用圆角边框框表示 (库无 strokeLine 原语)
+        ctx.renderer.strokeRoundedRect(.{ .x = bx, .y = by, .width = size, .height = size }, 4, 1.5, color) catch {};
     }
 
     // ── onEvent（修复 Bug B：转发事件 + measureText 字号一致） ─────────
@@ -440,7 +420,7 @@ pub const Notebook = struct {
 
         // 2. 事件优先派发给活动 tab 的 content（Bug B 修复：之前完全没派发）
         switch (event.*) {
-            .mouse_button, .mouse_move, .mouse_scroll, .key, .text_input, .touch => {
+            .mouse_button, .mouse_move, .scroll, .key, .text_input, .touch => {
                 if (self.active < self.tabs.items.len) {
                     if (self.tabs.items[self.active].content) |content| {
                         if (content.vtable.on_event) |ev_fn| {
@@ -471,7 +451,7 @@ pub const Notebook = struct {
                             .top, .bottom => {
                                 var tab_x: f32 = tab_area_rel.x;
                                 for (self.tabs.items, 0..) |tab, i| {
-                                    const title_w = self.measureTextStatic(tab.title, self.font_size);
+                                    const title_w = self.measureTextStatic(self.allocator, tab.title, self.font_size);
                                     const close_extra: f32 = if (tab.can_close) self.close_btn_size + 8.0 else 0.0;
                                     const tab_w = title_w + self.tab_padding_h * 2 + close_extra;
                                     // 先命中关闭按钮
@@ -498,7 +478,7 @@ pub const Notebook = struct {
                                 for (self.tabs.items, 0..) |tab, i| {
                                     const tab_h = self.tab_height * 0.9;
                                     const tab_w = tab_area_rel.width;
-                                    const title_w = self.measureTextStatic(tab.title, self.font_size);
+                                    const title_w = self.measureTextStatic(self.allocator, tab.title, self.font_size);
                                     const close_extra: f32 = if (tab.can_close) self.close_btn_size + 8.0 else 0.0;
                                     _ = title_w;
                                     _ = close_extra;
@@ -530,10 +510,9 @@ pub const Notebook = struct {
         return .ignored;
     }
 
-    fn measureTextStatic(text: []const u8, font_size: f32) f32 {
-        var font = coretext.CtFont.create(null, font_size, 500) catch return 60;
-        defer font.destroy();
-        return font.measureText(text);
+    fn measureTextStatic(self: *Notebook, allocator: std.mem.Allocator, text: []const u8, font_size: f32) f32 {
+        _ = self;
+        return styled_text.measureText(allocator, text, .{ .font_size = font_size }).width;
     }
 
     fn translateRectEvent(event: *const pal.Event, dx: f32, dy: f32) pal.Event {
@@ -546,14 +525,6 @@ pub const Notebook = struct {
             .mouse_button => |*m| {
                 m.x -= @intFromFloat(dx);
                 m.y -= @intFromFloat(dy);
-            },
-            .mouse_scroll => |*m| {
-                m.x -= @intFromFloat(dx);
-                m.y -= @intFromFloat(dy);
-            },
-            .touch => |*t| {
-                t.x -= @intFromFloat(dx);
-                t.y -= @intFromFloat(dy);
             },
             else => {},
         }

@@ -684,7 +684,7 @@ pub const EmojiChooser = struct {
 
         switch (event.*) {
             .key => |key| {
-                if (key.state == .pressed and key.keycode == .escape) {
+                if (key.state == .pressed and key.key == .escape) {
                     self.hide();
                     return .handled;
                 }

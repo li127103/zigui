@@ -122,6 +122,11 @@ pub const Slider = struct {
         if (self.on_change) |cb| cb(self, self.value);
     }
 
+    pub fn getValue(self: *const Slider) f32 {
+        if (self.adjustment) |a| return a.value;
+        return self.value;
+    }
+
     pub fn normalized(self: *const Slider) f32 {
         if (self.max <= self.min) return 0;
         return (self.value - self.min) / (self.max - self.min);

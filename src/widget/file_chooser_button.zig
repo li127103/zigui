@@ -17,7 +17,7 @@ const EventContext = widget_mod.EventContext;
 const EventResult = widget_mod.EventResult;
 const FileChooser = file_chooser_mod.FileChooser;
 const FileChooserMode = file_chooser_mod.FileChooserMode;
-const FileFilter = file_chooser_mod.FileFilter;
+const FileFilter = @import("../model/file_filter.zig").FileFilter;
 
 pub const FileChooserButton = struct {
     base: Widget,
@@ -29,7 +29,7 @@ pub const FileChooserButton = struct {
     default_label: []const u8 = "选择文件",
     dialog: ?*FileChooser = null,
 
-    filter: ?FileFilter = null,
+    filter: ?*FileFilter = null,
 
     on_file_selected: ?*const fn (self: *FileChooserButton, path: []const u8) void = null,
 
@@ -50,7 +50,7 @@ pub const FileChooserButton = struct {
         mode: FileChooserMode = .open,
         title: []const u8 = "选择文件",
         default_label: []const u8 = "选择文件",
-        filter: ?FileFilter = null,
+        filter: ?*FileFilter = null,
         on_file_selected: ?*const fn (self: *FileChooserButton, path: []const u8) void = null,
         bg_color: math.Color = math.Color.hex(0x334155FF),
         bg_hover: math.Color = math.Color.hex(0x475569FF),
@@ -240,7 +240,7 @@ pub const FileChooserButton = struct {
 
         if (self.dialog) |dlg| {
             if (dlg.visible) {
-                dlg.paintTree(ctx);
+                dlg.base.paintTree(ctx);
             }
         }
     }
@@ -288,7 +288,7 @@ pub const FileChooserButton = struct {
 
         if (self.dialog) |dlg| {
             if (dlg.visible) {
-                const result = dlg.dispatchEvent(event, ectx);
+                const result = dlg.base.dispatchEvent(event, ectx);
                 if (result == .handled) return .handled;
             }
         }
@@ -318,12 +318,12 @@ pub const FileChooserButton = struct {
             },
             .key => |key| {
                 if (key.state == .pressed) {
-                    if (key.keycode == .space or key.keycode == .enter or key.keycode == .kp_enter) {
+                    if (key.key == .space or key.key == .enter or key.key == .kp_enter) {
                         const dlg = self.ensureDialog() catch return .handled;
                         dlg.show();
                         return .handled;
                     }
-                    if (key.keycode == .escape) {
+                    if (key.key == .escape) {
                         if (self.dialog) |dlg| {
                             if (dlg.visible) {
                                 dlg.visible = false;

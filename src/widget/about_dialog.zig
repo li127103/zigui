@@ -617,7 +617,7 @@ pub const AboutDialog = struct {
             },
             .key => |key| {
                 if (key.state == .pressed) {
-                    if (key.keycode == .escape) {
+                    if (key.key == .escape) {
                         if (self.show_license) {
                             self.show_license = false;
                             self.scroll_offset = 0;

@@ -92,9 +92,9 @@ pub const ColorDialogButton = struct {
 
     fn toHex(self: *Self) [8]u8 {
         const c = self.color;
-        const r: u8 = if (c.r > 255) 255 else @intFromFloat(c.r);
-        const g: u8 = if (c.g > 255) 255 else @intFromFloat(c.g);
-        const b: u8 = if (c.b > 255) 255 else @intFromFloat(c.b);
+        const r: u8 = if (c.r > 255) 255 else c.r;
+        const g: u8 = if (c.g > 255) 255 else c.g;
+        const b: u8 = if (c.b > 255) 255 else c.b;
         const hex_chars = "0123456789ABCDEF";
         var buf: [8]u8 = undefined;
         buf[0] = '#';
@@ -183,7 +183,6 @@ pub const ColorDialogButton = struct {
             styled_text.drawText(ctx.renderer, ctx.allocator, hex_str[0..7], rx + self.size, ty, .{
                 .font_size = 13,
                 .color = self.text_color,
-                .font_family = "monospace",
             });
         }
     }

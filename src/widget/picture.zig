@@ -30,7 +30,7 @@ pub const Picture = struct {
     explicit_w: ?f32,
     explicit_h: ?f32,
     /// 图片未加载时显示的备用图标
-    fallback_icon: icons_mod.IconName = .image,
+    fallback_icon: icons_mod.IconName = .question,
     /// 保持宽高比
     keep_aspect_ratio: bool = true,
     /// 允许收缩到比原始尺寸更小
@@ -53,7 +53,7 @@ pub const Picture = struct {
         tint: math.Color = math.Color.hex(0xFFFFFFFF),
         width: ?f32 = null,
         height: ?f32 = null,
-        fallback_icon: icons_mod.IconName = .image,
+        fallback_icon: icons_mod.IconName = .question,
         keep_aspect_ratio: bool = true,
         can_shrink: bool = true,
         fallback_icon_size: f32 = 48,
@@ -95,7 +95,8 @@ pub const Picture = struct {
 
     /// 从文件路径加载（GTK4 风格 API）
     pub fn newFromFile(allocator: std.mem.Allocator, file_path: []const u8) !*Picture {
-        const png_bytes = @import("std").fs.cwd().readFileAlloc(allocator, file_path, 10 * 1024 * 1024) catch {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const png_bytes = std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, .limited(10 * 1024 * 1024)) catch {
             // 加载失败返回带备用图的 Picture
             return try create(allocator, .{});
         };
@@ -134,7 +135,7 @@ pub const Picture = struct {
 
     /// 是否有有效图片
     pub fn hasImage(self: *const Self) bool {
-        return self.image.texture != null or (self.image.surface != null and self.image.surface.?.width > 0);
+        return self.image.texture != null or self.image.png_data.len > 0;
     }
 
     // ── VTable 实现 ──────────────────────────────────────────────────────────
@@ -182,24 +183,25 @@ pub const Picture = struct {
             return .{ .width = w_out, .height = h_out };
         }
 
-        const size = self.image.getNaturalSize();
+        const nw: f32 = if (self.image.tex_width > 0) @as(f32, @floatFromInt(self.image.tex_width)) else 256;
+        const nh: f32 = if (self.image.tex_height > 0) @as(f32, @floatFromInt(self.image.tex_height)) else 256;
 
         // 计算输出尺寸
-        var w_out = @as(f32, @floatFromInt(size.width));
-        var h_out = @as(f32, @floatFromInt(size.height));
+        var w_out = nw;
+        var h_out = nh;
 
         if (self.explicit_w) |ew| {
             w_out = ew;
             if (self.keep_aspect_ratio) {
-                const r = ew / @as(f32, @floatFromInt(size.width));
-                h_out = @as(f32, @floatFromInt(size.height)) * r;
+                const r = ew / nw;
+                h_out = nh * r;
             }
         }
         if (self.explicit_h) |eh| {
             h_out = eh;
             if (self.keep_aspect_ratio and self.explicit_w == null) {
-                const r = eh / @as(f32, @floatFromInt(size.height));
-                w_out = @as(f32, @floatFromInt(size.width)) * r;
+                const r = eh / nh;
+                w_out = nw * r;
             }
         }
 
@@ -233,15 +235,33 @@ pub const Picture = struct {
         const ry = ctx.offset_y + w.rect.y;
 
         if (self.hasImage()) {
-            background_mod.drawImageWithTint(
-                ctx.renderer,
-                rx,
-                ry,
-                w.rect.width,
-                w.rect.height,
-                &self.image,
-                self.tint,
-            ) catch {};
+            self.image.ensureTexture(ctx.renderer) catch return;
+            const tex = self.image.texture orelse return;
+            const iw: f32 = @floatFromInt(self.image.tex_width);
+            const ih: f32 = @floatFromInt(self.image.tex_height);
+            if (iw <= 0 or ih <= 0) return;
+
+            const dst = math.Rect(f32){ .x = rx, .y = ry, .width = w.rect.width, .height = w.rect.height };
+
+            // 平铺模式单独处理
+            if (self.image.sizing == .tile) {
+                var ty: f32 = 0;
+                while (ty < dst.height) : (ty += ih) {
+                    var tx: f32 = 0;
+                    while (tx < dst.width) : (tx += iw) {
+                        const tw = @min(iw, dst.width - tx);
+                        const th = @min(ih, dst.height - ty);
+                        ctx.renderer.drawImageImmediate(tex,
+                            .{ .x = dst.x + tx, .y = dst.y + ty, .width = tw, .height = th },
+                            .{ .x = 0, .y = 0, .width = tw / iw, .height = th / ih },
+                            self.tint);
+                    }
+                }
+                return;
+            }
+
+            const p = background_mod.placement(iw, ih, dst, self.image.sizing) orelse return;
+            ctx.renderer.drawImageImmediate(tex, p.dst, p.src, self.tint);
         } else {
             // 绘制备用背景
             ctx.renderer.fillRoundedRect(

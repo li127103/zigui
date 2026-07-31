@@ -441,6 +441,10 @@ pub const Renderer2D = struct {
     }
 
     /// 描边圆角矩形边框
+    pub fn strokeRect(self: *Renderer2D, rect: math.Rect(f32), border_width: f32, color: math.Color) !void {
+        return self.strokeRoundedRect(rect, 0, border_width, color);
+    }
+
     pub fn strokeRoundedRect(self: *Renderer2D, rect: math.Rect(f32), radius: f32, border_width: f32, color: math.Color) !void {
         if (border_width <= 0 or rect.width <= 0 or rect.height <= 0) return;
 

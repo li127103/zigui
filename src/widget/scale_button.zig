@@ -97,9 +97,6 @@ pub const ScaleButton = struct {
         self.base.accessibility = .{
             .role = .button,
             .label = "scale",
-            .value = @floatFromInt(self.value),
-            .min_value = @floatFromInt(self.min_value),
-            .max_value = @floatFromInt(self.max_value),
         };
         self.base.cursor = .pointing_hand;
 
@@ -108,10 +105,6 @@ pub const ScaleButton = struct {
             .max = opts.max_value,
             .value = opts.value,
             .step = opts.step,
-            .orientation = .vertical,
-            .width = .{ .px = 24 },
-            .height = .{ .px = 120 },
-            .on_value_changed = null,
         });
         self.slider = slider;
 
@@ -120,7 +113,7 @@ pub const ScaleButton = struct {
 
     pub fn destroy(self: *Self, allocator: std.mem.Allocator) void {
         if (self.slider) |s| {
-            s.vtable.destroy(s, allocator);
+            s.base.vtable.destroy(&s.base, allocator);
         }
         self.base.background.deinit(allocator);
         self.base.children.deinit(allocator);
@@ -139,7 +132,6 @@ pub const ScaleButton = struct {
                 s.setValue(clamped);
             }
             self.base.markDirty();
-            self.base.accessibility.value = @floatFromInt(clamped);
             if (self.on_value_changed) |cb| {
                 cb(self, clamped);
             }
@@ -206,11 +198,11 @@ pub const ScaleButton = struct {
             ) catch {};
 
             if (self.slider) |s| {
-                s.rect.x = px + self.popup_padding - ctx.offset_x - w.rect.x;
-                s.rect.y = py + self.popup_padding - ctx.offset_y - w.rect.y;
-                s.rect.width = self.popup_width - self.popup_padding * 2;
-                s.rect.height = self.popup_height - self.popup_padding * 2;
-                s.vtable.paint(s, ctx);
+                s.base.rect.x = px + self.popup_padding - ctx.offset_x - w.rect.x;
+                s.base.rect.y = py + self.popup_padding - ctx.offset_y - w.rect.y;
+                s.base.rect.width = self.popup_width - self.popup_padding * 2;
+                s.base.rect.height = self.popup_height - self.popup_padding * 2;
+                s.base.vtable.paint(&s.base, ctx);
             }
         }
     }
@@ -225,7 +217,7 @@ pub const ScaleButton = struct {
 
                 const in_button = mx >= 0 and mx < self.size and my >= 0 and my < self.size;
 
-                if (self.popup_open and self.slider) |s| {
+                if (self.popup_open and self.slider != null) { const s = self.slider.?;
                     const px = (self.size - self.popup_width) / 2;
                     const py = -self.popup_height - 8;
                     const slider_x = px + self.popup_padding;
@@ -234,8 +226,8 @@ pub const ScaleButton = struct {
                     const local_sx = mx - slider_x;
                     const local_sy = my - slider_y;
 
-                    if (local_sx >= 0 and local_sx < s.rect.width and
-                        local_sy >= 0 and local_sy < s.rect.height)
+                    if (local_sx >= 0 and local_sx < s.base.rect.width and
+                        local_sy >= 0 and local_sy < s.base.rect.height)
                     {
                         const slider_event = pal.Event{
                             .mouse_move = .{
@@ -244,7 +236,7 @@ pub const ScaleButton = struct {
                                 .window_id = mm.window_id,
                             },
                         };
-                        const result = s.vtable.on_event.?(s, &slider_event, ectx);
+                        const result = s.base.vtable.on_event.?(&s.base, &slider_event, ectx);
                         if (result == .handled) {
                             self.value = s.getValue();
                             if (self.on_value_changed) |cb| {
@@ -270,7 +262,7 @@ pub const ScaleButton = struct {
 
                     const in_button = mx >= 0 and mx < self.size and my >= 0 and my < self.size;
 
-                    if (self.popup_open and self.slider) |s| {
+                    if (self.popup_open and self.slider != null) { const s = self.slider.?;
                         const px = (self.size - self.popup_width) / 2;
                         const py = -self.popup_height - 8;
                         const slider_x = px + self.popup_padding;
@@ -279,8 +271,8 @@ pub const ScaleButton = struct {
                         const local_sx = mx - slider_x;
                         const local_sy = my - slider_y;
 
-                        if (local_sx >= 0 and local_sx < s.rect.width and
-                            local_sy >= 0 and local_sy < s.rect.height)
+                        if (local_sx >= 0 and local_sx < s.base.rect.width and
+                            local_sy >= 0 and local_sy < s.base.rect.height)
                         {
                             const slider_event = pal.Event{
                                 .mouse_button = .{
@@ -291,7 +283,7 @@ pub const ScaleButton = struct {
                                     .window_id = mb.window_id,
                                 },
                             };
-                            const result = s.vtable.on_event.?(s, &slider_event, ectx);
+                            const result = s.base.vtable.on_event.?(&s.base, &slider_event, ectx);
                             if (result == .handled) {
                                 self.value = s.getValue();
                                 if (self.on_value_changed) |cb| {

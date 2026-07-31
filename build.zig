@@ -57,6 +57,20 @@ pub fn build(b: *std.Build) void {
         .{ .name = "multi-window", .path = "examples/multi_window.zig" },
         .{ .name = "input", .path = "examples/input.zig" },
         .{ .name = "text", .path = "examples/text.zig" },
+        .{ .name = "gallery-buttons", .path = "examples/gallery_buttons.zig" },
+        .{ .name = "gallery-display", .path = "examples/gallery_display.zig" },
+        .{ .name = "gallery-inputs", .path = "examples/gallery_inputs.zig" },
+        .{ .name = "gallery-lists", .path = "examples/gallery_lists.zig" },
+        .{ .name = "gallery-layout", .path = "examples/gallery_layout.zig" },
+        .{ .name = "gallery-containers", .path = "examples/gallery_containers.zig" },
+        .{ .name = "gallery-menus", .path = "examples/gallery_menus.zig" },
+        .{ .name = "gallery-dialogs", .path = "examples/gallery_dialogs.zig" },
+        .{ .name = "gallery-canvas", .path = "examples/gallery_canvas.zig" },
+        .{ .name = "gallery-advanced", .path = "examples/gallery_advanced.zig" },
+        .{ .name = "gallery-data", .path = "examples/gallery_data.zig" },
+        .{ .name = "gallery-choosers", .path = "examples/gallery_choosers.zig" },
+        .{ .name = "gallery-navigation", .path = "examples/gallery_navigation.zig" },
+        .{ .name = "gallery-grid", .path = "examples/gallery_grid.zig" },
     };
     for (examples) |ex| {
         const exe = b.addExecutable(.{

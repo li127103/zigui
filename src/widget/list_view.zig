@@ -80,6 +80,8 @@ pub const ListView = struct {
 
     pub fn destroy(self: *ListView, allocator: std.mem.Allocator) void {
         self.base.background.deinit(allocator);
+        // items 中的字符串由 ListView 拥有 (addItem 会 dupe), 释放以免泄漏
+        for (self.items.items) |it| allocator.free(it);
         self.items.deinit(allocator);
         // 清理 listitem cache (teardown)
         var cache_it = self._listitem_cache.iterator();
@@ -93,11 +95,14 @@ pub const ListView = struct {
     }
 
     pub fn addItem(self: *ListView, item: []const u8) !void {
-        try self.items.append(self.allocator, item);
+        // 复制一份, ListView 拥有 items 中字符串的所有权 (调用方可靠释放)
+        const owned = try self.allocator.dupe(u8, item);
+        try self.items.append(self.allocator, owned);
         self.base.markDirty();
     }
 
     pub fn clearItems(self: *ListView) void {
+        for (self.items.items) |it| self.allocator.free(it);
         self.items.clearRetainingCapacity();
         self.selected = null;
         self.hovered = null;

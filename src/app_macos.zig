@@ -491,16 +491,11 @@ pub const App = struct {
                 continue;
             }
 
-            // 4. 开始帧 (有脏区走离屏画布 + scissor 路径, 限制重绘像素)
-            const fb_size = if (dirty_bounds) |b|
-                self.metal_device.beginFrameDirty(
-                    @intFromFloat(@max(0.0, b.x)),
-                    @intFromFloat(@max(0.0, b.y)),
-                    @intFromFloat(@max(0.0, b.width)),
-                    @intFromFloat(@max(0.0, b.height)),
-                )
-            else
-                self.metal_device.beginFrame();
+            // 4. 开始帧
+            // 临时规避: 打字时走脏矩形离屏画布 + blit 路径 (beginFrameDirty) 会崩溃
+            // (startup 走 beginFrame 直绘正常)。先始终整帧直绘, 待 lldb 回溯定位
+            // beginFrameDirty/endFrame 离屏 blit 的真正根因后再恢复脏矩形优化。
+            const fb_size = self.metal_device.beginFrame();
             const size = fb_size orelse continue;
             self.fb_width = size[0];
             self.fb_height = size[1];

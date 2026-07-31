@@ -72,8 +72,14 @@ pub const TextLayout = struct {
         const line_height = metrics.line_height * opts.line_height_scale;
 
         // Shape 整段文本
-        var shaped_buf: [4096]coretext.ShapedGlyph = undefined;
-        const glyph_count = opts.font.shapeText(text, &shaped_buf);
+        // 注意: 不能把 4096*ShapedGlyph(40B)=160KB 的缓冲放在栈上 —— 在 macOS 上
+        // drawFrame 由 Cocoa/Metal 绘制回调触发, 此时运行栈已较深, 巨大栈帧会触发
+        // zig_probe_stack 栈探测并因越过线程栈边界而 SEGV。改为堆分配, 大小按文本
+        // 长度估算 (glyph 数 ≤ code point 数 ≤ 字节数), 并封顶 4096 以保持原截断行为。
+        const shape_cap = @min(text.len + 1, 4096);
+        const shaped_buf = try allocator.alloc(coretext.ShapedGlyph, shape_cap);
+        defer allocator.free(shaped_buf);
+        const glyph_count = opts.font.shapeText(text, shaped_buf);
         if (glyph_count == 0) return result;
 
         const shaped = shaped_buf[0..glyph_count];
